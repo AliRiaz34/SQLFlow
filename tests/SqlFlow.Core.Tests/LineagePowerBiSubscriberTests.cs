@@ -284,9 +284,84 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.Empty(subscriber.Pages);
         Assert.Contains(report.Warnings, w =>
             w.Contains("reports/absent.pbix", StringComparison.Ordinal)
-            && w.Contains("does not exist", StringComparison.Ordinal));
+            && w.Contains("does not exist as either a file or a directory", StringComparison.Ordinal));
 
         // The producing side of the graph is unaffected by one unreadable report.
+        Assert.Contains(report.Edges, e =>
+            e.Flow == "sales_02_ing" && e.Relation == LineageRelation.Writes);
+    }
+
+    [Fact]
+    public void DirectoryPbix_ExtractsEveryReportUnderOneSubscriber()
+    {
+        // A workspace of two published reports, both from the same template (so both a page named
+        // "ReportSection1" and a visual titled "Revenue by Region" appear TWICE): the collision case a
+        // directory of reports routinely produces in practice.
+        Write("10_ing.yaml", Ingestion);
+        WritePbix("reports/north.pbix");
+        WritePbix("reports/south.pbix");
+        Write("subscribers.yaml", Subscribers("reports"));
+
+        var subscriber = Assert.Single(Build().Subscribers);
+
+        // Both files' pages are kept, each correctly tagged with which report it came from rather than one
+        // silently overwriting the other.
+        Assert.Equal(2, subscriber.Pages.Count);
+        Assert.Equal(
+            ["north.pbix", "south.pbix"],
+            subscriber.Pages.Select(p => p.ReportFile).OrderBy(f => f, StringComparer.Ordinal));
+        Assert.All(subscriber.Pages, p => Assert.Equal("Revenue", p.DisplayName));
+
+        // Once more than one file is in play, the report file joins the query name, so the two files'
+        // identically titled visuals do not collide into one synthesized query.
+        Assert.Equal(
+            ["north.pbix / Revenue / Revenue by Region", "south.pbix / Revenue / Revenue by Region"],
+            subscriber.Queries.Select(q => q.Name).OrderBy(n => n, StringComparer.Ordinal));
+
+        // Each query independently resolved its object: neither was silently dropped by the collision, even
+        // though both name the same model entity.
+        Assert.All(subscriber.Queries, q => Assert.Equal(
+            NodeKey.For(Ods, null, null, "Sales"), Assert.Single(q.ObjectKeys)));
+
+        // Both files reading the same entity is genuinely one fact about the graph ("this subscriber reads
+        // Sales"), not two, so the edges collapse to one exactly as a subscriber reading the same table twice
+        // through two hand-written queries would.
+        var subscriberKey = NodeKey.For(ServerIdentity.Subscriber, null, null, "Revenue_Report");
+        var report = Build();
+        Assert.Single(report.Edges, e =>
+            e.Flow is null && e.ViaModule == subscriberKey && e.Relation == LineageRelation.Reads);
+    }
+
+    [Fact]
+    public void DirectoryPbix_WithOneReport_KeepsSingleFileQueryNaming()
+    {
+        // With only one file in the directory there is no collision to guard against, so the query name stays
+        // exactly what a subscriber declaring that file directly would produce.
+        Write("10_ing.yaml", Ingestion);
+        WritePbix("reports/only.pbix");
+        Write("subscribers.yaml", Subscribers("reports"));
+
+        var subscriber = Assert.Single(Build().Subscribers);
+
+        Assert.Equal("only.pbix", Assert.Single(subscriber.Pages).ReportFile);
+        Assert.Equal("Revenue / Revenue by Region", Assert.Single(subscriber.Queries).Name);
+    }
+
+    [Fact]
+    public void EmptyDirectory_IsWarned_AndLeavesTheRestOfLineageIntact()
+    {
+        Write("10_ing.yaml", Ingestion);
+        Directory.CreateDirectory(Path.Combine(_root, "reports"));
+        Write("subscribers.yaml", Subscribers("reports"));
+
+        var report = Build();
+
+        var subscriber = Assert.Single(report.Subscribers);
+        Assert.Empty(subscriber.Pages);
+        Assert.Contains(report.Warnings, w =>
+            w.Contains("reports", StringComparison.Ordinal)
+            && w.Contains("containing no .pbix files", StringComparison.Ordinal));
+
         Assert.Contains(report.Edges, e =>
             e.Flow == "sales_02_ing" && e.Relation == LineageRelation.Writes);
     }

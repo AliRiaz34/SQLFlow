@@ -186,7 +186,7 @@ public sealed class FlowSetCollector
     }
 
     /// <summary>Parses one subscriber's queries into read facts plus the per-query evidence the catalog shows.</summary>
-    private CollectedSubscriber CollectSubscriber(
+    private static CollectedSubscriber CollectSubscriber(
         CollectionResult result,
         Core.Subscribers.DataSubscriber subscriber,
         IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
@@ -260,16 +260,24 @@ public sealed class FlowSetCollector
     }
 
     /// <summary>
-    /// Reads the report file a subscriber declares (<c>pbix:</c>), returning the questions its visuals ask as
-    /// queries plus the report's page/visual/field structure. A report records which questions were already
+    /// Reads the report(s) a subscriber declares (<c>pbix:</c>), returning the questions their visuals ask as
+    /// queries plus each report's page/visual/field structure. A report records which questions were already
     /// worth asking and how they were answered, so extracting it beats asking a person to transcribe every
     /// visual; the structure additionally keeps each field's ROLE, which the SQL alone cannot express.
     /// <para>
+    /// <c>pbix:</c> names either one <c>.pbix</c> file or a DIRECTORY of them. A directory is a workspace of
+    /// related reports (the common case: a team's folder holding a handful of published .pbix files), and
+    /// every report found in it is extracted under this SAME subscriber, sharing its declared type/owner/server
+    /// rather than needing one hand-written subscriber entry per file. Every extracted page records which file
+    /// it came from, since two different reports routinely both have a "Page 1".
+    /// </para>
+    /// <para>
     /// Every failure is a warning, never a throw: an unreadable or absent report must leave the rest of the
-    /// estate's lineage intact, exactly as an unparseable flow document does.
+    /// estate's lineage intact, exactly as an unparseable flow document does. One unreadable file in a
+    /// directory is likewise just a warning naming that file; its siblings still extract.
     /// </para>
     /// </summary>
-    private ExtractedReport ExtractReport(
+    private static ExtractedReport ExtractReport(
         CollectionResult result,
         Core.Subscribers.DataSubscriber subscriber,
         IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
@@ -294,15 +302,66 @@ public sealed class FlowSetCollector
             return ExtractedReport.Empty;
         }
 
-        var path = Path.GetFullPath(Path.Combine(root, subscriber.Pbix));
-        if (!File.Exists(path))
+        var declaredPath = Path.GetFullPath(Path.Combine(root, subscriber.Pbix));
+        List<(string ReportFile, string FullPath)> reportFiles;
+
+        if (Directory.Exists(declaredPath))
+        {
+            reportFiles = Directory.EnumerateFiles(declaredPath, "*.pbix", SearchOption.AllDirectories)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .Select(p => (Path.GetRelativePath(declaredPath, p).Replace('\\', '/'), p))
+                .ToList();
+
+            if (reportFiles.Count == 0)
+            {
+                result.Warnings.Add(
+                    $"{file}: subscriber '{subscriber.Name}' declares 'pbix: {subscriber.Pbix}', a directory "
+                    + "containing no .pbix files; no report was extracted.");
+                return ExtractedReport.Empty;
+            }
+        }
+        else if (File.Exists(declaredPath))
+        {
+            reportFiles = [(Path.GetFileName(declaredPath), declaredPath)];
+        }
+        else
         {
             result.Warnings.Add(
                 $"{file}: subscriber '{subscriber.Name}' declares 'pbix: {subscriber.Pbix}', which does not "
-                + "exist; the report was not extracted.");
+                + "exist as either a file or a directory; the report was not extracted.");
             return ExtractedReport.Empty;
         }
 
+        var queries = new List<Core.Subscribers.SubscriberQuery>();
+        var pages = new List<Core.Lineage.LineageSubscriberPage>();
+
+        // More than one report can legitimately share a page's display name and a visual's title (two files in
+        // the same directory both starting from the same report template, say), so a query name that would be
+        // unambiguous for a single file is folded together with its report file once there is more than one.
+        var qualifyWithReportFile = reportFiles.Count > 1;
+
+        foreach (var (reportFile, path) in reportFiles)
+        {
+            ExtractOneReport(result, subscriber, file, server, reportFile, path, qualifyWithReportFile, queries, pages);
+        }
+
+        return new ExtractedReport(queries, pages);
+    }
+
+    /// <summary>Extracts one <c>.pbix</c> file's pages/visuals into <paramref name="pages"/> and its visuals'
+    /// synthesized queries into <paramref name="queries"/>, both accumulated across every file when the
+    /// subscriber's <c>pbix:</c> names a directory. See <see cref="ExtractReport"/> for the directory case.</summary>
+    private static void ExtractOneReport(
+        CollectionResult result,
+        Core.Subscribers.DataSubscriber subscriber,
+        string file,
+        string server,
+        string reportFile,
+        string path,
+        bool qualifyWithReportFile,
+        List<Core.Subscribers.SubscriberQuery> queries,
+        List<Core.Lineage.LineageSubscriberPage> pages)
+    {
         PbixReadResult read;
         try
         {
@@ -312,18 +371,15 @@ public sealed class FlowSetCollector
                                        or InvalidDataException or JsonException)
         {
             result.Warnings.Add(
-                $"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}' could not be read "
+                $"{file}: subscriber '{subscriber.Name}' report '{reportFile}' could not be read "
                 + $"({ex.Message}); the report was not extracted.");
-            return ExtractedReport.Empty;
+            return;
         }
 
         foreach (var warning in read.Warnings)
         {
-            result.Warnings.Add($"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}': {warning}");
+            result.Warnings.Add($"{file}: subscriber '{subscriber.Name}' report '{reportFile}': {warning}");
         }
-
-        var queries = new List<Core.Subscribers.SubscriberQuery>();
-        var pages = new List<Core.Lineage.LineageSubscriberPage>(read.Layout.Pages.Count);
 
         foreach (var page in read.Layout.Pages)
         {
@@ -331,10 +387,15 @@ public sealed class FlowSetCollector
             foreach (var visual in page.Visuals)
             {
                 // The query's name identifies the visual it came from, so the catalog can say WHICH chart links
-                // a report to a table, and so the structure below can point back at its own SQL.
-                var queryName = visual.Title is { Length: > 0 } title
-                    ? $"{page.DisplayName} / {title}"
-                    : $"{page.DisplayName} / {visual.VisualType} #{visual.Ordinal}";
+                // a report to a table, and so the structure below can point back at its own SQL. Once more than
+                // one report file is in play the report file itself joins the name, so two files' identically
+                // titled visuals do not collide into one synthesized query.
+                var visualLabel = visual.Title is { Length: > 0 } title
+                    ? title
+                    : $"{visual.VisualType} #{visual.Ordinal}";
+                var queryName = qualifyWithReportFile
+                    ? $"{reportFile} / {page.DisplayName} / {visualLabel}"
+                    : $"{page.DisplayName} / {visualLabel}";
 
                 string sql;
                 try
@@ -344,7 +405,7 @@ public sealed class FlowSetCollector
                 catch (PbixUnsupportedExpressionException ex)
                 {
                     result.Warnings.Add(
-                        $"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}' visual "
+                        $"{file}: subscriber '{subscriber.Name}' report '{reportFile}' visual "
                         + $"'{queryName}' could not be rendered as a query ({ex.Message}); it was skipped.");
                     continue;
                 }
@@ -377,14 +438,13 @@ public sealed class FlowSetCollector
 
             pages.Add(new Core.Lineage.LineageSubscriberPage
             {
+                ReportFile = reportFile,
                 Name = page.Name,
                 DisplayName = page.DisplayName,
                 Ordinal = page.Ordinal,
                 Visuals = visuals,
             });
         }
-
-        return new ExtractedReport(queries, pages);
     }
 
     /// <summary>What reading a subscriber's report produced: its visuals as queries, and its own structure.</summary>

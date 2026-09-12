@@ -319,9 +319,11 @@ public sealed class CatalogDbContext : DbContext
             entity.ToTable("SubscriberReportPage");
             entity.HasKey(p => p.Id);
             entity.Property(p => p.SubscriberKey).HasMaxLength(900).IsRequired();
-            // Room for the subscriber key plus an ordinal suffix, so a page key is never truncated into a
-            // collision with a sibling page's.
-            entity.Property(p => p.PageKey).HasMaxLength(912).IsRequired();
+            // Room for the subscriber key plus the report file name and an ordinal suffix, so a page key is
+            // never truncated into a collision with a sibling page's, including a sibling from another file
+            // in the same directory.
+            entity.Property(p => p.PageKey).HasMaxLength(1180).IsRequired();
+            entity.Property(p => p.ReportFile).HasMaxLength(260).IsRequired();
             entity.Property(p => p.Name).HasMaxLength(250).IsRequired();
             entity.Property(p => p.DisplayName).HasMaxLength(250).IsRequired();
             entity.HasIndex(p => p.SubscriberKey);
@@ -332,8 +334,8 @@ public sealed class CatalogDbContext : DbContext
         {
             entity.ToTable("SubscriberReportVisual");
             entity.HasKey(v => v.Id);
-            entity.Property(v => v.PageKey).HasMaxLength(912).IsRequired();
-            entity.Property(v => v.VisualKey).HasMaxLength(924).IsRequired();
+            entity.Property(v => v.PageKey).HasMaxLength(1180).IsRequired();
+            entity.Property(v => v.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(v => v.VisualType).HasMaxLength(100).IsRequired();
             entity.Property(v => v.Title).HasMaxLength(400);
             entity.HasIndex(v => v.PageKey);
@@ -344,7 +346,7 @@ public sealed class CatalogDbContext : DbContext
         {
             entity.ToTable("SubscriberReportField");
             entity.HasKey(f => f.Id);
-            entity.Property(f => f.VisualKey).HasMaxLength(924).IsRequired();
+            entity.Property(f => f.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(f => f.Role).HasMaxLength(100).IsRequired();
             entity.Property(f => f.QueryRef).HasMaxLength(400).IsRequired();
             entity.Property(f => f.TableName).HasMaxLength(250).IsRequired();

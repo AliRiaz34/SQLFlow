@@ -692,9 +692,17 @@ public class CatalogSubscriberReportPage
     /// <summary>The owning subscriber's <see cref="CatalogSubscriber.ObjectKey"/>.</summary>
     public string SubscriberKey { get; set; } = string.Empty;
 
-    /// <summary>This page's key within the estate: the subscriber's key and this page's ordinal, joined with
-    /// '#'. The value a visual carries as its <see cref="CatalogSubscriberReportVisual.PageKey"/>.</summary>
+    /// <summary>This page's key within the estate: the subscriber's key, its report file, and this page's
+    /// ordinal, joined with '#'. The value a visual carries as its
+    /// <see cref="CatalogSubscriberReportVisual.PageKey"/>. The report file is part of the key, not just a
+    /// display column, because a subscriber backed by a directory of reports commonly has two files that each
+    /// declare a "Page 1"; without the file in the key those two pages would collide onto the same row.</summary>
     public string PageKey { get; set; } = string.Empty;
+
+    /// <summary>The report file this page came from: the <c>.pbix</c> file name when the subscriber's
+    /// <c>pbix:</c> names one file directly, or that file's name relative to the declared directory when it
+    /// names a folder of reports.</summary>
+    public string ReportFile { get; set; } = string.Empty;
 
     /// <summary>The page's position within its report, 1-based: the order PowerBI lists it in.</summary>
     public int Ordinal { get; set; }

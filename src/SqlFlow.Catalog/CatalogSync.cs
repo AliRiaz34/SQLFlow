@@ -1459,12 +1459,16 @@ public sealed class CatalogSync
             // while these rows are staged, and a derived key needs no round-trip to link them.
             foreach (var page in subscriber.Pages)
             {
-                var pageKey = $"{subscriber.ObjectKey}#{page.Ordinal}";
+                // The report file is part of the key, not just a stored column: a subscriber backed by a
+                // directory of reports commonly has two files that each declare a "Page 1", and without the
+                // file in the key those two pages would collide onto the same row.
+                var pageKey = $"{subscriber.ObjectKey}#{page.ReportFile}#{page.Ordinal}";
                 context.SubscriberReportPages.Add(new CatalogSubscriberReportPage
                 {
                     RepoId = repoId,
                     SubscriberKey = subscriber.ObjectKey,
                     PageKey = pageKey,
+                    ReportFile = page.ReportFile,
                     Ordinal = page.Ordinal,
                     Name = page.Name,
                     DisplayName = page.DisplayName,

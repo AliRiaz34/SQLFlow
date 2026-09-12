@@ -123,6 +123,12 @@ public sealed record LineageSubscriberNode
 /// </summary>
 public sealed record LineageSubscriberPage
 {
+    /// <summary>The report file this page came from, relative to the subscriber's declared <c>pbix:</c> path.
+    /// A subscriber backed by one file has every page carry that file's own name; a subscriber backed by a
+    /// DIRECTORY of reports has each page carry which of the directory's files it belongs to, since two
+    /// different reports routinely both have a "Page 1" and the pages must not be confused in the catalog.</summary>
+    public required string ReportFile { get; init; }
+
     /// <summary>The page's internal identifier, as the report file spells it.</summary>
     public required string Name { get; init; }
 
