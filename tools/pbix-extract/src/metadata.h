@@ -23,7 +23,6 @@ typedef struct {
     char *table;
     char *name;
     char *expression;   /* DAX */
-    char *display_folder; /* may be NULL */
     char *description;    /* may be NULL */
 } Measure;
 
@@ -39,7 +38,6 @@ typedef struct {
     char *to_table;
     char *to_column;
     char *cardinality;            /* "M:1", "1:1", "1:M", "M:M" */
-    char *cross_filter_direction; /* "Single", "Both", or the raw code */
     int active;
 } Relationship;
 

@@ -57,10 +57,10 @@ adding the things the `.pbix` does not itself declare: `owner:`, `description:`,
 Read from the model's embedded metadata:
 
 - **tables / columns** with the model's declared data type for each
-- **measures**: name, home table, DAX expression, display folder, description
+- **measures**: name, home table, DAX expression, description
 - **calculatedColumns**: name, home table, DAX expression
-- **relationships**: endpoints, cardinality (`M:1`, `1:1`, …), cross-filter direction, and
-  whether the relationship is active
+- **relationships**: endpoints, cardinality (`M:1`, `1:1`, …), and whether the relationship is
+  active
 - **tableSources**: each table's Power Query (M) expression
 
 Power BI's auto-generated date-hierarchy tables (the `LocalDateTable_*` /

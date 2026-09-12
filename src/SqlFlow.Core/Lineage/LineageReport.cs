@@ -174,9 +174,6 @@ public sealed record LineageSubscriberField
     /// <c>Size</c>, and so on, exactly as the report file labels it.</summary>
     public required string Role { get; init; }
 
-    /// <summary>The field's reference name within the visual's query.</summary>
-    public required string QueryRef { get; init; }
-
     /// <summary>The table or entity the field belongs to, as the report's model names it.</summary>
     public required string TableName { get; init; }
 

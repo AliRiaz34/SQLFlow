@@ -125,7 +125,6 @@ static int read_measures(sqlite3 *db, ModelSpec *spec, char *error, size_t error
 {
     sqlite3_stmt *statement;
     char sql[1024];
-    const char *folder;
     const char *description;
     int status;
 
@@ -136,16 +135,15 @@ static int read_measures(sqlite3 *db, ModelSpec *spec, char *error, size_t error
         return -1;
     }
 
-    /* DisplayFolder and Description are absent on older schemas; select a literal NULL instead
-     * so the column positions below stay fixed. */
-    folder = column_exists(db, "Measure", "DisplayFolder") ? "m.DisplayFolder" : "NULL";
+    /* Description is absent on older schemas; select a literal NULL instead so the column
+     * positions below stay fixed. */
     description = column_exists(db, "Measure", "Description") ? "m.Description" : "NULL";
 
     snprintf(sql, sizeof(sql),
-        "SELECT t.Name, m.Name, m.Expression, %s, %s "
+        "SELECT t.Name, m.Name, m.Expression, %s "
         "FROM Measure m JOIN \"Table\" t ON m.TableID = t.ID "
         "ORDER BY t.Name, m.Name",
-        folder, description);
+        description);
 
     if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK) {
         set_errorf(error, error_size, "the model's measures could not be read: %s",
@@ -166,8 +164,7 @@ static int read_measures(sqlite3 *db, ModelSpec *spec, char *error, size_t error
         measure->table = dup_column(statement, 0);
         measure->name = dup_column(statement, 1);
         measure->expression = dup_column(statement, 2);
-        measure->display_folder = dup_column(statement, 3);
-        measure->description = dup_column(statement, 4);
+        measure->description = dup_column(statement, 3);
     }
 
     sqlite3_finalize(statement);
@@ -260,7 +257,6 @@ static int read_relationships(sqlite3 *db, ModelSpec *spec, char *error, size_t 
     const char *to_column;
     const char *from_cardinality;
     const char *to_cardinality;
-    const char *cross_filter;
     const char *is_active;
     char cardinality[256];
     char where[256];
@@ -292,11 +288,6 @@ static int read_relationships(sqlite3 *db, ModelSpec *spec, char *error, size_t 
      * cardinality at all, the relationship is still real and worth reporting, so the cardinality
      * is emitted as unknown rather than dropping the row.
      */
-    cross_filter = column_exists(db, "Relationship", "CrossFilteringBehavior")
-        ? "CASE rel.CrossFilteringBehavior WHEN 1 THEN 'Single' WHEN 2 THEN 'Both' "
-          "ELSE CAST(rel.CrossFilteringBehavior AS TEXT) END"
-        : "NULL";
-
     is_active = column_exists(db, "Relationship", "IsActive") ? "rel.IsActive" : "1";
 
     /*
@@ -324,7 +315,7 @@ static int read_relationships(sqlite3 *db, ModelSpec *spec, char *error, size_t 
 
     snprintf(sql, sizeof(sql),
         "SELECT ft.Name, fc.ExplicitName, tt.Name, tc.ExplicitName, "
-        "       %s, %s, %s "
+        "       %s, %s "
         "FROM Relationship rel "
         "  LEFT JOIN \"Table\" ft ON rel.%s = ft.ID "
         "  LEFT JOIN \"Column\" fc ON rel.%s = fc.ID "
@@ -332,7 +323,7 @@ static int read_relationships(sqlite3 *db, ModelSpec *spec, char *error, size_t 
         "  LEFT JOIN \"Column\" tc ON rel.%s = tc.ID "
         "%s "
         "ORDER BY ft.Name, fc.ExplicitName",
-        cardinality, cross_filter, is_active,
+        cardinality, is_active,
         from_table, from_column, to_table, to_column, where);
 
     if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK) {
@@ -357,8 +348,7 @@ static int read_relationships(sqlite3 *db, ModelSpec *spec, char *error, size_t 
         relationship->to_table = dup_column(statement, 2);
         relationship->to_column = dup_column(statement, 3);
         relationship->cardinality = dup_column(statement, 4);
-        relationship->cross_filter_direction = dup_column(statement, 5);
-        relationship->active = sqlite3_column_int(statement, 6) != 0;
+        relationship->active = sqlite3_column_int(statement, 5) != 0;
     }
 
     sqlite3_finalize(statement);
@@ -615,7 +605,6 @@ void model_spec_free(ModelSpec *spec)
         free(spec->measures[i].table);
         free(spec->measures[i].name);
         free(spec->measures[i].expression);
-        free(spec->measures[i].display_folder);
         free(spec->measures[i].description);
     }
     free(spec->measures);
@@ -633,7 +622,6 @@ void model_spec_free(ModelSpec *spec)
         free(spec->relationships[i].to_table);
         free(spec->relationships[i].to_column);
         free(spec->relationships[i].cardinality);
-        free(spec->relationships[i].cross_filter_direction);
     }
     free(spec->relationships);
 

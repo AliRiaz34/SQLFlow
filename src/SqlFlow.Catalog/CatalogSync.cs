@@ -1494,7 +1494,6 @@ public sealed class CatalogSync
                             RepoId = repoId,
                             VisualKey = visualKey,
                             Role = field.Role,
-                            QueryRef = field.QueryRef,
                             TableName = field.TableName,
                             ColumnOrMeasure = field.ColumnOrMeasure,
                             IsMeasure = field.IsMeasure,

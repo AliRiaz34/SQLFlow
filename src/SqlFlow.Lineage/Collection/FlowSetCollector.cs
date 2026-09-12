@@ -427,7 +427,6 @@ public sealed class FlowSetCollector
                         .Select(f => new Core.Lineage.LineageSubscriberField
                         {
                             Role = f.Role,
-                            QueryRef = f.QueryRef,
                             TableName = f.TableName,
                             ColumnOrMeasure = f.ColumnOrMeasure,
                             IsMeasure = f.IsMeasure,

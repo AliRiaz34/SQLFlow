@@ -348,7 +348,6 @@ public sealed class CatalogDbContext : DbContext
             entity.HasKey(f => f.Id);
             entity.Property(f => f.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(f => f.Role).HasMaxLength(100).IsRequired();
-            entity.Property(f => f.QueryRef).HasMaxLength(400).IsRequired();
             entity.Property(f => f.TableName).HasMaxLength(250).IsRequired();
             entity.Property(f => f.ColumnOrMeasure).HasMaxLength(250).IsRequired();
             entity.HasIndex(f => f.VisualKey);

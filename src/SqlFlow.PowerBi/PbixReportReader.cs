@@ -210,7 +210,6 @@ public static class PbixReportReader
                 fields.Add(new ReportField
                 {
                     Role = role.Name,
-                    QueryRef = queryRef,
                     TableName = resolved.Value.Table,
                     ColumnOrMeasure = resolved.Value.Name,
                     IsMeasure = resolved.Value.IsMeasure,

@@ -768,10 +768,6 @@ public class CatalogSubscriberReportField
     /// <c>Rows</c>, <c>Size</c>, and so on), taken verbatim from the layout JSON's <c>projections</c> keys.</summary>
     public string Role { get; set; } = string.Empty;
 
-    /// <summary>The field's reference name within the visual's query (PowerBI's <c>queryRef</c>), which the
-    /// visual's <c>prototypeQuery</c> resolves to a concrete column or measure.</summary>
-    public string QueryRef { get; set; } = string.Empty;
-
     /// <summary>The table or entity the field/measure belongs to, as the <c>prototypeQuery</c> named it (may be
     /// an old-production compatibility name; resolved the same way other lineage identities are).</summary>
     public string TableName { get; set; } = string.Empty;

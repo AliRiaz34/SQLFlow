@@ -269,7 +269,6 @@ static int emit_spec(
             }
             if (emit_field(out, 8, "table", measure->table) != 0
                 || emit_field(out, 8, "dax", measure->expression) != 0
-                || emit_field(out, 8, "displayFolder", measure->display_folder) != 0
                 || emit_field(out, 8, "description", measure->description) != 0) {
                 return -1;
             }
@@ -318,9 +317,7 @@ static int emit_spec(
             if (emit_field(out, 8, "fromColumn", relationship->from_column) != 0
                 || emit_field(out, 8, "toTable", relationship->to_table) != 0
                 || emit_field(out, 8, "toColumn", relationship->to_column) != 0
-                || emit_field(out, 8, "cardinality", relationship->cardinality) != 0
-                || emit_field(out, 8, "crossFilterDirection",
-                       relationship->cross_filter_direction) != 0) {
+                || emit_field(out, 8, "cardinality", relationship->cardinality) != 0) {
                 return -1;
             }
             /* An inactive relationship exists but is not applied unless a measure invokes it

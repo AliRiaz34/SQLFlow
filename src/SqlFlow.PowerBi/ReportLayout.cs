@@ -66,9 +66,6 @@ public sealed record ReportField
 {
     public required string Role { get; init; }
 
-    /// <summary>The field's reference name within the visual's query (PowerBI's <c>queryRef</c>).</summary>
-    public required string QueryRef { get; init; }
-
     /// <summary>The table or entity the field belongs to, as the query named it.</summary>
     public required string TableName { get; init; }
 
