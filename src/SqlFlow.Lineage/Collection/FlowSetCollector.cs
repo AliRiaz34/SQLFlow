@@ -1,8 +1,10 @@
-﻿using SqlFlow.Core;
+﻿using System.Text.Json;
+using SqlFlow.Core;
 using SqlFlow.Core.Files;
 using SqlFlow.Core.Invoke;
 using SqlFlow.Core.Lineage;
 using SqlFlow.Lineage.Extraction;
+using SqlFlow.PowerBi;
 using SqlFlow.Yaml;
 
 namespace SqlFlow.Lineage.Collection;
@@ -174,7 +176,8 @@ public sealed class FlowSetCollector
                 }
 
                 declared.Add(subscriber.Name, relative);
-                result.Subscribers.Add(CollectSubscriber(result, subscriber, library.Connections, relative));
+                result.Subscribers.Add(
+                    CollectSubscriber(result, subscriber, library.Connections, relative, root));
             }
         }
 
@@ -183,16 +186,22 @@ public sealed class FlowSetCollector
     }
 
     /// <summary>Parses one subscriber's queries into read facts plus the per-query evidence the catalog shows.</summary>
-    private static CollectedSubscriber CollectSubscriber(
+    private CollectedSubscriber CollectSubscriber(
         CollectionResult result,
         Core.Subscribers.DataSubscriber subscriber,
         IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
-        string file)
+        string file,
+        string root)
     {
         var subscriberKey = NodeKey.For(ServerIdentity.Subscriber, database: null, schema: null, subscriber.Name);
         var queries = new List<CollectedSubscriberQuery>(subscriber.Queries.Count);
 
-        foreach (var query in subscriber.Queries)
+        // A subscriber backed by a report file contributes the queries its VISUALS ask, on top of any the
+        // document declares by hand. Both kinds go through the identical parse below, so a visual's question
+        // becomes lineage exactly as a transcribed query does and there is no second consumption path.
+        var extracted = ExtractReport(result, subscriber, connections, file, root);
+
+        foreach (var query in subscriber.Queries.Concat(extracted.Queries))
         {
             // The loader already rejected a query whose server is not declared, so the lookup cannot miss.
             var serverRef = ServerIdentity.From(connections[query.Server].ConnectionRef);
@@ -246,7 +255,144 @@ public sealed class FlowSetCollector
             NodeKey = subscriberKey,
             File = file,
             Queries = queries,
+            Pages = extracted.Pages,
         };
+    }
+
+    /// <summary>
+    /// Reads the report file a subscriber declares (<c>pbix:</c>), returning the questions its visuals ask as
+    /// queries plus the report's page/visual/field structure. A report records which questions were already
+    /// worth asking and how they were answered, so extracting it beats asking a person to transcribe every
+    /// visual; the structure additionally keeps each field's ROLE, which the SQL alone cannot express.
+    /// <para>
+    /// Every failure is a warning, never a throw: an unreadable or absent report must leave the rest of the
+    /// estate's lineage intact, exactly as an unparseable flow document does.
+    /// </para>
+    /// </summary>
+    private ExtractedReport ExtractReport(
+        CollectionResult result,
+        Core.Subscribers.DataSubscriber subscriber,
+        IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
+        string file,
+        string root)
+    {
+        if (string.IsNullOrWhiteSpace(subscriber.Pbix))
+        {
+            return ExtractedReport.Empty;
+        }
+
+        // The report's queries run against the subscriber's own connection, since a visual names model
+        // entities rather than a server. Without a declared default there is nothing to resolve them against.
+        var server = subscriber.Queries.Count > 0 ? subscriber.Queries[0].Server : null;
+        server ??= connections.Count == 1 ? connections.Keys.First() : null;
+        if (server is null || !connections.ContainsKey(server))
+        {
+            result.Warnings.Add(
+                $"{file}: subscriber '{subscriber.Name}' declares 'pbix: {subscriber.Pbix}' but no usable "
+                + "'server' to resolve its visuals' tables against; the report was not extracted. Declare the "
+                + "connection alias the report reads through.");
+            return ExtractedReport.Empty;
+        }
+
+        var path = Path.GetFullPath(Path.Combine(root, subscriber.Pbix));
+        if (!File.Exists(path))
+        {
+            result.Warnings.Add(
+                $"{file}: subscriber '{subscriber.Name}' declares 'pbix: {subscriber.Pbix}', which does not "
+                + "exist; the report was not extracted.");
+            return ExtractedReport.Empty;
+        }
+
+        PbixReadResult read;
+        try
+        {
+            read = PbixReportReader.Read(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                       or InvalidDataException or JsonException)
+        {
+            result.Warnings.Add(
+                $"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}' could not be read "
+                + $"({ex.Message}); the report was not extracted.");
+            return ExtractedReport.Empty;
+        }
+
+        foreach (var warning in read.Warnings)
+        {
+            result.Warnings.Add($"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}': {warning}");
+        }
+
+        var queries = new List<Core.Subscribers.SubscriberQuery>();
+        var pages = new List<Core.Lineage.LineageSubscriberPage>(read.Layout.Pages.Count);
+
+        foreach (var page in read.Layout.Pages)
+        {
+            var visuals = new List<Core.Lineage.LineageSubscriberVisual>(page.Visuals.Count);
+            foreach (var visual in page.Visuals)
+            {
+                // The query's name identifies the visual it came from, so the catalog can say WHICH chart links
+                // a report to a table, and so the structure below can point back at its own SQL.
+                var queryName = visual.Title is { Length: > 0 } title
+                    ? $"{page.DisplayName} / {title}"
+                    : $"{page.DisplayName} / {visual.VisualType} #{visual.Ordinal}";
+
+                string sql;
+                try
+                {
+                    sql = VisualQueryTranslator.Translate(visual, page.Filters);
+                }
+                catch (PbixUnsupportedExpressionException ex)
+                {
+                    result.Warnings.Add(
+                        $"{file}: subscriber '{subscriber.Name}' report '{subscriber.Pbix}' visual "
+                        + $"'{queryName}' could not be rendered as a query ({ex.Message}); it was skipped.");
+                    continue;
+                }
+
+                queries.Add(new Core.Subscribers.SubscriberQuery
+                {
+                    Name = queryName,
+                    Server = server,
+                    Sql = sql,
+                });
+
+                visuals.Add(new Core.Lineage.LineageSubscriberVisual
+                {
+                    Ordinal = visual.Ordinal,
+                    VisualType = visual.VisualType,
+                    Title = visual.Title,
+                    QueryName = queryName,
+                    Fields = visual.Fields
+                        .Select(f => new Core.Lineage.LineageSubscriberField
+                        {
+                            Role = f.Role,
+                            QueryRef = f.QueryRef,
+                            TableName = f.TableName,
+                            ColumnOrMeasure = f.ColumnOrMeasure,
+                            IsMeasure = f.IsMeasure,
+                        })
+                        .ToList(),
+                });
+            }
+
+            pages.Add(new Core.Lineage.LineageSubscriberPage
+            {
+                Name = page.Name,
+                DisplayName = page.DisplayName,
+                Ordinal = page.Ordinal,
+                Visuals = visuals,
+            });
+        }
+
+        return new ExtractedReport(queries, pages);
+    }
+
+    /// <summary>What reading a subscriber's report produced: its visuals as queries, and its own structure.</summary>
+    private sealed record ExtractedReport(
+        IReadOnlyList<Core.Subscribers.SubscriberQuery> Queries,
+        IReadOnlyList<Core.Lineage.LineageSubscriberPage> Pages)
+    {
+        public static ExtractedReport Empty { get; } = new([], []);
     }
 
     /// <summary>

@@ -673,6 +673,110 @@ public class CatalogSubscriberQuery
 }
 
 /// <summary>
+/// One page of a PowerBI subscriber's report, nested one level under its <see cref="CatalogSubscriber"/>.
+/// Repo-scoped and replaced wholesale alongside its owning subscriber on each sync.
+/// <para>
+/// Children are linked by STRING KEY, never by a surrogate id, for the same reason
+/// <see cref="CatalogSubscriberQuery"/> keys off <see cref="CatalogSubscriber.ObjectKey"/>: a sync stages every
+/// row of the pass and commits them in ONE <c>SaveChanges</c>, so an identity value does not exist while the
+/// children are being staged. A key computed from what the row already is (its subscriber and its ordinal)
+/// needs no identity round-trip, and a repo's pages, visuals, and fields can be written in a single pass.
+/// </para>
+/// </summary>
+public class CatalogSubscriberReportPage
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning subscriber's <see cref="CatalogSubscriber.ObjectKey"/>.</summary>
+    public string SubscriberKey { get; set; } = string.Empty;
+
+    /// <summary>This page's key within the estate: the subscriber's key and this page's ordinal, joined with
+    /// '#'. The value a visual carries as its <see cref="CatalogSubscriberReportVisual.PageKey"/>.</summary>
+    public string PageKey { get; set; } = string.Empty;
+
+    /// <summary>The page's position within its report, 1-based: the order PowerBI lists it in.</summary>
+    public int Ordinal { get; set; }
+
+    /// <summary>The page's internal name (PowerBI's <c>section.name</c>, a generated identifier).</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The page's title as a person sees it in the report (PowerBI's <c>section.displayName</c>).</summary>
+    public string DisplayName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// One visual on a PowerBI report page: a chart, table, or slicer, and the KIND of business question it answers
+/// (its chart type). This is the row the extractor keeps only for visuals that project at least one field — a
+/// shape or textbox with no <see cref="CatalogSubscriberReportField"/> children is decoration, not a question,
+/// and is never stored. A visual's own filters and any page-level filters that apply to it are not stored here;
+/// they are folded into the WHERE clause of the <see cref="CatalogSubscriberQuery"/> this visual produces, so a
+/// filtered question is captured as one real, parseable query rather than a filter condition nothing can act on.
+/// </summary>
+public class CatalogSubscriberReportVisual
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning page's <see cref="CatalogSubscriberReportPage.PageKey"/>.</summary>
+    public string PageKey { get; set; } = string.Empty;
+
+    /// <summary>This visual's key within the estate: its page's key and this visual's ordinal, joined with '#'.
+    /// The value a field carries as its <see cref="CatalogSubscriberReportField.VisualKey"/>.</summary>
+    public string VisualKey { get; set; } = string.Empty;
+
+    /// <summary>The visual's position within its page, 1-based: the order PowerBI lists it in.</summary>
+    public int Ordinal { get; set; }
+
+    /// <summary>PowerBI's visual type (<c>areaChart</c>, <c>pivotTable</c>, <c>slicer</c>, and so on), taken
+    /// verbatim from the layout JSON's <c>singleVisual.visualType</c>.</summary>
+    public string VisualType { get; set; } = string.Empty;
+
+    /// <summary>The visual's title as authored, when it has one. Many visuals (a slicer, a KPI tile) carry no
+    /// title and are still worth keeping for their field projections.</summary>
+    public string? Title { get; set; }
+}
+
+/// <summary>
+/// One field or measure a <see cref="CatalogSubscriberReportVisual"/> projects: the fact that makes a visual a
+/// business question rather than an empty chart. The <see cref="Role"/> is what a flattened column list from
+/// SQL-derived lineage cannot express: that a field is the axis a chart is broken down BY versus the measure
+/// being plotted (PowerBI's own projection buckets, e.g. <c>Category</c>/<c>Y</c> for a chart or
+/// <c>Rows</c>/<c>Values</c> for a pivot table). This is the one new fact this extraction phase exists to
+/// capture; the object/column identities it names are also what the visual's synthesized query reads.
+/// </summary>
+public class CatalogSubscriberReportField
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning visual's <see cref="CatalogSubscriberReportVisual.VisualKey"/>.</summary>
+    public string VisualKey { get; set; } = string.Empty;
+
+    /// <summary>The projection bucket PowerBI placed this field in (<c>Category</c>, <c>Y</c>, <c>Values</c>,
+    /// <c>Rows</c>, <c>Size</c>, and so on), taken verbatim from the layout JSON's <c>projections</c> keys.</summary>
+    public string Role { get; set; } = string.Empty;
+
+    /// <summary>The field's reference name within the visual's query (PowerBI's <c>queryRef</c>), which the
+    /// visual's <c>prototypeQuery</c> resolves to a concrete column or measure.</summary>
+    public string QueryRef { get; set; } = string.Empty;
+
+    /// <summary>The table or entity the field/measure belongs to, as the <c>prototypeQuery</c> named it (may be
+    /// an old-production compatibility name; resolved the same way other lineage identities are).</summary>
+    public string TableName { get; set; } = string.Empty;
+
+    /// <summary>The column or measure name within <see cref="TableName"/>.</summary>
+    public string ColumnOrMeasure { get; set; } = string.Empty;
+
+    /// <summary>True when the <c>prototypeQuery</c> node was a <c>Measure</c> (DAX-backed business logic) rather
+    /// than a <c>Column</c>/<c>HierarchyLevel</c> (a plain warehouse field).</summary>
+    public bool IsMeasure { get; set; }
+}
+
+/// <summary>
 /// One flow-level dependency in a repo's execution plan: <see cref="ToFlow"/> must wait for <see cref="FromFlow"/>
 /// because of the objects one writes and the other reads. This is the edge set behind the waves; together with
 /// <see cref="CatalogPipeline.Wave"/> it is the executable order of the estate's pipelines. Repo-scoped and fully

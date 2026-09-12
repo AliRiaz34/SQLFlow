@@ -1412,6 +1412,11 @@ public sealed class CatalogSync
         var firstSeenByKey = subscriberFirstSeen.ToDictionary(s => s.ObjectKey, s => s.FirstSeenUtc, StringComparer.Ordinal);
 
         await context.SubscriberQueries.Where(q => q.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        // The report structure goes with the subscriber for the same reason its queries do: a page or visual
+        // deleted from the report must stop being listed. Deleted deepest-first so no row outlives its parent.
+        await context.SubscriberReportFields.Where(f => f.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await context.SubscriberReportVisuals.Where(v => v.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await context.SubscriberReportPages.Where(p => p.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.Subscribers.Where(s => s.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         foreach (var subscriber in report.Subscribers)
         {
@@ -1446,6 +1451,52 @@ public sealed class CatalogSync
                     Sql = SecretHygiene.RedactedMessage(query.Sql),
                     ObjectKeys = string.Join('\n', query.ObjectKeys),
                 });
+            }
+
+            // The report's own structure, for a subscriber whose file the collector could read. Children are
+            // keyed by a value derived from their position (subscriber key, page ordinal, visual ordinal), not
+            // by a database identity: the whole sync commits in ONE SaveChanges, so no identity value exists
+            // while these rows are staged, and a derived key needs no round-trip to link them.
+            foreach (var page in subscriber.Pages)
+            {
+                var pageKey = $"{subscriber.ObjectKey}#{page.Ordinal}";
+                context.SubscriberReportPages.Add(new CatalogSubscriberReportPage
+                {
+                    RepoId = repoId,
+                    SubscriberKey = subscriber.ObjectKey,
+                    PageKey = pageKey,
+                    Ordinal = page.Ordinal,
+                    Name = page.Name,
+                    DisplayName = page.DisplayName,
+                });
+
+                foreach (var visual in page.Visuals)
+                {
+                    var visualKey = $"{pageKey}#{visual.Ordinal}";
+                    context.SubscriberReportVisuals.Add(new CatalogSubscriberReportVisual
+                    {
+                        RepoId = repoId,
+                        PageKey = pageKey,
+                        VisualKey = visualKey,
+                        Ordinal = visual.Ordinal,
+                        VisualType = visual.VisualType,
+                        Title = visual.Title,
+                    });
+
+                    foreach (var field in visual.Fields)
+                    {
+                        context.SubscriberReportFields.Add(new CatalogSubscriberReportField
+                        {
+                            RepoId = repoId,
+                            VisualKey = visualKey,
+                            Role = field.Role,
+                            QueryRef = field.QueryRef,
+                            TableName = field.TableName,
+                            ColumnOrMeasure = field.ColumnOrMeasure,
+                            IsMeasure = field.IsMeasure,
+                        });
+                    }
+                }
             }
         }
 

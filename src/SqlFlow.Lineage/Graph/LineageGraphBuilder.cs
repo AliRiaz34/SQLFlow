@@ -592,6 +592,7 @@ public static class LineageGraphBuilder
                             .ToList(),
                     })
                     .ToList(),
+                Pages = s.Pages,
             })
             .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();

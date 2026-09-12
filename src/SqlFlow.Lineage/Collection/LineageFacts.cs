@@ -116,6 +116,10 @@ public sealed record CollectedSubscriber
     public required string File { get; init; }
 
     public required IReadOnlyList<CollectedSubscriberQuery> Queries { get; init; }
+
+    /// <summary>The report's internal structure, when the subscriber declared a report file the collector could
+    /// read. Empty for a hand-authored subscriber.</summary>
+    public IReadOnlyList<Core.Lineage.LineageSubscriberPage> Pages { get; init; } = [];
 }
 
 /// <summary>One subscriber query as collected: its text and the raw identities parsing it proved it reads.</summary>

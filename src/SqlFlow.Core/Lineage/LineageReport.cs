@@ -108,6 +108,77 @@ public sealed record LineageSubscriberNode
 
     /// <summary>The queries it runs, in declaration order: the evidence behind its read edges.</summary>
     public required IReadOnlyList<LineageSubscriberQuery> Queries { get; init; }
+
+    /// <summary>
+    /// The report's own internal structure, when the subscriber is backed by a report file the collector could
+    /// read: the pages a person flips through and the visuals on each. Empty for a hand-authored subscriber and
+    /// for any consumer whose file is not a readable report.
+    /// </summary>
+    public IReadOnlyList<LineageSubscriberPage> Pages { get; init; } = [];
+}
+
+/// <summary>
+/// One page of a subscriber's report. A page groups the questions asked together, which is itself a fact worth
+/// keeping: visuals on one page are usually facets of a single business question rather than unrelated ones.
+/// </summary>
+public sealed record LineageSubscriberPage
+{
+    /// <summary>The page's internal identifier, as the report file spells it.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>The page's title as a person sees it on the tab.</summary>
+    public required string DisplayName { get; init; }
+
+    /// <summary>The page's position within the report, 1-based.</summary>
+    public required int Ordinal { get; init; }
+
+    public required IReadOnlyList<LineageSubscriberVisual> Visuals { get; init; }
+}
+
+/// <summary>
+/// One visual on a page: a business question with its shape already decided. Only visuals that project at
+/// least one field appear here, since a shape or a textbox asks nothing.
+/// </summary>
+public sealed record LineageSubscriberVisual
+{
+    /// <summary>The visual's position within its page, 1-based.</summary>
+    public required int Ordinal { get; init; }
+
+    /// <summary>The chart type: <c>areaChart</c>, <c>pivotTable</c>, <c>slicer</c>, and so on.</summary>
+    public required string VisualType { get; init; }
+
+    /// <summary>The visual's authored title, when it has one. Often the question in the author's own words.</summary>
+    public string? Title { get; init; }
+
+    /// <summary>The name of the subscriber query synthesized from this visual, linking the structure to the SQL
+    /// that carries its lineage. Matches a <see cref="LineageSubscriberQuery.Name"/> on the same subscriber.</summary>
+    public required string QueryName { get; init; }
+
+    public required IReadOnlyList<LineageSubscriberField> Fields { get; init; }
+}
+
+/// <summary>
+/// One field or measure a visual projects, and the ROLE it plays in the question: the difference between "sales
+/// by month" and "months by sales". The role is the report author's own statement of the question's shape, and
+/// is the one fact parsed SQL cannot recover, since a query's column list has no notion of axis versus value.
+/// </summary>
+public sealed record LineageSubscriberField
+{
+    /// <summary>The projection bucket the field sits in: <c>Category</c>, <c>Y</c>, <c>Rows</c>, <c>Values</c>,
+    /// <c>Size</c>, and so on, exactly as the report file labels it.</summary>
+    public required string Role { get; init; }
+
+    /// <summary>The field's reference name within the visual's query.</summary>
+    public required string QueryRef { get; init; }
+
+    /// <summary>The table or entity the field belongs to, as the report's model names it.</summary>
+    public required string TableName { get; init; }
+
+    /// <summary>The column or measure name within <see cref="TableName"/>.</summary>
+    public required string ColumnOrMeasure { get; init; }
+
+    /// <summary>True when this is a measure (model-computed business logic) rather than a plain column.</summary>
+    public required bool IsMeasure { get; init; }
 }
 
 /// <summary>One query a subscriber runs, and the objects parsing it proved that query reads.</summary>

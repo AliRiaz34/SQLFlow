@@ -41,6 +41,21 @@ public sealed record DataSubscriber
     /// touches become the subscriber's lineage edges; a subscriber with no queries is a node nothing connects
     /// to, which the collector reports rather than silently accepting.</summary>
     public IReadOnlyList<SubscriberQuery> Queries { get; init; } = [];
+
+    /// <summary>
+    /// The Power BI report file this subscriber is backed by, relative to the scanned folder, when it declares
+    /// one (<c>pbix: reports/Sales.pbix</c>). A report's own file already records which questions it asks, in
+    /// which fields and with which filters, so declaring the file lets the collector extract that instead of
+    /// asking a person to transcribe every visual's query by hand. The declaration stays small and authored
+    /// (identity, owner, URL, the connection alias); everything derived from the file is regenerated on each
+    /// sync rather than committed, so it cannot drift from the report.
+    /// <para>
+    /// Null for a hand-authored subscriber, which carries its queries in <see cref="Queries"/> as before. The
+    /// two are not exclusive: a report may declare both, and the extracted visual queries are appended to the
+    /// declared ones.
+    /// </para>
+    /// </summary>
+    public string? Pbix { get; init; }
 }
 
 /// <summary>

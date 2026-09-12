@@ -61,6 +61,9 @@ public sealed class YamlSubscriberLibraryLoader
         /// <summary>The default connection alias for every query that does not name its own.</summary>
         public string? Server { get; set; }
 
+        /// <summary>The Power BI report file backing this subscriber, relative to the scanned folder.</summary>
+        public string? Pbix { get; set; }
+
         public List<QueryYaml?>? Queries { get; set; }
     }
 
@@ -162,6 +165,7 @@ public sealed class YamlSubscriberLibraryLoader
                 Description = Trimmed(entry.Description),
                 Notes = Trimmed(entry.Notes),
                 Url = Trimmed(entry.Url),
+                Pbix = Trimmed(entry.Pbix),
                 Queries = queries,
             });
         }
