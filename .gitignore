@@ -19,6 +19,10 @@ gui/test-results/
 gui/e2e/.fixtures/
 gui/.tsbuild/
 
+## tools/pbix-extract (standalone C tool, built out of tree)
+tools/pbix-extract/build/
+tools/pbix-extract/build-asan/
+
 ## Rider / VS Code
 .idea/
 .vscode/
@@ -75,3 +79,7 @@ gui/tsconfig.tsbuildinfo
 AGENTS.md
 .cursor/
 .aider*
+
+## Power BI sample reports: the binary .pbix files are large and are not the product.
+## The extracted *.spec.yaml specifications ARE tracked, since they are reviewable text.
+samples/powerbi/*.pbix
