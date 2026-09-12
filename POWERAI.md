@@ -58,13 +58,6 @@ What does NOT exist yet: an automated PowerBI file parser, a field to capture th
 a query answers (the current `queries[].name` is a short label, not a question), a store for
 confirmed question-to-query pairs, and any confidence-scoring or feedback loop.
 
-## 4. Format decision: PBIP/TMDL vs `.pbix`
-
-This gates the whole extraction effort and must be settled first. `.pbix` is a binary/zip container
-around a compressed tabular model and is unpleasant and version-fragile to parse. The newer PBIP
-project format stores the semantic model as plain-text TMDL and report pages as JSON, which is a
-tractable text parse. Action: confirm which format the target reports are available in (or can be
-saved as) before committing to a parser implementation.
 
 ## 5. Extraction priority
 

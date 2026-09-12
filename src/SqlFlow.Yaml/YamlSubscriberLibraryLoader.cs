@@ -150,7 +150,12 @@ public sealed class YamlSubscriberLibraryLoader
             var defaultServer = string.IsNullOrWhiteSpace(entry.Server) ? null : entry.Server.Trim();
             var queries = MapQueries(name, entry.Queries, defaultServer, connections, source, warnings);
 
-            if (queries.Count == 0)
+            // A subscriber backed by a report (pbix:) can have zero hand-authored queries and still end up
+            // fully linked once its visuals are extracted; that extraction happens later, in the collector,
+            // which has its own specific warnings for a report that turns out unreadable or empty. Warning
+            // here too would be a false alarm on every such subscriber, since at parse time this loader cannot
+            // see what the report will contribute.
+            if (queries.Count == 0 && string.IsNullOrWhiteSpace(entry.Pbix))
             {
                 warnings.Add(
                     $"{source}: subscriber '{name}' has no usable queries, so nothing links it to the warehouse; it "

@@ -225,6 +225,41 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
     }
 
     [Fact]
+    public void DeclaredPbix_WithNoHandWrittenQueries_IsNotWarnedAsUnlinked()
+    {
+        // A pbix-only subscriber (no hand-written 'queries:' block at all) genuinely gets its queries from
+        // the report's visuals, extracted AFTER the YAML is parsed. The loader that emits "has no usable
+        // queries" runs before that extraction and so cannot see it; declaring 'pbix:' must suppress that
+        // warning rather than raise a false alarm on every report-only subscriber.
+        Write("10_ing.yaml", Ingestion);
+        WritePbix("reports/revenue.pbix");
+        Write("subscribers.yaml", Subscribers("reports/revenue.pbix"));
+
+        var report = Build();
+
+        Assert.NotEmpty(Assert.Single(report.Subscribers).Queries);
+        Assert.DoesNotContain(report.Warnings, w => w.Contains("has no usable queries", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SubscriberWithNeitherQueriesNorPbix_IsWarnedAsUnlinked()
+    {
+        // The genuine case the warning exists for: nothing hand-written and no report declared, so the
+        // subscriber really is a consumer of nothing.
+        Write("subscribers.yaml", string.Join('\n',
+            "connections:",
+            $"  dwh: {Ods}",
+            "subscribers:",
+            "  Empty_Subscriber:",
+            "    type: PowerBI",
+            "    server: dwh") + '\n');
+
+        var report = Build();
+
+        Assert.Contains(report.Warnings, w => w.Contains("has no usable queries", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void HandAuthoredSubscriber_KeepsWorking_AndCarriesNoPages()
     {
         // The declaration is additive: a subscriber with no 'pbix:' behaves exactly as before.
