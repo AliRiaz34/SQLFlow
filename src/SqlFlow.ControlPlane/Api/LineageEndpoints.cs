@@ -227,18 +227,21 @@ public sealed record SubscriberReportVisualDto(
 public sealed record SubscriberReportPageDto(
     string ReportFile, int Ordinal, string DisplayName, IReadOnlyList<SubscriberReportVisualDto> Visuals);
 
-/// <summary>One stored question ranked against a typed one, with what already answers it.
-/// <c>Similarity</c> is cosine distance in [0, 1] and is the trustworthy confidence signal; <c>Trusted</c>
-/// reports whether it cleared the deployment's configured threshold, so a caller does not have to know what
-/// that threshold is to act on it.</summary>
+/// <summary>One stored question matched against a typed one, with what already answers it. <c>Score</c> is how
+/// many searched terms it matched (unbounded, relative to the other matches in the same search) and is the
+/// trustworthy confidence signal; <c>Trusted</c> reports whether it cleared the deployment's configured
+/// threshold, so a caller does not have to know what that threshold is to act on it. <c>MatchedTerms</c> says
+/// WHICH terms hit, so an answer can explain why this question was considered relevant.</summary>
 public sealed record SimilarQuestionDto(
-    string Question, double Similarity, bool Trusted, string Provenance,
+    string Question, int Score, bool Trusted, IReadOnlyList<string> MatchedTerms, string Provenance,
     string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle);
 
-/// <summary>The ranked matches for a question, with the threshold they were judged against so a caller can
-/// explain its own confidence rather than inventing one.</summary>
+/// <summary>The matches for a question, with the terms actually searched for (the LLM's expansion of the typed
+/// question, or its own words when expansion is off or unavailable) and the score threshold they were judged
+/// against, so a caller explains its own confidence rather than inventing one.</summary>
 public sealed record SimilarQuestionsDto(
-    string Question, double SimilarityThreshold, IReadOnlyList<SimilarQuestionDto> Matches);
+    string Question, IReadOnlyList<string> SearchedTerms, int ScoreThreshold,
+    IReadOnlyList<SimilarQuestionDto> Matches);
 
 /// <summary>The Power BI report structure behind one subscriber: every page, the visuals on it, and each
 /// field's role. This is the consumption-side answer to "what questions does this dashboard already ask, and
@@ -1505,10 +1508,12 @@ public static class LineageEndpoints
             : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>
-    /// Ranks stored business questions against a typed one by embedding similarity, returning each match with
-    /// the SQL that already answers it (POWERAI.md Section 6). Reports 501 when retrieval is not configured,
-    /// rather than silently answering with a weaker mechanism: a caller must be able to tell "nothing is close
-    /// to this question" from "this deployment cannot answer that kind of question at all".
+    /// Matches stored business questions against a typed one, returning each with the SQL that already answers
+    /// it (POWERAI.md Section 6). An LLM first expands the question into related business vocabulary (when
+    /// <c>ExpandSynonyms</c> is on), then the stored questions are ranked by how many of those terms they
+    /// match. Reports 501 when retrieval is not configured, rather than silently answering with a weaker
+    /// mechanism: a caller must be able to tell "nothing matched this question" from "this deployment cannot
+    /// answer that kind of question at all".
     /// <para>
     /// Searches the whole estate by default, since a question about revenue is worth answering from whichever
     /// repo's report first asked it; <paramref name="repoId"/> narrows it to one repo when a caller wants that.
@@ -1526,8 +1531,7 @@ public static class LineageEndpoints
 
         var retrieval = http.RequestServices
             .GetRequiredService<IOptions<ControlPlaneOptions>>().Value.PowerAI.Retrieval;
-        var embedder = http.RequestServices.GetService<SqlFlow.Assistant.IEmbeddingProvider>();
-        if (embedder is null || !retrieval.Enabled)
+        if (!retrieval.Enabled)
         {
             return TypedResults.Problem(
                 detail: "Question retrieval is not enabled on this deployment "
@@ -1535,16 +1539,20 @@ public static class LineageEndpoints
                 statusCode: StatusCodes.Status501NotImplemented, title: "Retrieval not configured");
         }
 
+        // Absent when expansion is switched off, in which case the search runs on the typed words alone.
+        var expander = http.RequestServices.GetService<SqlFlow.Assistant.QuestionExpander>();
+
         var requested = Math.Clamp(topK ?? retrieval.DefaultTopK, 1, MaxSimilarQuestions);
-        var matches = await Background.QuestionSearch
-            .FindSimilarAsync(db, question.Trim(), requested, embedder, repoId, ct)
+        var result = await Background.QuestionSearch
+            .FindSimilarAsync(db, question.Trim(), requested, expander, repoId, ct)
             .ConfigureAwait(false);
 
         return TypedResults.Ok(new SimilarQuestionsDto(
             question.Trim(),
-            retrieval.SimilarityThreshold,
-            matches.Select(m => new SimilarQuestionDto(
-                m.Question, m.Similarity, m.Similarity >= retrieval.SimilarityThreshold, m.Provenance,
+            result.SearchedTerms,
+            retrieval.RankThreshold,
+            result.Matches.Select(m => new SimilarQuestionDto(
+                m.Question, m.Score, m.Score >= retrieval.RankThreshold, m.MatchedTerms, m.Provenance,
                 m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle)).ToList()));
     }
 

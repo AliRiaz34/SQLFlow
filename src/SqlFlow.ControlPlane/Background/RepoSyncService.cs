@@ -28,7 +28,6 @@ public sealed partial class RepoSyncService : BackgroundService
     private readonly bool _connectLineage;
     private readonly bool _enabled;
     private readonly bool _generateQuestions;
-    private readonly bool _embedQuestions;
     private readonly GitMaterializer _materializer = new();
     private readonly ILogger<RepoSyncService> _logger;
 
@@ -51,7 +50,6 @@ public sealed partial class RepoSyncService : BackgroundService
         // the production catalog must never steal claims).
         _enabled = options.Value.ManagedSync.Enabled;
         _generateQuestions = options.Value.PowerAI.QuestionGeneration.Enabled;
-        _embedQuestions = options.Value.PowerAI.Retrieval.Enabled;
         _logger = logger;
     }
 
@@ -221,21 +219,6 @@ public sealed partial class RepoSyncService : BackgroundService
                     .EnrichAsync(catalog, repoId, questionSnapshot, generator, ct)
                     .ConfigureAwait(false);
                 foreach (var warning in questionWarnings)
-                {
-                    await trace.InfoAsync("questions", warning, ct).ConfigureAwait(false);
-                }
-            }
-
-            // PowerAI retrieval: embed any stored question still lacking a current vector. Independent of the
-            // generation switch above, since a deployment may turn retrieval on long after questions were
-            // generated, leaving a table of un-embedded rows this step fills in with no second LLM pass.
-            if (_embedQuestions)
-            {
-                var embedder = scope.ServiceProvider.GetRequiredService<SqlFlow.Assistant.IEmbeddingProvider>();
-                var embedWarnings = await SubscriberQuestionEnrichment
-                    .EmbedQuestionsAsync(catalog, repoId, embedder, _clock, ct)
-                    .ConfigureAwait(false);
-                foreach (var warning in embedWarnings)
                 {
                     await trace.InfoAsync("questions", warning, ct).ConfigureAwait(false);
                 }

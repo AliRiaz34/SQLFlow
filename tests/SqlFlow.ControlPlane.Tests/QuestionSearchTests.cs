@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using SqlFlow.Assistant;
 using SqlFlow.Catalog;
 using SqlFlow.ControlPlane.Background;
 using Xunit;
@@ -8,56 +7,15 @@ namespace SqlFlow.ControlPlane.Tests;
 
 /// <summary>
 /// The retrieval contract POWERAI.md Section 6 rests on: a newly typed question finds the stored question that
-/// means the same thing even when they share few words, and each match arrives with the SQL that already
-/// answers it plus a similarity score the caller can gate on. Embeddings here come from a deterministic
-/// stand-in rather than a real provider, so what is under test is the ranking, resolution, and model-skew
-/// behavior rather than any vendor's semantics.
+/// means the same thing even when the two are worded differently, and each match arrives with the SQL that
+/// answers it plus a score the caller can gate on. Expansion is supplied by the test rather than by Anthropic,
+/// so what is under test is the matching, scoring, and resolution rather than any model's vocabulary.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class QuestionSearchTests
 {
-    /// <summary>
-    /// Embeds on a fixed vocabulary: each text becomes a vector of term frequencies over
-    /// <see cref="Vocabulary"/>. That makes similarity depend on shared MEANING as encoded by these terms
-    /// rather than on exact string equality, which is what the test needs to prove ranking works, while staying
-    /// deterministic and offline.
-    /// </summary>
-    private sealed class VocabularyEmbeddingProvider(string model = "test-embed-v1") : IEmbeddingProvider
-    {
-        private static readonly string[][] Vocabulary =
-        [
-            ["revenue", "sales", "selling", "sell", "turnover"],
-            ["region", "regional", "area", "territory"],
-            ["product", "category", "categories"],
-            ["customer", "customers", "client"],
-            ["time", "month", "monthly", "year", "trend"],
-        ];
-
-        public string Model => model;
-
-        public int Dimensions => Vocabulary.Length;
-
-        public Task<IReadOnlyList<float[]>> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct)
-        {
-            IReadOnlyList<float[]> vectors = [.. texts.Select(Embed)];
-            return Task.FromResult(vectors);
-        }
-
-        private static float[] Embed(string text)
-        {
-            var words = text.ToLowerInvariant().Split(
-                [' ', '?', ',', '.', '\'', '"', '-'], StringSplitOptions.RemoveEmptyEntries);
-            var vector = new float[Vocabulary.Length];
-            for (var i = 0; i < Vocabulary.Length; i++)
-            {
-                vector[i] = words.Count(w => Vocabulary[i].Contains(w, StringComparer.Ordinal));
-            }
-            return vector;
-        }
-    }
-
     [SkippableFact]
-    public async Task FindSimilar_RanksAParaphraseFirst_AndCarriesTheSqlThatAnswersIt()
+    public async Task ExpandedTerms_FindAQuestionWordedDifferently_AndCarryTheSqlThatAnswersIt()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
@@ -66,12 +24,11 @@ public sealed class QuestionSearchTests
         var repoId = Guid.NewGuid();
         var subscriberKey = $"subscriber|search_{suffix}";
         var pageKey = $"{subscriberKey}#report.pbix#1";
-        var embedder = new VocabularyEmbeddingProvider();
 
         await using var db = CatalogDatabase.Create(cs);
         try
         {
-            await SeedAsync(db, repoId, subscriberKey, pageKey, embedder,
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
             [
                 ("What is our revenue by region?", "SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region",
                     "[Dw].[arc].[Sales]", "Revenue by Region"),
@@ -81,23 +38,34 @@ public sealed class QuestionSearchTests
                     "Customer Count"),
             ]);
 
-            // Shares almost no words with the stored question ("turnover"/"territory" versus
-            // "revenue"/"region"), which is exactly the paraphrase gap keyword matching cannot close.
-            var matches = await QuestionSearch.FindSimilarAsync(
-                db, "what was our turnover per territory", topK: 2, embedder, repoId, CancellationToken.None);
+            // The typed question shares no content word with the stored one ("turnover"/"territory" versus
+            // "revenue"/"region"): the expansion is what closes that gap, which is the whole point of the
+            // LLM step. Supplied here directly so the test does not depend on a model's wording.
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "what was our turnover per territory", topK: 3,
+                ["turnover", "revenue", "sales", "territory", "region", "product"], repoId,
+                CancellationToken.None);
 
-            Assert.Equal(2, matches.Count);
-            var best = matches[0];
+            // Two questions carry a searched term ("revenue"+"region", and "product"); the customer-count one
+            // carries none and is absent entirely rather than ranked last with a zero score.
+            Assert.Equal(2, result.Matches.Count);
+            var best = result.Matches[0];
             Assert.Equal("What is our revenue by region?", best.Question);
-            Assert.True(best.Similarity > matches[1].Similarity,
-                $"the paraphrase ({best.Similarity}) should outrank the runner-up ({matches[1].Similarity})");
+            Assert.True(best.Score > result.Matches[1].Score,
+                $"the intended match ({best.Score}) should outrank the runner-up ({result.Matches[1].Score})");
+            Assert.DoesNotContain(result.Matches, m => m.Question.Contains("customers", StringComparison.Ordinal));
 
-            // A match is only useful if it carries what answers the question, not just the question text.
+            // A match must carry what ANSWERS the question, not just the question text.
             Assert.Equal("SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region", best.Sql);
             Assert.Equal(["[Dw].[arc].[Sales]"], best.ObjectKeys);
             Assert.Equal(QuestionSearch.PowerBiProvenance, best.Provenance);
             Assert.Equal(subscriberKey, best.SubscriberKey);
             Assert.Equal("Revenue by Region", best.VisualTitle);
+
+            // The caller can explain WHY it matched, not only how strongly.
+            Assert.Contains("revenue", best.MatchedTerms);
+            Assert.Contains("region", best.MatchedTerms);
+            Assert.DoesNotContain("turnover", best.MatchedTerms);
         }
         finally
         {
@@ -105,39 +73,84 @@ public sealed class QuestionSearchTests
         }
     }
 
+    /// <summary>
+    /// Pins a real limitation rather than hiding it: without SQL Server's full-text feature installed the
+    /// search falls back to plain word matching, which has NO stemming, so "sales" does not reach a question
+    /// worded "sells". Where full-text IS installed the engine supplies that inflection matching. The
+    /// expansion step is what covers the gap in the meantime, by returning inflected forms among its terms.
+    /// This test asserts the fallback's honest behavior; it is not asserting that the gap is desirable.
+    /// </summary>
     [SkippableFact]
-    public async Task FindSimilar_SkipsRowsEmbeddedByADifferentModel()
+    public async Task WithoutFullText_InflectionsDoNotMatch_WhichIsWhatExpansionIsFor()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        Skip.If(await HasFullTextAsync(cs), "SQL Server has full-text installed; its engine stems for us.");
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|stem_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("Which product category sells the most?", "SELECT 1", "[Dw].[arc].[Sales]", "Top Categories"),
+            ]);
+
+            var unstemmed = await QuestionSearch.FindSimilarAsync(
+                db, "sales", topK: 3, ["sales"], repoId, CancellationToken.None);
+            Assert.Empty(unstemmed.Matches);
+
+            // An expansion that includes the inflected form finds it, which is how this is meant to work.
+            var expanded = await QuestionSearch.FindSimilarAsync(
+                db, "sales", topK: 3, ["sales", "sells"], repoId, CancellationToken.None);
+            Assert.Single(expanded.Matches);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
+    private static async Task<bool> HasFullTextAsync(string connectionString)
+    {
+        await using var connection = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT CAST(SERVERPROPERTY('IsFullTextInstalled') AS int)";
+        return (int?)await command.ExecuteScalarAsync() == 1;
+    }
+
+    [SkippableFact]
+    public async Task AStopWordQuestion_MatchesNothing_RatherThanEverything()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
 
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var repoId = Guid.NewGuid();
-        var subscriberKey = $"subscriber|skew_{suffix}";
+        var subscriberKey = $"subscriber|stop_{suffix}";
         var pageKey = $"{subscriberKey}#report.pbix#1";
-        var oldModel = new VocabularyEmbeddingProvider("test-embed-v0");
 
         await using var db = CatalogDatabase.Create(cs);
         try
         {
-            await SeedAsync(db, repoId, subscriberKey, pageKey, oldModel,
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
             [
                 ("What is our revenue by region?", "SELECT 1", "[Dw].[arc].[Sales]", "Revenue by Region"),
             ]);
 
-            // Searching with a NEWER model must not rank against vectors from the old one: two models do not
-            // share a coordinate space, so comparing across them yields confident nonsense. The rows are
-            // re-embedded by the next sync, so an empty result here is correct and temporary.
-            var current = new VocabularyEmbeddingProvider("test-embed-v1");
-            var matches = await QuestionSearch.FindSimilarAsync(
-                db, "what was our turnover per territory", topK: 3, current, repoId, CancellationToken.None);
+            // Every word here is a stop word. Were they kept, they would match nearly every stored question
+            // and rank noise above real vocabulary matches, so the correct answer is no match at all.
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "what is our the", topK: 3, expander: null, repoId, CancellationToken.None);
 
-            Assert.Empty(matches);
-
-            // The same search with the model those rows were actually embedded by still finds them.
-            var sameModel = await QuestionSearch.FindSimilarAsync(
-                db, "what was our turnover per territory", topK: 3, oldModel, repoId, CancellationToken.None);
-            Assert.Single(sameModel);
+            Assert.Empty(result.Matches);
+            Assert.Empty(result.SearchedTerms);
         }
         finally
         {
@@ -146,35 +159,108 @@ public sealed class QuestionSearchTests
     }
 
     [SkippableFact]
-    public async Task FindSimilar_WithNothingEmbedded_ReturnsEmptyWithoutEmbeddingTheQuestion()
+    public async Task WithNoExpander_TheTypedWordsStillSearch()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
 
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|noexp_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
         await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("What is our revenue by region?", "SELECT 1", "[Dw].[arc].[Sales]", "Revenue by Region"),
+            ]);
 
-        // An estate that has never run the embedding step costs no embeddings call to search: there is nothing
-        // to rank against, so the question is never sent anywhere.
-        var matches = await QuestionSearch.FindSimilarAsync(
-            db, "what was our turnover per territory", topK: 3,
-            new ThrowingEmbeddingProvider(), Guid.NewGuid(), CancellationToken.None);
+            // Expansion off (or Anthropic unreachable): the search must still run on the typed words, so a
+            // model outage degrades retrieval rather than breaking it.
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "revenue by region", topK: 3, expander: null, repoId, CancellationToken.None);
 
-        Assert.Empty(matches);
+            var match = Assert.Single(result.Matches);
+            Assert.Equal("What is our revenue by region?", match.Question);
+            Assert.Equal(2, match.Score);
+            Assert.Equal(["revenue", "region"], result.SearchedTerms);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
     }
 
-    /// <summary>A provider that fails if called, so a test can prove a search short-circuited before embedding.</summary>
-    private sealed class ThrowingEmbeddingProvider : IEmbeddingProvider
+    [SkippableFact]
+    public async Task AWordIsMatchedWhole_SoSaleDoesNotMatchWholesale()
     {
-        public string Model => "test-embed-v1";
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
 
-        public int Dimensions => 5;
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|word_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
 
-        public Task<IReadOnlyList<float[]>> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct)
-            => throw new InvalidOperationException("the question must not be embedded when nothing can match it");
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("How much wholesale volume did we move?", "SELECT 1", "[Dw].[arc].[Wholesale]", "Wholesale"),
+            ]);
+
+            // "sale" occurs INSIDE "wholesale". Scoring on substrings would call that a match and hand a
+            // caller an unrelated dashboard, so the term must match on word boundaries.
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "sale", topK: 3, expander: null, repoId, CancellationToken.None);
+
+            Assert.Empty(result.Matches);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
+    [SkippableFact]
+    public async Task ATermWithAnApostrophe_IsMatchedAsTextRatherThanBreakingTheQuery()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|quote_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("What is each customer's lifetime value?", "SELECT 1", "[Dw].[arc].[Customer]", "CLV"),
+            ]);
+
+            // A term carrying an apostrophe, and one carrying full-text operators, must be treated as text.
+            // Were terms pasted into a predicate string these would break the query or change its meaning.
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "customer's lifetime value OR NEAR(\"x\")", topK: 3, expander: null, repoId,
+                CancellationToken.None);
+
+            var match = Assert.Single(result.Matches);
+            Assert.Equal("What is each customer's lifetime value?", match.Question);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
     }
 
     private static async Task SeedAsync(
-        CatalogDbContext db, Guid repoId, string subscriberKey, string pageKey, IEmbeddingProvider embedder,
+        CatalogDbContext db, Guid repoId, string subscriberKey, string pageKey,
         IReadOnlyList<(string Question, string Sql, string ObjectKey, string Title)> rows)
     {
         db.SubscriberReportPages.Add(new CatalogSubscriberReportPage
@@ -182,8 +268,6 @@ public sealed class QuestionSearchTests
             RepoId = repoId, SubscriberKey = subscriberKey, PageKey = pageKey,
             ReportFile = "report.pbix", Ordinal = 1, DisplayName = "Page 1",
         });
-
-        var vectors = await embedder.EmbedAsync(rows.Select(r => r.Question).ToArray(), CancellationToken.None);
 
         for (var i = 0; i < rows.Count; i++)
         {
@@ -205,9 +289,6 @@ public sealed class QuestionSearchTests
             db.SubscriberReportVisualQuestions.Add(new CatalogSubscriberReportVisualQuestion
             {
                 RepoId = repoId, VisualKey = visualKey, Ordinal = 1, Question = question,
-                Embedding = EmbeddingMath.ToBytes(vectors[i]),
-                EmbeddingModel = embedder.Model,
-                EmbeddedAtUtc = DateTime.UtcNow,
             });
         }
 

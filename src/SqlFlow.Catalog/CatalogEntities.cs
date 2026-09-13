@@ -849,22 +849,6 @@ public class CatalogSubscriberReportVisualQuestion
 
     /// <summary>The question text, as a person would actually type it.</summary>
     public string Question { get; set; } = string.Empty;
-
-    /// <summary>
-    /// <see cref="Question"/> as a dense vector, packed little-endian by <c>EmbeddingMath.ToBytes</c>, so a
-    /// newly typed question can be ranked against this one by cosine similarity (POWERAI.md Section 6:
-    /// confidence is retrieval similarity, not an LLM's self-rating). Null when retrieval is disabled or the
-    /// row has not been embedded yet, which is what the enrichment step selects on.
-    /// </summary>
-    public byte[]? Embedding { get; set; }
-
-    /// <summary>The model <see cref="Embedding"/> was produced by. Vectors from different models are not
-    /// comparable, so this gates selective re-embedding on a model change exactly as
-    /// <see cref="CatalogSubscriberReportVisual.ContentHash"/> gates question regeneration.</summary>
-    public string? EmbeddingModel { get; set; }
-
-    /// <summary>When <see cref="Embedding"/> was computed.</summary>
-    public DateTime? EmbeddedAtUtc { get; set; }
 }
 
 /// <summary>

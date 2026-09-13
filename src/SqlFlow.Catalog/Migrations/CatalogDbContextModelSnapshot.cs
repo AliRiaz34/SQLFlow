@@ -2216,16 +2216,6 @@ namespace SqlFlow.Catalog.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
 
-                    b.Property<DateTime?>("EmbeddedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<byte[]>("Embedding")
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<string>("EmbeddingModel")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
-
                     b.Property<int>("Ordinal")
                         .HasColumnType("int");
 

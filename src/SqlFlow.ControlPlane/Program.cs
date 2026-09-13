@@ -197,12 +197,13 @@ if (options.Assistant.Enabled)
     builder.Services.AddSingleton<SqlFlow.Assistant.TranscriptionGateway>();
 }
 
-// ---- PowerAI question generation: independent of the interactive chat assistant above (a deployment may run
-// either without the other), but reuses the same Anthropic account/model rather than declaring its own, since
-// both draw on the same subscription. Registered only when its own switch is on; the post-sync enrichment step
-// resolves it from DI and is itself only invoked when this same switch is on, so an unconfigured or disabled
-// deployment never attempts an Anthropic call at sync time.
-if (options.PowerAI.QuestionGeneration.Enabled)
+// ---- PowerAI: question generation and retrieval, each independent of the interactive chat assistant above and
+// of each other (a deployment may run any one without the others). Both reuse the same Anthropic account/model
+// rather than declaring their own, since both draw on the same subscription, so the resolved options are
+// registered once when EITHER needs them. Each consumer is registered only when its own switch is on, so an
+// unconfigured or disabled deployment never attempts an Anthropic call.
+var expandsSynonyms = options.PowerAI.Retrieval.Enabled && options.PowerAI.Retrieval.ExpandSynonyms;
+if (options.PowerAI.QuestionGeneration.Enabled || expandsSynonyms)
 {
     builder.Services.AddSingleton(sp =>
     {
@@ -215,32 +216,16 @@ if (options.PowerAI.QuestionGeneration.Enabled)
             MaxTokens = anthropic.MaxTokens,
         };
     });
+}
+
+if (options.PowerAI.QuestionGeneration.Enabled)
+{
     builder.Services.AddSingleton<SqlFlow.Assistant.QuestionGenerator>();
 }
 
-// ---- PowerAI retrieval: the embedding provider behind similarity search over stored questions. Independent of
-// both the chat assistant and question generation, and declaring its own credential rather than reusing the
-// assistant's, since Anthropic serves no embeddings endpoint. Registered only when its own switch is on, so a
-// deployment without it never holds an embeddings credential or attempts a call.
-if (options.PowerAI.Retrieval.Enabled)
+if (expandsSynonyms)
 {
-    builder.Services.AddSingleton(sp =>
-    {
-        var resolver = sp.GetRequiredService<SqlFlow.Core.Secrets.ISecretResolver>();
-        var embedding = sp.GetRequiredService<IOptions<ControlPlaneOptions>>().Value.PowerAI.Retrieval.Embedding;
-        return new SqlFlow.Assistant.EmbeddingOptions
-        {
-            Provider = embedding.Provider,
-            Model = embedding.Model,
-            Dimensions = embedding.Dimensions,
-            ApiKey = resolver.Resolve(embedding.ApiKey),
-            BaseUrl = embedding.BaseUrl,
-            Endpoint = embedding.Endpoint,
-            BatchSize = embedding.BatchSize,
-            TimeoutSeconds = embedding.TimeoutSeconds,
-        };
-    });
-    builder.Services.AddSingleton<SqlFlow.Assistant.IEmbeddingProvider, SqlFlow.Assistant.EmbeddingGateway>();
+    builder.Services.AddSingleton<SqlFlow.Assistant.QuestionExpander>();
 }
 
 // ---- Catalog read model: pooled, read-only, transient-retry --------------------------------------------------

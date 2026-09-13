@@ -12,8 +12,8 @@ using SqlFlow.Catalog;
 namespace SqlFlow.Catalog.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    [Migration("20260913110833_AddQuestionEmbeddings")]
-    partial class AddQuestionEmbeddings
+    [Migration("20260913120516_AddQuestionFullTextSearch")]
+    partial class AddQuestionFullTextSearch
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -2218,16 +2218,6 @@ namespace SqlFlow.Catalog.Migrations
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
-
-                    b.Property<DateTime?>("EmbeddedAtUtc")
-                        .HasColumnType("datetime2");
-
-                    b.Property<byte[]>("Embedding")
-                        .HasColumnType("varbinary(max)");
-
-                    b.Property<string>("EmbeddingModel")
-                        .HasMaxLength(200)
-                        .HasColumnType("nvarchar(200)");
 
                     b.Property<int>("Ordinal")
                         .HasColumnType("int");

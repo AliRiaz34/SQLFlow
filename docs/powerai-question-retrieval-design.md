@@ -1,8 +1,17 @@
 # PowerAI Question Retrieval: Design
 
-Status: step 1 of Section 8 has landed (the `IEmbeddingProvider` abstraction, its OpenAI/Azure
-implementation, and the config gate); steps 2 onward are not implemented. This is POWERAI.md Section 6
-("the learning loop") and Section
+Status: retrieval is built and reachable (Section 8 steps 1-5); the confirmed-example store and the
+learning loop on top of it are not.
+
+**This document's mechanism changed after it was first written, and the sections below record both.**
+It originally specified embedding similarity, and that was implemented; it was then replaced with
+LLM query expansion over a word search, and the embedding code was deleted rather than left beside it.
+The reason was not technical merit: embeddings require a paid third-party vendor (Anthropic serves no
+embeddings endpoint, so it meant OpenAI or Azure on top of the Anthropic account already configured),
+which is a poor fit for an open-source project whose contributors would each need their own key.
+Section 3 states what was traded away by that choice, since it is a real cost and not a free win.
+
+This is POWERAI.md Section 6 ("the learning loop") and Section
 9 step 6 ("build the confirmed-example store and the retrieval step"), scoped out in detail now that
 step 3 (the business-question field, `CatalogSubscriberReportVisualQuestion`) has landed and gives
 this something real to retrieve against. See
@@ -35,210 +44,172 @@ Two provenances, one shape, per the flat-table decision already made in POWERAI.
   migration and one query shape from day one rather than needing a second migration once confirmation
   lands.
 
-Both provenances get one new table, `CatalogQuestionExample`, rather than two: a `CatalogSubscriberReportVisualQuestion`
-row is either promoted into it verbatim when first embedded, or (simpler, see Section 4) the existing
-table is embedded in place and `CatalogQuestionExample` holds only the `user-confirmed` rows plus a
-shared view/union for search. Section 4 below picks the simpler of the two.
+The `user-confirmed` half gets its own table, `CatalogQuestionExample`, holding those rows alongside
+the PowerBI-derived ones the existing table already carries; a search spans both. Under the word-search
+mechanism this is simpler than it was under the embedding one, since neither table needs a derived
+artifact kept in step with its text: the searched column IS the stored question.
 
-## 3. Similarity mechanism: embeddings, not keyword matching
+## 3. Matching mechanism: LLM query expansion over a word search
 
-Keyword/full-text matching (SQL Server `CONTAINS`/`FREETEXT`, or a naive token-overlap score) was
-considered and rejected as the primary mechanism: two questions can be semantically identical while
-sharing almost no words ("what's our best-selling category" vs "which product category generates the
-most revenue"), which is exactly the paraphrase gap a text-to-query system needs to close. Embedding
-similarity (cosine distance over a dense vector) is the mechanism that actually captures this.
+**Built: an LLM expands the typed question into related business vocabulary, and the stored questions
+are ranked by how many of those terms they match.** SQL Server's full-text index supplies the
+linguistic half (inflections such as "sell"/"selling"/"sold"), and the expansion supplies the
+business-vocabulary half a database cannot know ("turnover" also meaning "revenue", "clients" also
+meaning "customers"). No embedding vendor is involved: the expansion reuses the same Anthropic
+account/model `QuestionGenerator` already uses, and can be switched off to search the typed words
+alone with no LLM call at all.
 
-**Embedding provider.** Reuse the existing Anthropic account/config (`AssistantSettings.Anthropic`,
-already wired for `QuestionGenerator`) is NOT an option here: Anthropic does not serve an embeddings
-endpoint. Two real choices:
+**What this trades away, stated plainly.** Embedding similarity captures paraphrase even when two
+questions share no vocabulary a synonym list would connect, and it yields a bounded 0-1 score that
+means the same thing across every estate. Term-count scoring does neither: its score is unbounded and
+only comparable within one search, and a paraphrase the expansion fails to anticipate is simply
+missed. The mitigation is that the expansion is doing the semantic work an embedding would otherwise
+do, one LLM call per search rather than one embedding call per search plus one per stored question.
+Whether that is good enough is an empirical question this design does not settle, and the reason
+`RankThreshold` exists is so an estate can tune where "trusted" starts once it has real questions.
 
-- **OpenAI embeddings** (`text-embedding-3-small`, 1536 dims, cheap, fast) via a new small
-  `EmbeddingOptions` reusing the `AssistantSettings.OpenAI.ApiKey` shape already in
-  `SqlFlow.Assistant/AssistantSettings.cs` if `OpenAI.ApiKey` is set, independent of `Assistant.Provider`
-  (a deployment can run the Anthropic chat provider and still use OpenAI purely for embeddings, the
-  same way question generation reuses Anthropic independent of `Assistant.Enabled`).
-- **Azure AI Foundry embeddings** (if the deployment already standardized on Foundry per
-  `AssistantSettings.Foundry`), for a deployment that wants to keep every model call inside its Azure
-  tenant boundary rather than adding a second vendor (OpenAI direct).
+**Why not embeddings (revisited).** Not on quality: on dependency. Anthropic serves no embeddings
+endpoint, so embeddings meant adding OpenAI or Azure as a second paid vendor beside the Anthropic key
+this feature already needs. For a solo-maintained open-source project that is a barrier to every
+contributor, not just to the deployment. A local embedding model (Ollama and similar) would remove the
+vendor but adds a runtime dependency and a model download to the same contributors. The word search
+needs neither, and degrades to something that still works when the LLM is unreachable.
 
-Recommendation: **support both behind one small interface** (`IEmbeddingProvider.EmbedAsync(string
-text, CancellationToken) -> float[]`), selected by a new `ControlPlane:PowerAI:Retrieval:EmbeddingProvider`
-switch (`OpenAI` | `AzureFoundry`), mirroring the existing `AssistantProvider` enum pattern rather than
-inventing a new one. This keeps the single-code-path principle: one retrieval code path, one interface,
-swappable backend, exactly like `IAssistantGateway` already is for chat.
+**Why not naive `LIKE` alone.** It is the fallback, not the mechanism: it runs only where SQL Server's
+full-text feature is absent (Section 4). Without the index there is no stemming, so "sales" will not
+reach a question worded "sells"; a test pins that limitation rather than hiding it, and the expansion
+is what covers it in the meantime by returning inflected forms among its terms.
 
-## 4. Storage: where the vector lives
+## 4. Storage: no new columns, one full-text index
 
-**Recommendation: add the embedding directly onto the existing rows, not a separate vector table.**
+**Nothing is added to the row.** The question text the search matches against is already stored, so
+unlike the embedding design (which needed `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc` on every row,
+plus re-embedding whenever either the text or the model changed) this needs no new column and no
+sync-time write of its own. That removes a whole class of staleness: there is no stored artifact that
+can fall out of date with the text it was derived from.
 
-- `CatalogSubscriberReportVisualQuestion` gains an `Embedding` column (`varbinary(max)`, storing the
-  float array as raw bytes — `BitConverter`/`MemoryMarshal` round-trip, no JSON overhead) and an
-  `EmbeddedAt`/`EmbeddingModel` pair so a model upgrade can be detected and re-embedded selectively
-  (comparing `EmbeddingModel` the same way `ContentHash` already gates regeneration).
-- The new `CatalogQuestionExample` table (for `user-confirmed` rows) gets the identical three columns
-  (`Embedding`, `EmbeddingModel`, `EmbeddedAt`) plus `Question`, `Sql`, `ObjectKeys`, `Provenance`,
-  `Confidence`, `ConfirmedByUserId`, `ConfirmedAtUtc`.
-- A single retrieval query unions both sources (a SQL `UNION ALL` view, or two queries merged in C#)
-  rather than requiring a caller to know which table a hit came from — matching how `CatalogLineageEdge`
-  already unifies "what a flow writes" and "what a subscriber reads" into one edge shape.
+What it does need is a full-text index, added by the `AddQuestionFullTextSearch` migration on
+`SubscriberReportVisualQuestion(Question)`. It follows the estate's existing precedent exactly
+(`ObjectFullTextSearch`, which indexes `Object.Definition` and `RunStatement.Sql`): it reuses that
+migration's `CatalogFullText` catalog, guards every statement on `SERVERPROPERTY('IsFullTextInstalled')`,
+and runs with `suppressTransaction` because full-text DDL cannot execute inside a user transaction.
 
-**Why not SQL Server native vector search (`VECTOR` type / `VECTOR_DISTANCE`, SQL Server 2025+)?** The
-catalog targets whatever SQL Server version a customer's shared estate already runs (see
-`CatalogDatabase.cs`'s plain `UseSqlServer` with no version pin), and Section "Catalog Schema Changes"
-in CLAUDE.md implies broad compatibility is assumed unless stated otherwise. Requiring SQL Server 2025
-for one feature would split the estate into "can do retrieval" and "cannot," which is a much bigger
-decision than this feature should force. Revisit this once the deployed estate's SQL Server version
-floor is known; until then, do the distance computation in the application tier (Section 5).
-
-**Why not an external vector database (pgvector, Pinecone, Qdrant, Azure AI Search)?** Adds a second
-storage system to operate, back up, and secure, for a corpus that starts at 11 rows and will realistically
-stay in the thousands (one row per visual across an estate's PowerBI reports, plus confirmed examples).
-At that scale, brute-force cosine similarity over rows already pulled into the control-plane process is
-fast enough (Section 5) and keeps the single-code-path principle: one catalog database, one connection
-string, one backup/restore story.
+**Full-text is an installable SQL Server feature the catalog cannot assume.** Where it is absent the
+migration creates nothing (rather than failing the whole catalog upgrade) and the search falls back to
+a `LIKE` scan, so a deployment on an instance without it still migrates and still answers, just with
+weaker matching. `QuestionSearch` probes for the index once per process and caches the answer, since
+it changes only when the catalog is migrated or the feature is installed, both of which restart the
+control plane.
 
 ## 5. The search step itself
 
 ```
-Task<IReadOnlyList<QuestionMatch>> FindSimilarAsync(string question, int topK, CancellationToken ct)
+Task<QuestionSearchResult> FindSimilarAsync(
+    CatalogDbContext db, string question, int topK, QuestionExpander? expander, Guid? repoId, CancellationToken ct)
 ```
 
-1. Embed the incoming question (one call to `IEmbeddingProvider`).
-2. Load candidate rows: every `CatalogSubscriberReportVisualQuestion`/`CatalogQuestionExample` row that
-   has a non-null `Embedding` (repo-scoped or estate-wide, configurable — start estate-wide, since a
-   question about "revenue" is relevant regardless of which repo's report first asked it). At the
-   scale expected (thousands of rows), pulling `Embedding` + the row's other columns into memory and
-   computing cosine similarity in C# (`System.Numerics.Tensors` or a hand-rolled dot-product/L2-norm
-   loop) is well within a single request's budget; no index is required at this scale.
-3. Rank by cosine similarity descending, return the top `topK` (POWERAI.md's own framing: 1-3 is
-   usually enough context for the LLM to work from, mirroring the 1-3 questions per visual already
-   chosen for the same reason).
-4. Each `QuestionMatch` carries the matched question, its SQL, its object keys, its provenance, and its
-   similarity score, so the caller (this is where the actual guess/confirm/remember flow of POWERAI.md
-   Section 6 plugs in) can:
-   - Show the LLM the closest 1-3 examples as grounding context when asked to write new SQL.
-   - Report a similarity-derived confidence alongside the answer (e.g., "closest match: 0.91" reads
-     very differently from "closest match: 0.42"), not an LLM-invented confidence number.
-   - Gate on a similarity threshold: below it, the system states plainly this is an unverified guess and
-     always routes through the existing DataOps human-confirmation gate before anything is treated as
-     correct (POWERAI.md Section 6, unchanged by this design — retrieval only feeds that gate a better
-     signal, it does not bypass it).
+1. Expand the question into terms (one Anthropic call), or fall back to its own words when expansion
+   is off or the model is unreachable. Either way the terms are normalized: lowercased, stop words and
+   one-character tokens dropped, de-duplicated. Stop words are removed here rather than left to the
+   database because they would otherwise count toward a question's score and let "what is the" outrank
+   a real vocabulary match.
+2. Load the stored questions containing any of those terms, through the full-text index when the
+   instance has one and a `LIKE` scan when it does not, bounded by a candidate ceiling.
+3. Score each by how many distinct terms it matches, on word boundaries so "sale" does not score
+   against "wholesale", and return the top `topK`.
+4. Resolve only the winners' SQL and object keys (via the visual's `QueryName` →
+   `CatalogSubscriberQuery`), so a large corpus costs one expansion call and one scan rather than a
+   join across every stored question.
 
-## 6. Where this runs, and when embeddings are computed
+Each `QuestionMatch` carries the matched question, its SQL, its object keys, its provenance, its
+score, and **which terms actually hit**, so a caller can say why a question was considered relevant
+rather than only how strongly. The result also carries the terms that were searched for, which is what
+makes an empty result interpretable ("nothing matched these words") instead of mysterious.
 
-Same split as question generation itself, for the same reasons (POWERAI.md Section 10's built
-"business-question field" enrichment step):
+**The terms never reach SQL as text.** They are passed through `EF.Functions.Contains` (or `LIKE`),
+which parameterizes them. A model-authored fragment pasted into `CONTAINS` syntax would be both a
+correctness hazard (an apostrophe in "customer's" breaks the predicate) and injection-shaped; a test
+covers exactly that input. This is why `QuestionExpander` returns a term LIST rather than a ready-made
+query string, even though the model could easily produce one.
 
-- **Embedding a stored question happens in the control plane**, as a small extension of the existing
-  post-sync `SubscriberQuestionEnrichment` step: once a visual's questions are generated (or carried
-  forward unchanged), embed any question lacking an `Embedding` or whose `EmbeddingModel` is stale.
-  An unchanged visual's carried-forward questions already have their embedding carried forward too
-  (no re-embedding), the same incremental principle the hash-gate already established.
-- **Searching happens on demand**, from wherever a question is typed: the GUI chat assistant, the Slack
-  bot, or a future dedicated "ask a question" surface, via a new MCP tool (`find_similar_questions` or
-  folded into `describe_subscriber_report`'s sibling surface) so the existing assistant surfaces get
-  this for free without inventing a new client integration.
+## 6. Where this runs
+
+- **Expansion and search both happen on demand**, in the control plane, when a question is asked.
+  There is no sync-time work at all, which is the main operational simplification over the embedding
+  design: nothing to backfill, nothing to re-embed, no second vendor credential held by the sync.
+- **Reachable as `find_similar_questions`** over `GET /api/v1/lineage/subscribers/similar-questions`,
+  on the shared MCP read surface so both the GUI chat and Slack get it (it reaches no datasource,
+  returning only SQL text the catalog already stores and `describe_subscriber` already exposes).
 - **Never in `tools/pbix-extract` or the bare CLI**, unchanged from the question-generation precedent:
-  the parser stays a parser, and the CLI's `sqlflow db sync` never needs an embeddings API key.
+  the parser stays a parser, and `sqlflow db sync` needs no model credential.
 
-## 7. Schema summary (for the eventual migration)
+## 7. Schema summary
 
-```csharp
-// Added to the existing table:
-public class CatalogSubscriberReportVisualQuestion
-{
-    // ...existing columns...
-    public byte[]? Embedding { get; set; }
-    public string? EmbeddingModel { get; set; }
-    public DateTime? EmbeddedAtUtc { get; set; }
-}
-
-// New table, the user-confirmed half of the example store (POWERAI.md Section 8):
-public class CatalogQuestionExample
-{
-    public long Id { get; set; }
-    public Guid RepoId { get; set; }
-    public string Question { get; set; } = string.Empty;
-    public string Sql { get; set; } = string.Empty;
-    public string ObjectKeys { get; set; } = string.Empty;   // newline-joined, same convention as CatalogSubscriberQuery
-    public string Provenance { get; set; } = string.Empty;   // "user-confirmed" (this table is never "powerbi")
-    public double Confidence { get; set; }                    // the similarity score at confirmation time
-    public string? ConfirmedByUserId { get; set; }
-    public DateTime ConfirmedAtUtc { get; set; }
-    public byte[]? Embedding { get; set; }
-    public string? EmbeddingModel { get; set; }
-    public DateTime? EmbeddedAtUtc { get; set; }
-}
-```
+No entity changes. One migration, `AddQuestionFullTextSearch`, adding a full-text index on
+`SubscriberReportVisualQuestion(Question)` and reusing the existing `CatalogFullText` catalog; it
+creates nothing on an instance without the full-text feature. The `CatalogQuestionExample` table for
+the `user-confirmed` half (Section 2) is still unbuilt and unchanged by this mechanism switch: a word
+search over it will work the same way, so nothing here blocks or reshapes it.
 
 ## 8. Sequencing (each step landable and testable independently, no time estimates)
 
-1. ~~`IEmbeddingProvider` abstraction + one implementation~~ **Done**. `IEmbeddingProvider`
-   (`src/SqlFlow.Assistant/IEmbeddingProvider.cs`) with `EmbeddingGateway`
-   (`src/SqlFlow.Assistant/EmbeddingGateway.cs`) serving BOTH backends rather than OpenAI only: the two
-   speak the same wire format, so like `ResponsesApiGateway` they differ in endpoint and credential
-   alone and a second implementation would have been duplicated code. `EmbeddingMath` (cosine similarity
-   plus the `varbinary` byte round-trip) sits beside the interface, since sync-time writing and
-   query-time ranking need the identical encoding. Config-gated by
-   `ControlPlane:PowerAI:Retrieval:Enabled` (`RetrievalOptions`), independent of both `Assistant.Enabled`
-   and `PowerAI:QuestionGeneration:Enabled`, and unlike question generation it declares its own
-   credential rather than reusing `Assistant:Anthropic`, because Anthropic serves no embeddings endpoint.
-   Batching is the unit of `EmbedAsync` (a sync embeds many questions at once and both backends charge
-   and rate-limit per request), responses are re-sorted by each entry's `index` rather than array
-   position, and throttle retries reuse the chat gateway's Retry-After policy.
-2. ~~Migration: `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc` on `CatalogSubscriberReportVisualQuestion`.~~
-   **Done**: migration `AddQuestionEmbeddings`, the vector as `varbinary(max)`.
-3. ~~Extend `SubscriberQuestionEnrichment` to embed newly-generated/carried-forward questions lacking a
-   current embedding.~~ **Done**: `SubscriberQuestionEnrichment.EmbedQuestionsAsync`, wired into both sync
-   paths (`RepoSyncService` and the manual sync endpoint) beside the generation step. It is deliberately
-   its OWN step behind its OWN switch rather than folded into `EnrichAsync`, because retrieval and question
-   generation are independently toggleable: a deployment that generated questions earlier and only now
-   turns retrieval on has a table of un-embedded rows, and this fills them in with no second LLM pass. A
-   row is selected when it has no vector or its `EmbeddingModel` is not the configured one, so a model
-   change re-embeds exactly the affected rows. The pre-sync snapshot was widened to carry each question's
-   existing vector alongside its text (`PriorQuestion`), so an unchanged visual costs neither an LLM call
-   nor an embeddings call. An embeddings failure degrades to a returned warning, never an exception, so an
-   outage cannot cost the rows the sync already wrote.
-4. ~~`FindSimilarAsync` (in-process cosine ranking) + a small integration test seeding a handful of known
-   questions and asserting the ranking order matches expectation for an obvious paraphrase.~~ **Done**:
+Steps 1-3 below describe the ORIGINAL embedding sequence, which was built and then removed when the
+mechanism changed (see the status note at the top). They are kept as a record of what was tried and
+what replaced it, not as outstanding work.
+
+1. ~~`IEmbeddingProvider` abstraction + one implementation.~~ **Built, then removed.** `IEmbeddingProvider`
+   and `EmbeddingGateway` served both OpenAI and Azure behind one interface. Deleted with the mechanism
+   switch; its replacement is `QuestionExpander` (`src/SqlFlow.Assistant/QuestionExpander.cs`), which
+   reuses the Anthropic account already configured for `QuestionGenerator` instead of a second vendor.
+2. ~~Migration adding `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc`.~~ **Built, then reverted.** Migration
+   `AddQuestionEmbeddings` was applied only to a throwaway test database, reverted there, and removed
+   before any deployment saw it. Its replacement is `AddQuestionFullTextSearch`, which adds no columns.
+3. ~~Embed questions at sync time.~~ **Built, then removed.** `EmbedQuestionsAsync` embedded new and
+   model-stale rows during a sync. The word search needs no sync-time work at all, so this step has no
+   replacement: the text it searches is already stored.
+4. ~~The search step + an integration test asserting the ranking for an obvious paraphrase.~~ **Done**:
    `QuestionSearch.FindSimilarAsync` (`src/SqlFlow.ControlPlane/Background/QuestionSearch.cs`), returning
-   `QuestionMatch` (question, the SQL that answers it, its object keys, provenance, similarity, subscriber,
-   visual title). It ranks first and resolves second, so only the winning handful cost a lookup of their SQL
-   and objects rather than joining across every stored question. Rows embedded by a different model than the
-   caller's are skipped rather than compared, since two models share no coordinate space and ranking across
-   them would produce confident nonsense; the next sync re-embeds them. A search against an estate with
-   nothing embedded returns empty without embedding the question at all. Tested (`QuestionSearchTests`)
-   against a real SQL Server with a deterministic offline embedder, including the paraphrase case that
-   motivates embeddings over keyword matching: "what was our turnover per territory" finds "What is our
-   revenue by region?" despite sharing no content words.
-5. ~~MCP tool surface (`find_similar_questions` or equivalent) so an assistant surface can call it.~~
-   **Done**: `find_similar_questions` (`tools/sqlflow-mcp/src/server.rs`) over
-   `GET /api/v1/lineage/subscribers/similar-questions` (`FindSimilarQuestionsAsync`,
-   `src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs`), added to the SHARED read surface so both the GUI and
-   Slack get it: it reaches no datasource, returning only SQL text the catalog already stores and that
-   `describe_subscriber` already exposes on both surfaces. Each match carries `similarity` plus a `trusted`
-   flag saying whether it cleared the deployment's threshold, and the response repeats the threshold itself,
-   so a caller reports confidence from retrieval rather than inventing one. A deployment without retrieval
-   configured answers **501, not an empty match list**: "nothing is close to your question" and "this
-   deployment never looked" demand opposite follow-ups, and conflating them would have an assistant claim an
-   estate has no matching dashboard when it never searched. The tool description states that the similarity
-   is the only trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and
-   that execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
+   `QuestionSearchResult` (the terms searched, plus `QuestionMatch` rows carrying the question, the SQL
+   that answers it, its object keys, provenance, score, matched terms, subscriber, and visual title). It
+   ranks first and resolves second, so only the winning handful cost a lookup of their SQL and objects.
+   Terms reach the database as parameters, never as predicate text. Tested (`QuestionSearchTests`) against
+   a real SQL Server: the differently-worded match ("turnover per territory" finding "revenue by region"),
+   stop-word-only input matching nothing rather than everything, word-boundary matching ("sale" not
+   matching "wholesale"), apostrophes and full-text operators treated as text, the no-expander fallback,
+   and the no-stemming limitation of the `LIKE` path pinned explicitly.
+5. ~~MCP tool surface so an assistant surface can call it.~~ **Done**: `find_similar_questions`
+   (`tools/sqlflow-mcp/src/server.rs`) over `GET /api/v1/lineage/subscribers/similar-questions`
+   (`FindSimilarQuestionsAsync`, `src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs`), on the SHARED read
+   surface so both the GUI and Slack get it: it reaches no datasource, returning only SQL text the catalog
+   already stores and that `describe_subscriber` already exposes on both surfaces. Each match carries
+   `score`, the `matchedTerms` that produced it, and a `trusted` flag saying whether it cleared the
+   deployment's threshold; the response repeats the threshold and the full `searchedTerms`, so a caller
+   reports confidence from retrieval rather than inventing one. A deployment without retrieval configured
+   answers **501, not an empty match list**: "nothing matched your question" and "this deployment never
+   looked" demand opposite follow-ups, and conflating them would have an assistant claim an estate has no
+   matching dashboard when it never searched. The tool description states that the score is the only
+   trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and that
+   execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
 6. Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject UI flow
-   (POWERAI.md Section 6) that writes into it — this is "the learning loop" itself and is the largest
+   (POWERAI.md Section 6) that writes into it, this is "the learning loop" itself and is the largest
    remaining piece; everything above this line is useful (retrieval over PowerBI-derived questions
    alone) even before this step lands.
 
-## 9. Open questions to settle before implementation starts
+## 9. Open questions
 
 - ~~**Estate-wide vs repo-scoped search.**~~ **Settled**: the caller chooses. `FindSimilarAsync` and the
   endpoint both take a nullable `repoId`, and `find_similar_questions` exposes it as an optional argument
   documented as "omit to search the whole estate", so estate-wide is the default a model gets by doing
   nothing while a caller that knows it wants one repo can say so.
-- ~~**Which embedding provider is the default when neither OpenAI nor Foundry is otherwise configured.**~~
-  **Settled** in step 1: retrieval is off by default, and enabling it without the credential its chosen
-  provider needs is a startup error naming the exact configuration key (`RetrievalOptions.Validate`),
-  the same posture question generation already takes. There is no silent fallback to a third provider.
-- **Re-embedding on a model upgrade.** `EmbeddingModel` gates detection, but nothing yet defines the
-  operational trigger (a config change? a CLI command? automatic on next sync?) — needs a decision
-  before step 2 above ships.
+- ~~**Which embedding provider is the default.**~~ **Moot**: there is no embedding provider. Retrieval is
+  off by default, and enabling it with `ExpandSynonyms` on but no Anthropic key is a startup error naming
+  the exact configuration key (`RetrievalOptions.Validate`), the same posture question generation takes.
+- ~~**Re-embedding on a model upgrade.**~~ **Moot**: nothing is stored that a model upgrade invalidates.
+- **Is term-count scoring good enough, and where should `RankThreshold` sit?** Unsettled, and the main
+  open risk of the mechanism switch (Section 3). The default of 2 is reasoning, not evidence: one shared
+  term is routinely coincidence, two rarely is. This needs real questions and real typed queries to tune,
+  and it is the first thing to revisit once anyone has run the feature against a live estate.
+- **How much does expansion quality vary between questions?** One Anthropic call decides the entire
+  search's vocabulary, so a bad expansion is a bad search with no second signal to fall back on. Worth
+  watching once there is real usage; `searchedTerms` is returned on every response specifically so this
+  is diagnosable from the outside rather than needing a log dive.
