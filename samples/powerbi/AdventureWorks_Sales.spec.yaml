@@ -226,23 +226,34 @@ subscribers:
       title: "Sales Amount by Order Date / Due Date"
       sql: "SELECT SUM([s].[Sales Amount]) AS [Sum(Sales.Sales Amount)], [s].[Sales Amount by Due Date] AS [Sales.Sales Amount by Due Date], [d].[Month] AS [Date.Fiscal.Month] FROM [Date] AS [d], [Sales] AS [s] ORDER BY [d].[Month] ASC;"
       ordinal: 1
+      questions:
+        - "What is our sales amount by month?"
+        - "How does sales amount by order date compare to sales amount by due date, month over month?"
     - id: "AdventureWorks_Sales#AdventureWorks Sales.pbix#page:1#visual:2"
       kind: "visual"
       visualType: "map"
       title: "Order Quantity by Reseller Country"
       sql: "SELECT SUM([s].[Order Quantity]) AS [Sum(Sales.Order Quantity)], [r].[Country-Region] AS [Reseller.Country-Region] FROM [Sales] AS [s], [Reseller] AS [r];"
       ordinal: 2
+      questions:
+        - "Which reseller countries order the most units?"
+        - "How is order quantity distributed geographically across our resellers?"
     - id: "AdventureWorks_Sales#AdventureWorks Sales.pbix#page:1#visual:3"
       kind: "visual"
       visualType: "pivotTable"
       title: "Sales Amount by Category and Reseller Business Type"
       sql: "SELECT [p].[Category] AS [Product.Category], [r].[Business Type] AS [Reseller.Business Type], SUM([s].[Sales Amount]) AS [Sum(Sales.Sales Amount)] FROM [Product] AS [p], [Reseller] AS [r], [Sales] AS [s] WHERE NOT ([r].[Business Type] IN ('[Not Applicable]'));"
       ordinal: 3
+      questions:
+        - "What is our sales amount broken down by product category and reseller business type?"
+        - "Which reseller business type buys the most from each product category?"
     - id: "AdventureWorks_Sales#AdventureWorks Sales.pbix#page:1#visual:4"
       kind: "visual"
       visualType: "slicer"
       sql: "SELECT [d].[Year] AS [Date.Fiscal.Year], [d].[Month] AS [Date.Fiscal.Month] FROM [Date] AS [d] ORDER BY [d].[Year] ASC;"
       ordinal: 4
+      questions:
+        - "What fiscal years and months are available to filter this report by?"
     - id: "AdventureWorks_Sales#AdventureWorks Sales.pbix#page:2"
       kind: "page"
       displayName: "Page 2"
@@ -255,6 +266,9 @@ subscribers:
       title: "Sales Amount by Category and Reseller Business Type"
       sql: "SELECT [p].[Category] AS [Product.Category], [r].[Business Type] AS [Reseller.Business Type], SUM([s].[Sales Amount]) AS [Sum(Sales.Sales Amount)] FROM [Product] AS [p], [Reseller] AS [r], [Sales] AS [s] WHERE NOT ([r].[Business Type] IN ('[Not Applicable]')) ORDER BY SUM([s].[Sales Amount]) DESC;"
       ordinal: 1
+      questions:
+        - "Which product category and reseller business type combination generates the most sales amount?"
+        - "Rank product category and reseller business type pairs by sales amount, highest first."
     - id: "AdventureWorks_Sales#AdventureWorks Sales.pbix#page:3"
       kind: "page"
       displayName: "Page 3"
@@ -266,6 +280,9 @@ subscribers:
       visualType: "areaChart"
       sql: "SELECT [d].[Month] AS [Date.Fiscal.Month], SUM([s].[Sales Amount]) AS [Sum(Sales.Sales Amount)], [s].[Sales Amount by Due Date] AS [Sales.Sales Amount by Due Date] FROM [Date] AS [d], [Sales] AS [s] ORDER BY [d].[Month] ASC;"
       ordinal: 1
+      questions:
+        - "How does sales amount trend by month?"
+        - "How does sales amount by order date compare to sales amount by due date, across the fiscal year?"
     edges:
     - from: "AdventureWorks_Sales#AdventureWorks Sales.pbix#table:Customer"
       to: "AdventureWorks_Sales#AdventureWorks Sales.pbix#col:Customer.City"

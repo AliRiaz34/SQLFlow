@@ -42,6 +42,9 @@ public sealed class CatalogDbContext : DbContext
 
     public DbSet<CatalogSubscriberReportField> SubscriberReportFields => Set<CatalogSubscriberReportField>();
 
+    public DbSet<CatalogSubscriberReportVisualQuestion> SubscriberReportVisualQuestions
+        => Set<CatalogSubscriberReportVisualQuestion>();
+
     public DbSet<CatalogFlowDependency> FlowDependencies => Set<CatalogFlowDependency>();
 
     public DbSet<CatalogRunFile> RunFiles => Set<CatalogRunFile>();
@@ -338,6 +341,7 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(v => v.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(v => v.VisualType).HasMaxLength(100).IsRequired();
             entity.Property(v => v.Title).HasMaxLength(400);
+            entity.Property(v => v.ContentHash).HasMaxLength(64).IsRequired();
             entity.HasIndex(v => v.PageKey);
             entity.HasIndex(v => v.RepoId);
         });
@@ -352,6 +356,16 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(f => f.ColumnOrMeasure).HasMaxLength(250).IsRequired();
             entity.HasIndex(f => f.VisualKey);
             entity.HasIndex(f => f.RepoId);
+        });
+
+        modelBuilder.Entity<CatalogSubscriberReportVisualQuestion>(entity =>
+        {
+            entity.ToTable("SubscriberReportVisualQuestion");
+            entity.HasKey(q => q.Id);
+            entity.Property(q => q.VisualKey).HasMaxLength(1192).IsRequired();
+            entity.Property(q => q.Question).HasMaxLength(400).IsRequired();
+            entity.HasIndex(q => q.VisualKey);
+            entity.HasIndex(q => q.RepoId);
         });
 
         modelBuilder.Entity<CatalogFlowDependency>(entity =>

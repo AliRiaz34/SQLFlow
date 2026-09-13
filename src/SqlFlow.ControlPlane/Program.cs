@@ -197,6 +197,27 @@ if (options.Assistant.Enabled)
     builder.Services.AddSingleton<SqlFlow.Assistant.TranscriptionGateway>();
 }
 
+// ---- PowerAI question generation: independent of the interactive chat assistant above (a deployment may run
+// either without the other), but reuses the same Anthropic account/model rather than declaring its own, since
+// both draw on the same subscription. Registered only when its own switch is on; the post-sync enrichment step
+// resolves it from DI and is itself only invoked when this same switch is on, so an unconfigured or disabled
+// deployment never attempts an Anthropic call at sync time.
+if (options.PowerAI.QuestionGeneration.Enabled)
+{
+    builder.Services.AddSingleton(sp =>
+    {
+        var resolver = sp.GetRequiredService<SqlFlow.Core.Secrets.ISecretResolver>();
+        var anthropic = sp.GetRequiredService<IOptions<ControlPlaneOptions>>().Value.Assistant.Anthropic;
+        return new SqlFlow.Assistant.AnthropicOptions
+        {
+            ApiKey = resolver.Resolve(anthropic.ApiKey),
+            Model = anthropic.Model,
+            MaxTokens = anthropic.MaxTokens,
+        };
+    });
+    builder.Services.AddSingleton<SqlFlow.Assistant.QuestionGenerator>();
+}
+
 // ---- Catalog read model: pooled, read-only, transient-retry --------------------------------------------------
 // The provider setup (migrations history table, transient-error resiliency) comes from CatalogDatabase.Configure,
 // the single definition shared with the CLI, the worker and bootstrap, so no host runs with weaker resiliency than

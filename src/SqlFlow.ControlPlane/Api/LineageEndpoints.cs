@@ -211,10 +211,13 @@ public sealed record SubscriberReportFieldDto(
 
 /// <summary>One visual on a report page: its chart type, its authored title (when it has one), the fields it
 /// projects with their roles, and the name of the <see cref="SubscriberQueryDto"/> it was rendered as, so a
-/// caller can go from "this visual plots Sales Amount as Y" to the actual SQL without matching text.</summary>
+/// caller can go from "this visual plots Sales Amount as Y" to the actual SQL without matching text.
+/// <c>Questions</c> is 1-3 natural-language business questions this visual answers, generated from its title,
+/// chart type, and fields (POWERAI.md's "business-question field"); empty when question generation is disabled
+/// or has not yet run for this visual.</summary>
 public sealed record SubscriberReportVisualDto(
     int Ordinal, string VisualType, string? Title, string QueryName,
-    IReadOnlyList<SubscriberReportFieldDto> Fields);
+    IReadOnlyList<SubscriberReportFieldDto> Fields, IReadOnlyList<string> Questions);
 
 /// <summary>One page of a report, with the visuals on it. <c>ReportFile</c> names which <c>.pbix</c> the page
 /// came from, which only distinguishes pages when a subscriber's <c>pbix:</c> names a directory of several
@@ -1520,14 +1523,21 @@ public static class LineageEndpoints
             .Where(f => visualKeys.Contains(f.VisualKey))
             .Take(MaxDossierRows)
             .ToListAsync(ct).ConfigureAwait(false);
+        var questionRows = await db.SubscriberReportVisualQuestions.AsNoTracking()
+            .Where(q => visualKeys.Contains(q.VisualKey))
+            .OrderBy(q => q.Ordinal)
+            .Take(MaxDossierRows)
+            .ToListAsync(ct).ConfigureAwait(false);
 
         var fieldsByVisual = fieldRows.ToLookup(f => f.VisualKey);
+        var questionsByVisual = questionRows.ToLookup(q => q.VisualKey);
         var visualsByPage = visualRows
             .Select(v => (v.PageKey, Dto: new SubscriberReportVisualDto(
                 v.Ordinal, v.VisualType, v.Title, v.QueryName,
                 fieldsByVisual[v.VisualKey]
                     .Select(f => new SubscriberReportFieldDto(f.Role, f.TableName, f.ColumnOrMeasure, f.IsMeasure))
-                    .ToList())))
+                    .ToList(),
+                questionsByVisual[v.VisualKey].Select(q => q.Question).ToList())))
             .ToLookup(x => x.PageKey, x => x.Dto);
 
         var pages = pageRows

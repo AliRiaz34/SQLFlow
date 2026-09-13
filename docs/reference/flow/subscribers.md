@@ -28,6 +28,9 @@ keywords:
   - measures
   - relationships
   - visual fields
+  - business question
+  - question generation
+  - text-to-query
 yamlPath: subscribers
 related:
   - concept-lineage-graph-and-plan
@@ -46,6 +49,9 @@ sourceRefs:
   - src/SqlFlow.Catalog/CatalogEntities.cs
   - src/SqlFlow.Catalog/CatalogSync.cs
   - src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs
+  - src/SqlFlow.ControlPlane/Background/SubscriberQuestionEnrichment.cs
+  - src/SqlFlow.ControlPlane/Configuration/ControlPlaneOptions.cs
+  - src/SqlFlow.Assistant/QuestionGenerator.cs
   - tools/pbix-extract/src/main.c
 ---
 
@@ -214,12 +220,21 @@ Only the report layer (pages, visuals, projected fields, and each visual's rende
 
 The consumption itself is not stored twice: the read edges are ordinary `catalog.LineageEdge` rows, so "what consumes table X" is the same edge query as "what writes table X".
 
+## Business questions per visual
+
+When `ControlPlane:PowerAI:QuestionGeneration:Enabled` is on, a control-plane-only step runs after each sync that touches subscriber report rows: it turns every extracted visual's title, chart type, and projected fields into 1-3 natural-language business questions the visual answers (`catalog.SubscriberReportVisualQuestion`), the text-to-query training material POWERAI.md's learning loop needs. This is deliberately not part of `tools/pbix-extract` or `CatalogSync`: the tool stays a pure parser with no network access, and the sync itself stays shared code the bare CLI also runs with no LLM wiring at all.
+
+Regeneration is incremental. Every sync deletes and reinserts a repo's subscriber report rows wholesale, so a visual's `ContentHash` (a SHA-256 of its title, chart type, and fields) is what tells a sync "the same visual as before" from "new or changed": an unchanged hash carries its prior questions forward with no LLM call, and only a new or changed visual is sent to the model. A visual whose questions could not be generated is left without any rather than blocking the rest of the sync.
+
+The feature is off by default and independent of `ControlPlane:Assistant:Enabled` (the interactive chat assistant): a deployment may run either without the other, though it reuses `ControlPlane:Assistant:Anthropic`'s API key and model rather than declaring its own.
+
 ## API
 
 | Endpoint | Answers |
 | --- | --- |
 | `GET /lineage/subscribers` | What consumes the warehouse. Filter by `type` (the tool) or `search` (name, owner, description). Each row carries how many queries it runs and how many distinct objects those queries read. |
 | `GET /lineage/subscribers/dossier?key=<node key>` | What one subscriber consumes: its queries, and every object they read, named and located from the object registry, with the queries that reference each one. |
+| `GET /lineage/subscribers/report?key=<node key>` | The Power BI report structure behind one subscriber: every page, the visuals on it, and each field's role, plus each visual's `questions` (1-3 business questions it answers, empty when question generation is disabled or has not run for it yet). |
 | `GET /lineage/objects/dossier?key=<node key>` | Now also returns `subscribers`: who consumes THIS object, with the specific queries that name it. |
 | `GET /search/subscribers`, and the `subscribers` category of `GET /search/all` | Subscribers as a surface of the GLOBAL search, matched on name, type, owner, description, notes, location, or declaring file. It is the LAST category, deliberately: the warehouse is the subject and consumption is a convention on top of it, so a bare term is far more often a table or a column than the name of a report. A subscriber is neither a database object nor a flow, so without this a report searched for by name returned nothing and looked absent rather than unsearched. |
 

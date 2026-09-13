@@ -1843,17 +1843,20 @@ and fix every finding first."
     #[tool(
         description = "Describe the PAGES, VISUALS, and FIELD ROLES of one Power BI report backing a data \
             subscriber: every page (with the report file it came from, for a subscriber whose pbix: names a \
-            directory of several reports), every visual on it (chart type, authored title, and the name of \
-            the query it was rendered as), and every field a visual projects with its ROLE \
-            (Category/Y/Rows/Values/Size/...): whether it is the axis a chart is broken down BY or the value \
-            it plots, which a flattened column list from parsed SQL cannot express. Cross-reference a \
-            visual's `queryName` against describe_subscriber's `queries` to get the actual rendered SQL. This \
-            is how you answer \"what questions does this dashboard already ask, and in what shape\", rather \
-            than only \"what tables does it read\". `tableName` on a field is the Power BI MODEL entity name \
-            (e.g. \"Sales\"), not yet resolved to a physical warehouse object, so do not treat it as a \
-            catalog key. An empty `pages` list means the subscriber has no extracted report (a hand-authored \
-            subscriber, or one whose report has not synced yet), not that one failed to load. Takes the `key` \
-            from list_subscribers."
+            directory of several reports), every visual on it (chart type, authored title, the name of the \
+            query it was rendered as, and its `questions`, 1-3 natural-language business questions the visual \
+            answers), and every field a visual projects with its ROLE (Category/Y/Rows/Values/Size/...): \
+            whether it is the axis a chart is broken down BY or the value it plots, which a flattened column \
+            list from parsed SQL cannot express. Cross-reference a visual's `queryName` against \
+            describe_subscriber's `queries` to get the actual rendered SQL. This is how you answer \"what \
+            questions does this dashboard already ask, and in what shape\", rather than only \"what tables \
+            does it read\": match a user's typed question against `questions` before writing new SQL from \
+            scratch. `tableName` on a field is the Power BI MODEL entity name (e.g. \"Sales\"), not yet \
+            resolved to a physical warehouse object, so do not treat it as a catalog key. An empty `pages` \
+            list means the subscriber has no extracted report (a hand-authored subscriber, or one whose \
+            report has not synced yet), not that one failed to load; an empty `questions` on a visual means \
+            question generation is disabled or has not run for it yet, not that the visual answers nothing. \
+            Takes the `key` from list_subscribers."
     )]
     async fn describe_subscriber_report(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/subscribers/report", &[("key", i.key)]).await

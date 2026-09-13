@@ -84,7 +84,9 @@ public static class CatalogEndpoints
     /// root path the control-plane host cannot see (a local-path sync only works where the flows live on disk).
     /// </summary>
     private static async Task<Results<Ok<RepoSyncResultDto>, ProblemHttpResult>> SyncRepoAsync(
-        Guid id, CatalogDbContext db, ISecretResolver secrets, TimeProvider clock, CancellationToken ct)
+        Guid id, CatalogDbContext db, ISecretResolver secrets, TimeProvider clock,
+        Microsoft.Extensions.Options.IOptions<Configuration.ControlPlaneOptions> options,
+        IServiceProvider services, CancellationToken ct)
     {
         var repo = await db.Repos.AsNoTracking().Where(r => r.Id == id)
             .Select(r => new { r.Name, r.RemoteUrl, r.RootPath })
@@ -124,9 +126,25 @@ public static class CatalogEndpoints
             // catalog + sys.sql_modules reads) enabled so the object-level lineage populates. A derived-tier failure
             // (an unreachable database, a timeout) is downgraded to a warning inside SyncAsync and never faults the
             // request; the flow registry and flow-level lineage still land.
+            var generateQuestions = options.Value.PowerAI.QuestionGeneration.Enabled;
+            var repoId = SqlFlow.Core.Identity.FlowIdentity.FromName(repo.Name);
+            var questionSnapshot = generateQuestions
+                ? await Background.SubscriberQuestionEnrichment.SnapshotAsync(db, repoId, ct).ConfigureAwait(false)
+                : null;
+
             var result = await new CatalogSync().SyncAsync(
                 db, repo.RootPath, repo.Name, repo.RemoteUrl, clock.GetUtcNow().UtcDateTime,
                 includeDerived: true, secrets: secrets, ct: ct).ConfigureAwait(false);
+
+            // PowerAI question generation: control-plane-only, runs after the sync's own transaction has
+            // committed, so a flaky LLM call never blocks or rolls back the structural sync above.
+            if (generateQuestions && questionSnapshot is not null)
+            {
+                var generator = services.GetRequiredService<SqlFlow.Assistant.QuestionGenerator>();
+                await Background.SubscriberQuestionEnrichment
+                    .EnrichAsync(db, repoId, questionSnapshot, generator, ct)
+                    .ConfigureAwait(false);
+            }
 
             return TypedResults.Ok(new RepoSyncResultDto(
                 result.PipelinesAdded, result.PipelinesUpdated, result.PipelinesUnchanged, result.PipelinesDeactivated, result.PipelinesDeleted,

@@ -27,6 +27,7 @@ public sealed partial class RepoSyncService : BackgroundService
     private readonly TimeSpan _pollInterval;
     private readonly bool _connectLineage;
     private readonly bool _enabled;
+    private readonly bool _generateQuestions;
     private readonly GitMaterializer _materializer = new();
     private readonly ILogger<RepoSyncService> _logger;
 
@@ -48,6 +49,7 @@ public sealed partial class RepoSyncService : BackgroundService
         // warning. ManagedSync.Enabled=false opts an instance out entirely (a local dev control plane sharing
         // the production catalog must never steal claims).
         _enabled = options.Value.ManagedSync.Enabled;
+        _generateQuestions = options.Value.PowerAI.QuestionGeneration.Enabled;
         _logger = logger;
     }
 
@@ -190,6 +192,15 @@ public sealed partial class RepoSyncService : BackgroundService
                 }
             }
 
+            // The pre-sync snapshot of this repo's subscriber-visual questions, taken before SyncAsync deletes and
+            // reinserts every subscriber report row: it is how the post-sync enrichment step below tells "the same
+            // visual as last time" (carry its questions forward) from "new or changed" (regenerate), since the sync
+            // itself preserves no row identity across passes.
+            var repoId = SqlFlow.Core.Identity.FlowIdentity.FromName(source.Name);
+            var questionSnapshot = _generateQuestions
+                ? await SubscriberQuestionEnrichment.SnapshotAsync(catalog, repoId, ct).ConfigureAwait(false)
+                : null;
+
             var result = await new CatalogSync()
                 .SyncAsync(catalog, workingDir, source.Name, source.RemoteUrl, _clock.GetUtcNow().UtcDateTime,
                     includeDerived: _connectLineage, secrets: resolver,
@@ -198,6 +209,20 @@ public sealed partial class RepoSyncService : BackgroundService
                 .ConfigureAwait(false);
 
             await EmitResultAsync(trace, result, ct).ConfigureAwait(false);
+
+            // PowerAI question generation: control-plane-only, runs after the sync's own transaction has
+            // committed, so a flaky LLM call never blocks or rolls back the structural sync above.
+            if (_generateQuestions && questionSnapshot is not null)
+            {
+                var generator = scope.ServiceProvider.GetRequiredService<SqlFlow.Assistant.QuestionGenerator>();
+                var questionWarnings = await SubscriberQuestionEnrichment
+                    .EnrichAsync(catalog, repoId, questionSnapshot, generator, ct)
+                    .ConfigureAwait(false);
+                foreach (var warning in questionWarnings)
+                {
+                    await trace.InfoAsync("questions", warning, ct).ConfigureAwait(false);
+                }
+            }
             await RepoSourceStore.RecordSuccessAsync(catalog, source.Id, sha, _clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
             await trace.CompleteAsync(ActivityStatuses.Succeeded, $"Sync complete at {sha}.", ct).ConfigureAwait(false);
             LogSynced(source.Name, sha);

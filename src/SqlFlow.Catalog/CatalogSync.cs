@@ -1477,6 +1477,11 @@ public sealed class CatalogSync
                 foreach (var visual in page.Visuals)
                 {
                     var visualKey = $"{pageKey}#{visual.Ordinal}";
+                    var contentHash = SubscriberReportVisualHash.Compute(
+                        visual.Title,
+                        visual.VisualType,
+                        visual.Fields.Select(f => new SubscriberReportVisualHash.FieldContent(
+                            f.Role, f.TableName, f.ColumnOrMeasure, f.IsMeasure)));
                     context.SubscriberReportVisuals.Add(new CatalogSubscriberReportVisual
                     {
                         RepoId = repoId,
@@ -1486,6 +1491,7 @@ public sealed class CatalogSync
                         VisualType = visual.VisualType,
                         Title = visual.Title,
                         QueryName = visual.QueryName,
+                        ContentHash = contentHash,
                     });
 
                     foreach (var field in visual.Fields)

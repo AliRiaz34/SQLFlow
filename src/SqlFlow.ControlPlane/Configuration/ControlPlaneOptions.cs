@@ -44,6 +44,8 @@ public sealed class ControlPlaneOptions
 
     public DataOpsOptions DataOps { get; set; } = new();
 
+    public PowerAiOptions PowerAI { get; set; } = new();
+
     /// <summary>Validates the options, throwing a clear startup error for any missing or unsafe required value.
     /// Called during host build so a misconfigured deployment never starts serving.</summary>
     public void Validate()
@@ -128,6 +130,7 @@ public sealed class ControlPlaneOptions
         RunTrace.Validate();
         Assistant.Validate();
         DataOps.Validate();
+        PowerAI.QuestionGeneration.Validate(Assistant.Anthropic);
     }
 }
 
@@ -965,6 +968,46 @@ public sealed class DataOpsOptions
         }
 
         Comparison.Validate();
+    }
+}
+
+/// <summary>The PowerAI (text-to-query) feature surface. See <c>POWERAI.md</c> for the roadmap this
+/// implements against.</summary>
+public sealed class PowerAiOptions
+{
+    public QuestionGenerationOptions QuestionGeneration { get; set; } = new();
+}
+
+/// <summary>
+/// Sync-time generation of 1-3 natural-language business questions per extracted PowerBI report visual
+/// (POWERAI.md Section 10, "the business-question field"), independently toggleable from the interactive
+/// chat assistant: a deployment may run one without the other. Runs only in the control plane, after a sync
+/// has written that sync's subscriber report rows, never in the bare CLI's <c>sqlflow db sync</c> (which has
+/// no Anthropic wiring and must not need one).
+///
+/// Environment: <c>ControlPlane__PowerAI__QuestionGeneration__Enabled=true</c>. Reuses
+/// <c>ControlPlane:Assistant:Anthropic</c>'s API key and model rather than declaring its own, since both are
+/// the same Anthropic account; enabling this without an Anthropic key configured there is a startup error.
+/// </summary>
+public sealed class QuestionGenerationOptions
+{
+    /// <summary>Turns sync-time LLM question generation on for extracted PowerBI visuals. Off, a sync writes
+    /// visuals/fields exactly as before: no questions, no Anthropic call.</summary>
+    public bool Enabled { get; set; }
+
+    public void Validate(SqlFlow.Assistant.AnthropicOptions anthropic)
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(anthropic.ApiKey))
+        {
+            throw new InvalidOperationException(
+                "ControlPlane:PowerAI:QuestionGeneration:Enabled is true but "
+                + "ControlPlane:Assistant:Anthropic:ApiKey is not set.");
+        }
     }
 }
 

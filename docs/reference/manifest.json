@@ -2347,7 +2347,10 @@
         "node graph",
         "measures",
         "relationships",
-        "visual fields"
+        "visual fields",
+        "business question",
+        "question generation",
+        "text-to-query"
       ],
       "yamlPath": "subscribers",
       "related": [
@@ -2368,6 +2371,9 @@
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.Catalog/CatalogSync.cs",
         "src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Background/SubscriberQuestionEnrichment.cs",
+        "src/SqlFlow.ControlPlane/Configuration/ControlPlaneOptions.cs",
+        "src/SqlFlow.Assistant/QuestionGenerator.cs",
         "tools/pbix-extract/src/main.c"
       ]
     },

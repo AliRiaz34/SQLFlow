@@ -751,6 +751,13 @@ public class CatalogSubscriberReportVisual
     /// Matches <c>Core.Lineage.LineageSubscriberVisual.QueryName</c>, the in-memory value this is persisted
     /// from.</summary>
     public string QueryName { get; set; } = string.Empty;
+
+    /// <summary>The lowercase-hex SHA-256 (<see cref="CatalogProjection.Hash"/>) of this visual's
+    /// question-relevant content: its title, visual type, and each field's role/table/column-or-measure/
+    /// isMeasure. Compared across syncs to decide whether its <see cref="CatalogSubscriberReportVisualQuestion"/>
+    /// rows can be carried forward unchanged or need regenerating, exactly as <c>Pipeline.ContentHash</c>
+    /// decides whether a flow document changed.</summary>
+    public string ContentHash { get; set; } = string.Empty;
 }
 
 /// <summary>
@@ -784,6 +791,64 @@ public class CatalogSubscriberReportField
     /// <summary>True when the <c>prototypeQuery</c> node was a <c>Measure</c> (DAX-backed business logic) rather
     /// than a <c>Column</c>/<c>HierarchyLevel</c> (a plain warehouse field).</summary>
     public bool IsMeasure { get; set; }
+}
+
+/// <summary>
+/// Computes <see cref="CatalogSubscriberReportVisual.ContentHash"/> from a visual's question-relevant content, so
+/// both the writer (<c>CatalogSync</c>, hashing from the freshly extracted <c>LineageSubscriberVisual</c>/
+/// <c>LineageSubscriberField</c>) and the control-plane question-generation enrichment step (hashing from the
+/// <see cref="CatalogSubscriberReportVisual"/>/<see cref="CatalogSubscriberReportField"/> rows a prior sync wrote)
+/// compute the identical value from the identical shape, so a sync that reproduces the same content is
+/// detected as unchanged regardless of which side computes the hash.
+/// </summary>
+public static class SubscriberReportVisualHash
+{
+    /// <summary>One field's contribution to the hash input, in extraction order: role, table, column/measure,
+    /// and whether it is a measure.</summary>
+    public readonly record struct FieldContent(string Role, string TableName, string ColumnOrMeasure, bool IsMeasure);
+
+    /// <summary>The lowercase-hex SHA-256 of the visual's title, visual type, and its fields (in the order
+    /// given), each on its own line so no field's content can be mistaken for a concatenation of two others.
+    /// </summary>
+    public static string Compute(string? title, string visualType, IEnumerable<FieldContent> fields)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.Append(title ?? string.Empty).Append('\n');
+        builder.Append(visualType).Append('\n');
+        foreach (var field in fields)
+        {
+            builder.Append(field.Role).Append('|')
+                .Append(field.TableName).Append('|')
+                .Append(field.ColumnOrMeasure).Append('|')
+                .Append(field.IsMeasure).Append('\n');
+        }
+        return CatalogProjection.Hash(builder.ToString());
+    }
+}
+
+/// <summary>
+/// One natural-language business question a <see cref="CatalogSubscriberReportVisual"/> answers, generated from
+/// its title, chart type, and projected fields. A visual carries 1-3 of these: a figure can be broad enough, or
+/// specific enough, to read as more than one question a person would actually type, which is why this is not a
+/// single column on the visual row. Generated and stored by a control-plane-only enrichment step that runs after
+/// a sync, never by <c>tools/pbix-extract</c> or <see cref="CatalogSync"/> itself; regenerated only when the
+/// owning visual's <see cref="CatalogSubscriberReportVisual.ContentHash"/> changes, so an unchanged visual keeps
+/// its previously generated questions across syncs instead of calling the LLM again.
+/// </summary>
+public class CatalogSubscriberReportVisualQuestion
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning visual's <see cref="CatalogSubscriberReportVisual.VisualKey"/>.</summary>
+    public string VisualKey { get; set; } = string.Empty;
+
+    /// <summary>This question's position among its visual's 1-3 questions, 1-based.</summary>
+    public int Ordinal { get; set; }
+
+    /// <summary>The question text, as a person would actually type it.</summary>
+    public string Question { get; set; } = string.Empty;
 }
 
 /// <summary>
