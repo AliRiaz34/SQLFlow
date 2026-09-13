@@ -35,8 +35,28 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         File.WriteAllText(path, content);
     }
 
+    /// <summary>
+    /// Extraction runs in the standalone <c>pbix-extract</c> binary, which is built outside the solution
+    /// (<c>make -C tools/pbix-extract</c>) so that parsing an untrusted report never happens inside the control
+    /// plane. A machine without it cannot exercise these paths, so they skip LOUDLY rather than passing
+    /// vacuously: a silent pass here would hide the loss of every assertion below.
+    /// </summary>
+    private static void RequireExtractor()
+        => Skip.If(
+            Environment.GetEnvironmentVariable("SQLFLOW_PBIX_EXTRACT") is null
+            && !File.Exists(Path.Combine(AppContext.BaseDirectory, "pbix-extract"))
+            && (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                .All(d => !File.Exists(Path.Combine(d, "pbix-extract"))),
+            "The 'pbix-extract' tool was not found. Build it with 'make -C tools/pbix-extract' and put it on "
+            + "PATH, or set SQLFLOW_PBIX_EXTRACT to its location.");
+
     private LineageReport Build()
-        => LineageGraphBuilder.Build(new FlowSetCollector().Collect(_root), _root, [LineageTier.Declared], Utc);
+    {
+        RequireExtractor();
+        return LineageGraphBuilder.Build(
+            new FlowSetCollector().Collect(_root), _root, [LineageTier.Declared], Utc);
+    }
 
     /// <summary>An ingestion writing the table the report's visual reads: the producing half of the graph.</summary>
     private static string Ingestion => string.Join('\n',
@@ -135,7 +155,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         "    server: dwh",
         $"    pbix: {pbix}") + '\n';
 
-    [Fact]
+    [SkippableFact]
     public void DeclaredPbix_TurnsItsVisualsIntoConsumptionEdges()
     {
         Write("10_ing.yaml", Ingestion);
@@ -165,7 +185,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
             && e.ObjectKey == NodeKey.For(Ods, "OdsDb", "arc", "Sales"));
     }
 
-    [Fact]
+    [SkippableFact]
     public void DeclaredPbix_RecordsOneQueryPerVisual_NamedForIt()
     {
         Write("10_ing.yaml", Ingestion);
@@ -184,7 +204,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.Equal(NodeKey.For(Ods, null, null, "Sales"), Assert.Single(query.ObjectKeys));
     }
 
-    [Fact]
+    [SkippableFact]
     public void DeclaredPbix_CarriesThePagesVisualsAndFieldRoles()
     {
         Write("10_ing.yaml", Ingestion);
@@ -224,7 +244,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
             });
     }
 
-    [Fact]
+    [SkippableFact]
     public void DeclaredPbix_WithNoHandWrittenQueries_IsNotWarnedAsUnlinked()
     {
         // A pbix-only subscriber (no hand-written 'queries:' block at all) genuinely gets its queries from
@@ -241,7 +261,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.DoesNotContain(report.Warnings, w => w.Contains("has no usable queries", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [SkippableFact]
     public void SubscriberWithNeitherQueriesNorPbix_IsWarnedAsUnlinked()
     {
         // The genuine case the warning exists for: nothing hand-written and no report declared, so the
@@ -259,7 +279,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.Contains(report.Warnings, w => w.Contains("has no usable queries", StringComparison.Ordinal));
     }
 
-    [Fact]
+    [SkippableFact]
     public void HandAuthoredSubscriber_KeepsWorking_AndCarriesNoPages()
     {
         // The declaration is additive: a subscriber with no 'pbix:' behaves exactly as before.
@@ -281,7 +301,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.Empty(subscriber.Pages);
     }
 
-    [Fact]
+    [SkippableFact]
     public void DeclaredPbix_AlongsideHandAuthoredQueries_KeepsBoth()
     {
         Write("10_ing.yaml", Ingestion);
@@ -306,7 +326,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
             subscriber.Queries.Select(q => q.Name).OrderBy(n => n, StringComparer.Ordinal));
     }
 
-    [Fact]
+    [SkippableFact]
     public void MissingPbix_IsWarned_AndLeavesTheRestOfLineageIntact()
     {
         Write("10_ing.yaml", Ingestion);
@@ -327,6 +347,43 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
     }
 
     [Fact]
+    public void MissingExtractor_IsWarned_AndLeavesTheRestOfLineageIntact()
+    {
+        // Extraction lives in a standalone binary that is deliberately NOT shipped inside the control plane,
+        // so a machine legitimately may not have it. That must degrade like any other unreadable report: the
+        // subscriber stays a consumer node, the warning says how to fix it, and the rest of the estate
+        // resolves. This test does not need the real tool, so it never skips.
+        Write("10_ing.yaml", Ingestion);
+        WritePbix("reports/sales.pbix");
+        Write("subscribers.yaml", Subscribers("reports/sales.pbix"));
+
+        var previous = Environment.GetEnvironmentVariable("SQLFLOW_PBIX_EXTRACT");
+        LineageReport report;
+        try
+        {
+            Environment.SetEnvironmentVariable(
+                "SQLFLOW_PBIX_EXTRACT", Path.Combine(_root, "no-such-pbix-extract"));
+            report = LineageGraphBuilder.Build(
+                new FlowSetCollector().Collect(_root), _root, [LineageTier.Declared], Utc);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SQLFLOW_PBIX_EXTRACT", previous);
+        }
+
+        var subscriber = Assert.Single(report.Subscribers);
+        Assert.Empty(subscriber.Pages);
+
+        // The warning has to be actionable: a person reading it should know what to build and what to set.
+        Assert.Contains(report.Warnings, w =>
+            w.Contains("pbix-extract", StringComparison.Ordinal)
+            && w.Contains("SQLFLOW_PBIX_EXTRACT", StringComparison.Ordinal));
+
+        Assert.Contains(report.Edges, e =>
+            e.Flow == "sales_02_ing" && e.Relation == LineageRelation.Writes);
+    }
+
+    [SkippableFact]
     public void DirectoryPbix_ExtractsEveryReportUnderOneSubscriber()
     {
         // A workspace of two published reports, both from the same template (so both a page named
@@ -367,7 +424,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
             e.Flow is null && e.ViaModule == subscriberKey && e.Relation == LineageRelation.Reads);
     }
 
-    [Fact]
+    [SkippableFact]
     public void DirectoryPbix_WithOneReport_KeepsSingleFileQueryNaming()
     {
         // With only one file in the directory there is no collision to guard against, so the query name stays
@@ -382,7 +439,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         Assert.Equal("Revenue / Revenue by Region", Assert.Single(subscriber.Queries).Name);
     }
 
-    [Fact]
+    [SkippableFact]
     public void EmptyDirectory_IsWarned_AndLeavesTheRestOfLineageIntact()
     {
         Write("10_ing.yaml", Ingestion);
@@ -401,7 +458,7 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
             e.Flow == "sales_02_ing" && e.Relation == LineageRelation.Writes);
     }
 
-    [Fact]
+    [SkippableFact]
     public void UnreadablePbix_IsWarned_RatherThanThrowing()
     {
         // A file that is not a report at all (no Report/Layout part) must degrade to a warning, exactly as an

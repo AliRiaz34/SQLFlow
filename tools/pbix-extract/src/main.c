@@ -438,6 +438,7 @@ int main(int argc, char **argv)
     ModelSpec spec;
     ReportLayout layout;
     Buffer out;
+    int model_read = 1;
     int status = EXIT_FAILURE;
     int i;
 
@@ -487,24 +488,33 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (data_model_open(pbix_path, &model, error, sizeof(error)) != 0) {
-        fprintf(stderr, "error: %s\n", error);
-        goto done;
-    }
-
-    if (model_spec_read(&model, &spec, error, sizeof(error)) != 0) {
-        fprintf(stderr, "error: %s\n", error);
-        goto done;
-    }
-
     /*
-     * The visual layer is read from a different part of the file and is independent of the model,
-     * so a report whose layout cannot be read still yields a complete model specification. The
-     * failure is reported and the section omitted, rather than losing the half that did work.
+     * The two halves live in different parts of the file and are independent, so either can fail
+     * without costing the other: the failure is reported and that section omitted, rather than
+     * losing the half that did work.
+     *
+     * The model half is absent for a whole legitimate class of report. One connected live to a
+     * published dataset keeps its model on the server, so the file holds no `DataModel` at all
+     * while still carrying a complete visual layer, which is the half that records the questions
+     * people actually asked. Treating that as fatal would refuse exactly those reports.
      */
+    if (data_model_open(pbix_path, &model, error, sizeof(error)) != 0
+        || model_spec_read(&model, &spec, error, sizeof(error)) != 0) {
+        fprintf(stderr, "warning: the report's model could not be read: %s\n", error);
+        model_spec_free(&spec);
+        memset(&spec, 0, sizeof(spec));
+        model_read = 0;
+    }
+
     if (report_layout_read(pbix_path, &layout, error, sizeof(error)) != 0) {
         fprintf(stderr, "warning: the report's visuals could not be read: %s\n", error);
         memset(&layout, 0, sizeof(layout));
+    }
+
+    /* Neither half readable means the file yielded nothing at all, which is a real failure. */
+    if (!model_read && layout.page_count == 0) {
+        fprintf(stderr, "error: '%s' yielded neither a model nor a report layout\n", pbix_path);
+        goto done;
     }
 
     if (explicit_name != NULL) {

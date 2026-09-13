@@ -11,7 +11,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SqlFlow.Core\SqlFlow.Core.csproj" />
-    <ProjectReference Include="..\SqlFlow.PowerBi\SqlFlow.PowerBi.csproj" />
     <ProjectReference Include="..\SqlFlow.SqlServer\SqlFlow.SqlServer.csproj" />
     <ProjectReference Include="..\SqlFlow.Yaml\SqlFlow.Yaml.csproj" />
   </ItemGroup>

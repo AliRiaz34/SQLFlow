@@ -1,10 +1,8 @@
-﻿using System.Text.Json;
-using SqlFlow.Core;
+﻿using SqlFlow.Core;
 using SqlFlow.Core.Files;
 using SqlFlow.Core.Invoke;
 using SqlFlow.Core.Lineage;
 using SqlFlow.Lineage.Extraction;
-using SqlFlow.PowerBi;
 using SqlFlow.Yaml;
 
 namespace SqlFlow.Lineage.Collection;
@@ -332,6 +330,21 @@ public sealed class FlowSetCollector
             return ExtractedReport.Empty;
         }
 
+        // Extraction runs in a separate binary, which the machine running the sync may not have: it is built
+        // where the .pbix files live rather than shipped inside the control plane, deliberately, so that a
+        // hostile report never reaches the process holding catalog credentials. Its absence is a warning and
+        // not a failure, exactly like an unreadable report, so the rest of the estate still resolves.
+        var executable = PbixExtractTool.Locate();
+        if (executable is null)
+        {
+            result.Warnings.Add(
+                $"{file}: subscriber '{subscriber.Name}' declares 'pbix: {subscriber.Pbix}' but the "
+                + $"'pbix-extract' tool was not found, so the report was not extracted. Build it "
+                + $"(make -C tools/pbix-extract) and put it on PATH, or set "
+                + $"{PbixExtractTool.PathVariable} to its location.");
+            return ExtractedReport.Empty;
+        }
+
         var queries = new List<Core.Subscribers.SubscriberQuery>();
         var pages = new List<Core.Lineage.LineageSubscriberPage>();
 
@@ -342,7 +355,9 @@ public sealed class FlowSetCollector
 
         foreach (var (reportFile, path) in reportFiles)
         {
-            ExtractOneReport(result, subscriber, file, server, reportFile, path, qualifyWithReportFile, queries, pages);
+            ExtractOneReport(
+                result, subscriber, file, server, executable, reportFile, path, qualifyWithReportFile,
+                queries, pages);
         }
 
         return new ExtractedReport(queries, pages);
@@ -356,19 +371,19 @@ public sealed class FlowSetCollector
         Core.Subscribers.DataSubscriber subscriber,
         string file,
         string server,
+        string executable,
         string reportFile,
         string path,
         bool qualifyWithReportFile,
         List<Core.Subscribers.SubscriberQuery> queries,
         List<Core.Lineage.LineageSubscriberPage> pages)
     {
-        PbixReadResult read;
+        PbixExtractResult extracted;
         try
         {
-            read = PbixReportReader.Read(path);
+            extracted = PbixExtractTool.Run(executable, path, reportFile);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                       or InvalidDataException or JsonException)
+        catch (PbixExtractException ex)
         {
             result.Warnings.Add(
                 $"{file}: subscriber '{subscriber.Name}' report '{reportFile}' could not be read "
@@ -376,16 +391,30 @@ public sealed class FlowSetCollector
             return;
         }
 
-        foreach (var warning in read.Warnings)
+        // What the tool declined to extract, and why: a visual whose filter it could not represent, a
+        // projection the query does not select. These are re-emitted verbatim so a dropped question is visible
+        // in the estate's own warnings rather than only in the tool's output.
+        foreach (var warning in extracted.Warnings)
         {
             result.Warnings.Add($"{file}: subscriber '{subscriber.Name}' report '{reportFile}': {warning}");
         }
 
-        foreach (var page in read.Layout.Pages)
+        foreach (var page in extracted.Pages)
         {
-            var visuals = new List<Core.Lineage.LineageSubscriberVisual>(page.Visuals.Count);
-            foreach (var visual in page.Visuals)
+            var visualList = page.Visuals ?? [];
+            var visuals = new List<Core.Lineage.LineageSubscriberVisual>(visualList.Count);
+            foreach (var visual in visualList)
             {
+                if (visual.Sql is not { Length: > 0 } sql)
+                {
+                    // The tool does not emit a visual it could not render, and says why under its own
+                    // warnings, so one arriving without SQL means the two have drifted out of step.
+                    result.Warnings.Add(
+                        $"{file}: subscriber '{subscriber.Name}' report '{reportFile}' page "
+                        + $"'{page.Page}' visual #{visual.Ordinal} arrived with no query; it was skipped.");
+                    continue;
+                }
+
                 // The query's name identifies the visual it came from, so the catalog can say WHICH chart links
                 // a report to a table, and so the structure below can point back at its own SQL. Once more than
                 // one report file is in play the report file itself joins the name, so two files' identically
@@ -394,21 +423,8 @@ public sealed class FlowSetCollector
                     ? title
                     : $"{visual.VisualType} #{visual.Ordinal}";
                 var queryName = qualifyWithReportFile
-                    ? $"{reportFile} / {page.DisplayName} / {visualLabel}"
-                    : $"{page.DisplayName} / {visualLabel}";
-
-                string sql;
-                try
-                {
-                    sql = VisualQueryTranslator.Translate(visual, page.Filters);
-                }
-                catch (PbixUnsupportedExpressionException ex)
-                {
-                    result.Warnings.Add(
-                        $"{file}: subscriber '{subscriber.Name}' report '{reportFile}' visual "
-                        + $"'{queryName}' could not be rendered as a query ({ex.Message}); it was skipped.");
-                    continue;
-                }
+                    ? $"{reportFile} / {page.Page} / {visualLabel}"
+                    : $"{page.Page} / {visualLabel}";
 
                 queries.Add(new Core.Subscribers.SubscriberQuery
                 {
@@ -423,12 +439,12 @@ public sealed class FlowSetCollector
                     VisualType = visual.VisualType,
                     Title = visual.Title,
                     QueryName = queryName,
-                    Fields = visual.Fields
+                    Fields = (visual.Fields ?? [])
                         .Select(f => new Core.Lineage.LineageSubscriberField
                         {
                             Role = f.Role,
-                            TableName = f.TableName,
-                            ColumnOrMeasure = f.ColumnOrMeasure,
+                            TableName = f.Table,
+                            ColumnOrMeasure = f.Field,
                             IsMeasure = f.IsMeasure,
                         })
                         .ToList(),
@@ -437,9 +453,9 @@ public sealed class FlowSetCollector
 
             pages.Add(new Core.Lineage.LineageSubscriberPage
             {
-                ReportFile = reportFile,
-                Name = page.Name,
-                DisplayName = page.DisplayName,
+                ReportFile = page.ReportFile ?? reportFile,
+                Name = page.Name ?? page.Page,
+                DisplayName = page.Page,
                 Ordinal = page.Ordinal,
                 Visuals = visuals,
             });

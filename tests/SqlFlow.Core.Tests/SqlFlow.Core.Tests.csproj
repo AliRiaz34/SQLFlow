@@ -29,7 +29,6 @@
     <ProjectReference Include="..\..\src\SqlFlow.Azure\SqlFlow.Azure.csproj" />
     <ProjectReference Include="..\..\src\SqlFlow.HealthCheck\SqlFlow.HealthCheck.csproj" />
     <ProjectReference Include="..\..\src\SqlFlow.Lineage\SqlFlow.Lineage.csproj" />
-    <ProjectReference Include="..\..\src\SqlFlow.PowerBi\SqlFlow.PowerBi.csproj" />
     <ProjectReference Include="..\..\src\SqlFlow.Providers\SqlFlow.Providers.csproj" />
     <ProjectReference Include="..\..\src\SqlFlow.SourceControl\SqlFlow.SourceControl.csproj" />
     <ProjectReference Include="..\..\src\SqlFlow.Orchestration\SqlFlow.Orchestration.csproj" />
