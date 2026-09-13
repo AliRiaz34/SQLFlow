@@ -1,7 +1,51 @@
 # Handoff: repoint the sample .pbix at SQL Server to prove model-entity resolution
 
-Status: waiting on a Windows machine with PowerBI Desktop. Everything Linux-side is done and
-verified; this document is the exact remaining steps.
+Status: **DONE, for the extractor half.** Carried out on a Windows machine with PowerBI Desktop on
+2026-09-13. The steps below are kept as the record of what was done and why, with the outcome of each
+noted. What the repointing proved, and the one part of the chain it did not reach, is recorded in
+POWERAI.md Section 10 and in
+[docs/wiki/decisions/powerbi-model-entity-resolution.md](wiki/decisions/powerbi-model-entity-resolution.md).
+
+## Outcome
+
+All seven SQL-backed model tables resolve to real warehouse objects (`Customer` to `dbo.DimCustomer`,
+`Date` to `dbo.DimDate`, `Product` to `dbo.DimProduct`, `Reseller` to `dbo.DimReseller`, `Sales` and
+`Sales Order` to `dbo.FactResellerSales`, `Sales Territory` to `dbo.DimSalesTerritory`), each carrying
+`sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName`. The `Table` helper stays
+`Json.Document`-sourced and is still correctly refused, so the one report now exercises both the
+resolved and the refusal path. The evidence is committed as
+`samples/powerbi/AdventureWorks_Sales.spec.yaml`; the `.pbix` itself remains gitignored.
+
+Four things were learned or fixed along the way that the plan below did not anticipate:
+
+- **Power BI Desktop saved the report in the newer split `Report/definition` format**, which
+  `tools/pbix-extract` could not read at all, so the first extraction returned zero pages and zero
+  visuals. The tool now reads both formats. See
+  [docs/wiki/incidents/pbix-split-report-format.md](wiki/incidents/pbix-split-report-format.md).
+- **Rebuilding each table as a new query cost the model everything bound to the old tables**: the
+  `Sales Amount by Due Date` measure and a `Sorting` calculated column were deleted with them, and a
+  slicer and an area chart lost their field bindings. The measure was restored by hand; the rest was
+  left, since the visual layer was not what this exercise set out to prove. Editing each existing
+  query's `Source` step in place would have avoided this, and is the better route if it is ever done
+  again.
+- **PowerBI's SQL Server connector would not connect to `localhost,14333`**, failing with a Named
+  Pipes error; `127.0.0.1,14333` connects, because a host name of `localhost` sends the client down a
+  protocol that the container does not serve.
+- **Every `.sh` in the repo was checked out with CRLF line endings** on Windows, which broke
+  `adventureworks-restore.sh` the moment it was bind-mounted into a Linux container. Fixed repo-wide
+  with a `.gitattributes` rule.
+
+## The remaining gap
+
+No `db sync` has been run against the repointed report, so the control-plane half of the chain
+(`FlowSetCollector` turning the source fields into a `SynonymLink`, `LineageGraphBuilder` rewriting
+the model name onto the node an ingestion flow writes) is still exercised only by its own tests. The
+rendered SQL in the spec is therefore still in model terms (`FROM [Sales] AS [Sales]`), which is
+correct at the extractor layer: the rewrite happens downstream. Step 5 below is the step not yet done.
+
+## The original plan, as written before the work
+
+Everything below is the plan as it stood beforehand.
 
 ## Why this exists
 
