@@ -2340,7 +2340,14 @@
         "DataSubscriberQuery",
         "subscriber notes",
         "incomplete dataset",
-        "stale report"
+        "stale report",
+        "pbix",
+        "pbix-extract",
+        "nodes and edges",
+        "node graph",
+        "measures",
+        "relationships",
+        "visual fields"
       ],
       "yamlPath": "subscribers",
       "related": [
@@ -2355,11 +2362,13 @@
         "src/SqlFlow.Yaml/YamlSubscriberLibraryLoader.cs",
         "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
         "src/SqlFlow.Lineage/Collection/LineageFacts.cs",
+        "src/SqlFlow.Lineage/Collection/PbixExtractTool.cs",
         "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
         "src/SqlFlow.Core/Lineage/LineageReport.cs",
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.Catalog/CatalogSync.cs",
-        "src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs"
+        "src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs",
+        "tools/pbix-extract/src/main.c"
       ]
     },
     {

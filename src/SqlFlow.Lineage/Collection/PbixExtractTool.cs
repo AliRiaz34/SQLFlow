@@ -161,7 +161,8 @@ internal static class PbixExtractTool
         }
 
         var spec = document.Subscribers.Values.First();
-        return new PbixExtractResult(spec.Report ?? [], spec.ReportWarnings ?? []);
+        var pages = SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], executable);
+        return new PbixExtractResult(pages, spec.ReportWarnings ?? []);
     }
 
     private static void TryKill(Process process)
@@ -195,11 +196,214 @@ internal static class PbixExtractTool
         public Dictionary<string, SpecSubscriber>? Subscribers { get; set; }
     }
 
+    /// <summary>
+    /// The subscriber body the tool emits: a flat node/edge graph (<see cref="Nodes"/>/<see cref="Edges"/>)
+    /// covering both the semantic model (tables, columns, measures, calculated columns, relationships) and the
+    /// report layer (pages, visuals, projected fields), plus <see cref="ReportWarnings"/> as a flat diagnostics
+    /// list. Only the report layer is reconstructed into typed records below (<see cref="SpecGraph"/>): the
+    /// model half (tables/columns/measures/relationships) is not consumed anywhere in .NET today, so it is left
+    /// as ungrouped nodes/edges rather than given POCOs nothing reads yet.
+    /// </summary>
     private sealed class SpecSubscriber
     {
-        public List<PbixPage>? Report { get; set; }
+        public List<SpecNode>? Nodes { get; set; }
+
+        public List<SpecEdge>? Edges { get; set; }
 
         public List<string>? ReportWarnings { get; set; }
+    }
+
+    /// <summary>
+    /// One YAML graph node. This one type models every node kind the tool can emit (table, column, measure,
+    /// calculatedColumn, report, page, visual), since YamlDotNet has no polymorphic-by-discriminator mapping for
+    /// a plain sequence item; a property a given <see cref="Kind"/> does not use is simply left null. Only the
+    /// report-layer kinds (<c>report</c>/<c>page</c>/<c>visual</c>) and their properties are read back out today
+    /// (see <see cref="SpecGraph"/>); the model-layer kinds parse into this same shape but nothing yet builds
+    /// typed records from them, matching what <see cref="Collection.FlowSetCollector"/> consumed before this
+    /// type existed.
+    /// </summary>
+    internal sealed class SpecNode
+    {
+        public string Id { get; set; } = string.Empty;
+
+        public string Kind { get; set; } = string.Empty;
+
+        public string? DisplayName { get; set; }
+
+        public string? Name { get; set; }
+
+        public string? ReportFile { get; set; }
+
+        public int Ordinal { get; set; }
+
+        public string? VisualType { get; set; }
+
+        public string? Title { get; set; }
+
+        public string? Sql { get; set; }
+    }
+
+    /// <summary>One YAML graph edge. <c>Role</c> is read only off a <c>projects</c> edge.</summary>
+    internal sealed class SpecEdge
+    {
+        public string From { get; set; } = string.Empty;
+
+        public string To { get; set; } = string.Empty;
+
+        public string Kind { get; set; } = string.Empty;
+
+        public string? Role { get; set; }
+    }
+}
+
+/// <summary>
+/// Reconstructs the report layer's <see cref="PbixPage"/>/<see cref="PbixVisual"/>/<see cref="PbixField"/>
+/// records from the flat node/edge graph the tool emits, by walking exactly the edges the report layer needs
+/// (<c>hasPage</c>, <c>hasVisual</c>, <c>projects</c>) and filtering nodes by <c>kind</c>. This is a
+/// parsing-layer detail only: everything downstream of <see cref="PbixExtractTool.Run"/> keeps consuming the
+/// same typed records it always has, so <see cref="Collection.FlowSetCollector"/> and the catalog sync path
+/// needed no changes when the wire format moved from a name-keyed tree to a graph.
+/// </summary>
+file static class SpecGraph
+{
+    public static List<PbixPage> BuildPages(
+        IReadOnlyList<PbixExtractTool.SpecNode> nodes, IReadOnlyList<PbixExtractTool.SpecEdge> edges,
+        string executable)
+    {
+        var byId = new Dictionary<string, PbixExtractTool.SpecNode>(StringComparer.Ordinal);
+        foreach (var node in nodes)
+        {
+            // A duplicate id would mean the tool emitted the same node twice, which is a real contract
+            // violation between the two sides rather than something to silently paper over by keeping
+            // whichever copy arrived first.
+            if (!byId.TryAdd(node.Id, node))
+            {
+                throw new PbixExtractException(
+                    $"'{executable}' produced a graph with a duplicate node id '{node.Id}'; the report was "
+                    + "not extracted");
+            }
+        }
+
+        var hasPage = new Dictionary<string, List<PbixExtractTool.SpecEdge>>(StringComparer.Ordinal);
+        var hasVisual = new Dictionary<string, List<PbixExtractTool.SpecEdge>>(StringComparer.Ordinal);
+        var projects = new Dictionary<string, List<PbixExtractTool.SpecEdge>>(StringComparer.Ordinal);
+        foreach (var edge in edges)
+        {
+            var bucket = edge.Kind switch
+            {
+                "hasPage" => hasPage,
+                "hasVisual" => hasVisual,
+                "projects" => projects,
+                _ => null,
+            };
+            if (bucket is null)
+            {
+                continue;
+            }
+
+            if (!bucket.TryGetValue(edge.From, out var list))
+            {
+                list = [];
+                bucket[edge.From] = list;
+            }
+
+            list.Add(edge);
+        }
+
+        var pages = new List<PbixPage>();
+        foreach (var pageNode in nodes.Where(n => n.Kind == "page").OrderBy(n => n.Ordinal))
+        {
+            var visuals = new List<PbixVisual>();
+            if (hasVisual.TryGetValue(pageNode.Id, out var visualEdges))
+            {
+                foreach (var visualEdge in visualEdges.OrderBy(e => ResolveOrdinal(byId, e.To)))
+                {
+                    if (!byId.TryGetValue(visualEdge.To, out var visualNode) || visualNode.Kind != "visual")
+                    {
+                        continue;
+                    }
+
+                    var fields = new List<PbixField>();
+                    if (projects.TryGetValue(visualNode.Id, out var projectEdges))
+                    {
+                        foreach (var projectEdge in projectEdges)
+                        {
+                            // The target column/measure node itself may not exist in the graph: the model half
+                            // is absent for a report connected live to a published dataset (Section 10 of
+                            // POWERAI.md), or the model reader simply could not resolve that particular field.
+                            // The `projects` edge's own target id already carries everything a field needs
+                            // (table, field name, and column-vs-measure via the "col:"/"measure:" tag), because
+                            // the C tool derives that id the same way regardless of whether the model side
+                            // resolved, so the field is read straight off the edge rather than requiring the
+                            // node to be present. This matches the pre-graph behavior, where a visual's field
+                            // carried its table/field/isMeasure independently of whether `tables:`/`measures:`
+                            // happened to list a matching entry.
+                            byId.TryGetValue(projectEdge.To, out var targetNode);
+                            var (table, field, isMeasure) = SplitTarget(projectEdge.To, targetNode);
+                            fields.Add(new PbixField
+                            {
+                                Role = projectEdge.Role ?? string.Empty,
+                                Table = table,
+                                Field = field,
+                                IsMeasure = isMeasure,
+                            });
+                        }
+                    }
+
+                    visuals.Add(new PbixVisual
+                    {
+                        VisualType = visualNode.VisualType ?? string.Empty,
+                        Ordinal = visualNode.Ordinal,
+                        Title = visualNode.Title,
+                        Sql = visualNode.Sql,
+                        Fields = fields,
+                    });
+                }
+            }
+
+            pages.Add(new PbixPage
+            {
+                Page = pageNode.DisplayName ?? string.Empty,
+                Name = pageNode.Name,
+                Ordinal = pageNode.Ordinal,
+                ReportFile = pageNode.ReportFile,
+                Visuals = visuals.OrderBy(v => v.Ordinal).ToList(),
+            });
+        }
+
+        return pages;
+    }
+
+    /// <summary>Orders a page's <c>hasVisual</c> edges by the target visual's own ordinal, since edge emission
+    /// order is not itself a contract a consumer should rely on.</summary>
+    private static int ResolveOrdinal(
+        IReadOnlyDictionary<string, PbixExtractTool.SpecNode> byId, string nodeId)
+        => byId.TryGetValue(nodeId, out var node) ? node.Ordinal : int.MaxValue;
+
+    /// <summary>
+    /// Resolves a <c>projects</c> edge's target into (table, field, isMeasure). Table and field always come
+    /// from the target id itself: the C tool derives every column/measure id as
+    /// <c>&lt;subscriber&gt;#&lt;reportFile&gt;#(col|measure):&lt;table&gt;.&lt;field&gt;</c> regardless of
+    /// whether a matching model node was also emitted, so the id alone is a complete, reliable source even for
+    /// a field the model half did not resolve (a live-connected report with no <c>DataModel</c> part, or a
+    /// field the model reader could not otherwise match). <paramref name="targetNode"/>, when present, is used
+    /// only to confirm <c>isMeasure</c> from the resolved node's own `kind`; when absent, the same id's
+    /// `col:`/`measure:` tag carries that distinction instead.
+    /// </summary>
+    private static (string Table, string Field, bool IsMeasure) SplitTarget(
+        string targetId, PbixExtractTool.SpecNode? targetNode)
+    {
+        var hash = targetId.LastIndexOf('#');
+        var tag = hash >= 0 ? targetId[(hash + 1)..] : targetId;
+        var colon = tag.IndexOf(':');
+        var kindTag = colon >= 0 ? tag[..colon] : tag;
+        var qualifier = colon >= 0 ? tag[(colon + 1)..] : tag;
+        var dot = qualifier.IndexOf('.');
+        var table = dot >= 0 ? qualifier[..dot] : qualifier;
+        var field = dot >= 0 ? qualifier[(dot + 1)..] : string.Empty;
+        var isMeasure = targetNode?.Kind == "measure" || (targetNode is null && kindTag == "measure");
+
+        return (table, field, isMeasure);
     }
 }
 

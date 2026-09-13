@@ -21,6 +21,13 @@ keywords:
   - subscriber notes
   - incomplete dataset
   - stale report
+  - pbix
+  - pbix-extract
+  - nodes and edges
+  - node graph
+  - measures
+  - relationships
+  - visual fields
 yamlPath: subscribers
 related:
   - concept-lineage-graph-and-plan
@@ -33,11 +40,13 @@ sourceRefs:
   - src/SqlFlow.Yaml/YamlSubscriberLibraryLoader.cs
   - src/SqlFlow.Lineage/Collection/FlowSetCollector.cs
   - src/SqlFlow.Lineage/Collection/LineageFacts.cs
+  - src/SqlFlow.Lineage/Collection/PbixExtractTool.cs
   - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
   - src/SqlFlow.Core/Lineage/LineageReport.cs
   - src/SqlFlow.Catalog/CatalogEntities.cs
   - src/SqlFlow.Catalog/CatalogSync.cs
   - src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs
+  - tools/pbix-extract/src/main.c
 ---
 
 # subscribers.yaml
@@ -101,7 +110,8 @@ Like `schedules.yaml`, these files are NOT flow documents: they are excluded fro
 | `subscribers.<name>.notes` | no | Remarks about the subscriber's STATE rather than its purpose. Free text, multi-line via a block scalar. See [Notes](#notes). |
 | `subscribers.<name>.url` | no | Where the subscriber LIVES (as opposed to what it reads): the report URL, the workbook path, the share, the repository. Searchable. See [Location](#location). |
 | `subscribers.<name>.server` | no | The default connection alias for every query that does not name its own. |
-| `subscribers.<name>.queries` | yes, in practice | The queries the subscriber runs. A subscriber with none is a node nothing connects to, which is warned. |
+| `subscribers.<name>.pbix` | no | A `.pbix` file or a directory of them to extract automatically. See [Extracted from a .pbix report](#extracted-from-a-pbix-report). |
+| `subscribers.<name>.queries` | yes, in practice, unless `pbix` is set | The queries the subscriber runs. A subscriber with neither this nor `pbix` is a node nothing connects to, which is warned. |
 | `queries[].name` | no | The query's label (legacy `QueryName`): the dataset, page, or measure group. Defaults to `query<n>` by position. |
 | `queries[].server` | yes, unless the subscriber sets one | The connection alias this query runs against (legacy `srcServer`). It is what pins two-part names to the right server and database. |
 | `queries[].sql` | yes | The query text as the subscriber runs it (legacy `FullyQualifiedQuery`). Any T-SQL the parser accepts. |
@@ -157,6 +167,46 @@ Because the identities go through the same completion (default database from the
 The subscriber itself becomes an object node of kind `Subscriber` on the synthetic server identity `subscriber`. It is the only node kind that lives outside the databases SQLFlow moves data between, and the only one no database inventory can supply.
 
 Joins written inside a subscriber query also feed the interpreted data model (`LineageReport.Relationships`). The joins an analyst writes in a report are evidence of how the business actually relates these tables, and carry the same weight as a warehouse view's.
+
+## Extracted from a .pbix report
+
+A subscriber can declare `pbix:` naming one `.pbix` file or a directory of them, instead of (or alongside) hand-written `queries:`. Every report found is extracted automatically by `tools/pbix-extract`, a standalone C tool run outside the control plane (a `.pbix` is attacker-influenceable input, so its decompression and SQLite reading never happen inside the server process). Each extracted visual becomes a query on this same subscriber, taking the same lineage path as a hand-transcribed one.
+
+```yaml
+subscribers:
+  Analyse_Bysykkel:
+    type: PowerBI
+    server: dwh
+    pbix: reports/analyse_bysykkel.pbix
+```
+
+The tool's output is a YAML specification of the report: its semantic model (tables, columns, measures, calculated columns, relationships, table sources) and its visual layer (pages, visuals, each visual's rendered SQL, and the fields it projects with their role), expressed as a flat graph rather than a name-keyed tree:
+
+```yaml
+nodes:
+  - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#table:Trips"
+    kind: "table"
+  - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#col:Trips.StationName"
+    kind: "column"
+    dataType: "string"
+  - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#page:1#visual:1"
+    kind: "visual"
+    visualType: "barChart"
+    title: "Trips by Station"
+    sql: "SELECT ..."
+edges:
+  - from: "Analyse_Bysykkel#analyse_bysykkel.pbix#table:Trips"
+    to: "Analyse_Bysykkel#analyse_bysykkel.pbix#col:Trips.StationName"
+    kind: "hasColumn"
+  - from: "Analyse_Bysykkel#analyse_bysykkel.pbix#page:1#visual:1"
+    to: "Analyse_Bysykkel#analyse_bysykkel.pbix#col:Trips.StationName"
+    kind: "projects"
+    role: "Category"
+```
+
+Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
+
+Only the report layer (pages, visuals, projected fields, and each visual's rendered SQL) is read back into the catalog today, the same as before this graph shape existed: the model layer (tables, columns, measures, relationships) travels in the YAML for a person or an LLM to read directly, but has no dedicated catalog tables yet. `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection), since a warning is a diagnostic rather than a graph-shaped fact.
 
 ## What lands in the catalog
 

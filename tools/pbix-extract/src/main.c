@@ -29,9 +29,11 @@ static void print_usage(FILE *stream, const char *program)
     fprintf(stream,
         "Usage: %s <report.pbix> [--name NAME] [--report-file PATH] [--out FILE]\n"
         "\n"
-        "Reads a Power BI report's semantic model and writes a SQLFlow YAML specification:\n"
-        "tables, columns, measures (with their DAX), calculated columns, relationships, and\n"
-        "each table's Power Query source.\n"
+        "Reads a Power BI report's semantic model and its visual layer, and writes them as a\n"
+        "SQLFlow YAML specification: flat `nodes:` and `edges:` lists (tables, columns,\n"
+        "measures with their DAX, calculated columns, relationships, pages, visuals, and each\n"
+        "visual's projected fields) forming an explicit graph, plus each table's Power Query\n"
+        "source as a property on its table node.\n"
         "\n"
         "  --name NAME         subscriber name for the YAML entry (default: the file's base name)\n"
         "  --report-file PATH  label each page with this report file (default: the file name).\n"
@@ -86,168 +88,603 @@ static int emit_field(Buffer *out, int indent, const char *key, const char *valu
 }
 
 /*
- * Emits the report's visual layer: the pages, and on each the visuals that carry a question.
+ * Node/edge graph emission.
  *
- * This section is the record of what people actually asked. Where the model says what could be
- * queried, a visual says what someone decided was worth putting on a page, in which shape: its
- * title is the question in the author's own words, and each field's role says whether it is the
- * axis the answer is broken down by or the value being measured.
+ * The spec is emitted as a flat `nodes:` list and a flat `edges:` list rather than a name-keyed
+ * tree, so a consumer can load it directly into an in-memory graph with no cross-referencing step:
+ * starting from one visual node and walking its `projects` edges to columns/measures, then their
+ * `hasColumn`/`definedOn` edges back to tables, then the `relationship` edges between exactly those
+ * tables, yields precisely that visual's relevant closure with no unrelated noise pulled in.
+ *
+ * Node ids follow the same derived-string-key convention the catalog already uses for
+ * CatalogSubscriberReportPage/Visual (`SubscriberKey#reportFile#pageOrdinal#visualOrdinal`):
+ * every id here is prefixed by the subscriber name and the report file, so ids stay globally
+ * unique when many subscribers' (and many reports') graphs are merged into one. A `#` cannot
+ * appear in a table/column/measure/page name here because Power BI does not allow it in an
+ * entity name, so the separator is unambiguous.
+ *
+ * Every node carries a `kind` property so a generic consumer can filter by type without parsing
+ * the id. Edges carry `from`, `to`, `kind`, and whatever extra properties that edge kind needs
+ * (a `relationship` edge carries fromColumn/toColumn/cardinality/active; a `projects` edge
+ * carries `role`). A `projects` edge deliberately does not repeat `isMeasure` as a boolean
+ * property: which node kind it points at (`column` vs `measure`) already carries that
+ * distinction structurally, so a consumer asks "what kind of node is this?" instead of reading a
+ * second flag that could disagree with the first.
  */
-static int emit_report(Buffer *out, const ReportLayout *layout, const char *report_file)
+
+/* Appends a quoted value for an id/property fragment, always as a plain (non-block) scalar: an id
+ * is used as a mapping key's referenced value and must never split into a literal block even when
+ * the underlying name happens to contain a newline (Power BI does not produce those in names, but
+ * nothing enforces it), so this uses yaml_quoted rather than yaml_text. */
+static int emit_id_field(Buffer *out, int indent, const char *key, const char *value)
+{
+    if (yaml_indent(out, indent) != 0
+        || buffer_append_str(out, key) != 0
+        || buffer_append_str(out, ": ") != 0
+        || yaml_quoted(out, value) != 0
+        || buffer_append_str(out, "\n") != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Concatenates 2 to 4 strings into a freshly allocated buffer. NULL-terminate the argument list is
+ * not needed: every call site below passes a fixed count via one of the wrappers so there is no
+ * ambiguity about how many operands follow. Returns NULL on allocation failure.
+ *
+ * A small hand-rolled joiner is used here, rather than asprintf, because the shipped tool's
+ * Makefile deliberately builds under plain `-std=c11` (asprintf is a GNU/BSD extension gated
+ * behind `_GNU_SOURCE`, which only the test harness defines), so every other allocation in this
+ * file already goes through strdup/malloc rather than an extension.
+ */
+static char *concat4(const char *a, const char *b, const char *c, const char *d)
+{
+    size_t length = strlen(a) + strlen(b) + (c != NULL ? strlen(c) : 0) + (d != NULL ? strlen(d) : 0);
+    char *result = (char *)malloc(length + 1);
+
+    if (result == NULL) {
+        return NULL;
+    }
+    result[0] = '\0';
+    strcat(result, a);
+    strcat(result, b);
+    if (c != NULL) {
+        strcat(result, c);
+    }
+    if (d != NULL) {
+        strcat(result, d);
+    }
+    return result;
+}
+
+/* Builds "<subscriber>#<reportFile>#<rest>" into a freshly allocated string. Returns NULL on
+ * allocation failure. */
+static char *node_id(const char *subscriber, const char *report_file, const char *rest)
+{
+    char *prefix = concat4(subscriber, "#", report_file, "#");
+    char *id;
+
+    if (prefix == NULL) {
+        return NULL;
+    }
+    id = concat4(prefix, rest, NULL, NULL);
+    free(prefix);
+    return id;
+}
+
+/* Builds "<table>.<name>" into a freshly allocated string, for a column/measure qualifier. */
+static char *qualified(const char *table, const char *name)
+{
+    return concat4(table, ".", name, NULL);
+}
+
+/* Builds "<prefix>:<qualifier>" into a freshly allocated string, for a node-id rest fragment such
+ * as "table:Sales" or "measure:Sales.Amount". */
+static char *tagged(const char *prefix, const char *qualifier)
+{
+    return concat4(prefix, ":", qualifier, NULL);
+}
+
+/* Emits one node's "- id: ...\n  kind: ...\n" header into the nodes buffer; the caller appends any
+ * extra properties. */
+static int emit_node(Buffer *nodes, const char *id, const char *kind)
+{
+    if (yaml_indent(nodes, 4) != 0
+        || buffer_append_str(nodes, "- id: ") != 0
+        || yaml_quoted(nodes, id) != 0
+        || buffer_append_str(nodes, "\n") != 0
+        || emit_id_field(nodes, 6, "kind", kind) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Emits one edge's "- from / to / kind" header into the edges buffer at 4-space indent, with any
+ * further properties the caller appends following at 6. */
+static int emit_edge_header(Buffer *edges, const char *from, const char *to, const char *kind)
+{
+    if (yaml_indent(edges, 4) != 0
+        || buffer_append_str(edges, "- from: ") != 0
+        || yaml_quoted(edges, from) != 0
+        || buffer_append_str(edges, "\n") != 0
+        || emit_id_field(edges, 6, "to", to) != 0
+        || emit_id_field(edges, 6, "kind", kind) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Emits the report's visual layer as nodes and edges: a report node per file, a page node per
+ * page (linked from the report by `hasPage`), a visual node per visual (linked from its page by
+ * `hasVisual`), and a `projects` edge from each visual to the column or measure node it reads,
+ * carrying the field's role. The report node also anchors `reportWarnings`, which stay a flat
+ * list rather than graph-shaped facts (they are diagnostics about what was NOT extracted, not
+ * something a consumer walks edges to reach).
+ *
+ * A `projects` edge targets a `col:<table>.<field>` node whenever the field is not a measure, or
+ * a `measure:<table>.<field>` node when it is: this is how the isMeasure distinction survives the
+ * move to a graph without a separate boolean on the edge (see the file-level comment above).
+ */
+static int emit_report(
+    Buffer *nodes, Buffer *edges, const ReportLayout *layout, const char *name,
+    const char *report_file)
 {
     size_t page_index;
-    size_t warning_index;
+    char *report_node = node_id(name, report_file, "report");
+    int status = -1;
 
-    if (layout->page_count == 0 && layout->warning_count == 0) {
+    if (report_node == NULL) {
+        return -1;
+    }
+
+    if (layout->page_count == 0) {
+        free(report_node);
         return 0;
     }
 
-    if (layout->page_count > 0
-        && (yaml_indent(out, 4) != 0 || buffer_append_str(out, "report:\n") != 0)) {
-        return -1;
+    if (emit_node(nodes, report_node, "report") != 0) {
+        goto done;
     }
 
     for (page_index = 0; page_index < layout->page_count; page_index++) {
         const ReportPage *page = &layout->pages[page_index];
         size_t visual_index;
-        char number[32];
+        char page_rest[64];
+        char *page_node;
 
-        if (yaml_indent(out, 6) != 0
-            || buffer_append_str(out, "- page: ") != 0
-            || yaml_quoted(out, page->display_name != NULL ? page->display_name : "") != 0
-            || buffer_append_str(out, "\n") != 0) {
-            return -1;
+        snprintf(page_rest, sizeof(page_rest), "page:%d", page->ordinal);
+        page_node = node_id(name, report_file, page_rest);
+        if (page_node == NULL) {
+            goto done;
         }
 
-        /* The page's internal name and its position identify it independently of its title, which
-         * two pages can share. Together with the report file they are what a catalog row is keyed
-         * by, so a workspace of reports built from one template does not collide. */
-        if (page->name != NULL) {
-            if (yaml_indent(out, 8) != 0
-                || buffer_append_str(out, "name: ") != 0
-                || yaml_quoted(out, page->name) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
+        if (emit_node(nodes, page_node, "page") != 0
+            || emit_id_field(nodes, 6, "displayName", page->display_name != NULL
+                                        ? page->display_name : "") != 0
+            || (page->name != NULL && emit_id_field(nodes, 6, "name", page->name) != 0)
+            || emit_id_field(nodes, 6, "reportFile", report_file) != 0) {
+            free(page_node);
+            goto done;
+        }
+        {
+            char number[32];
+
+            snprintf(number, sizeof(number), "%d", page->ordinal);
+            if (yaml_indent(nodes, 6) != 0
+                || buffer_append_str(nodes, "ordinal: ") != 0
+                || buffer_append_str(nodes, number) != 0
+                || buffer_append_str(nodes, "\n") != 0) {
+                free(page_node);
+                goto done;
             }
         }
 
-        snprintf(number, sizeof(number), "%d", page->ordinal);
-        if (yaml_indent(out, 8) != 0
-            || buffer_append_str(out, "ordinal: ") != 0
-            || buffer_append_str(out, number) != 0
-            || buffer_append_str(out, "\n") != 0) {
-            return -1;
-        }
-
-        if (yaml_indent(out, 8) != 0
-            || buffer_append_str(out, "reportFile: ") != 0
-            || yaml_quoted(out, report_file) != 0
-            || buffer_append_str(out, "\n") != 0) {
-            return -1;
-        }
-
-        if (page->visual_count == 0) {
-            continue;
-        }
-
-        if (yaml_indent(out, 8) != 0 || buffer_append_str(out, "visuals:\n") != 0) {
-            return -1;
+        if (emit_edge_header(edges, report_node, page_node, "hasPage") != 0) {
+            free(page_node);
+            goto done;
         }
 
         for (visual_index = 0; visual_index < page->visual_count; visual_index++) {
             const ReportVisual *visual = &page->visuals[visual_index];
             size_t field_index;
+            char visual_rest[96];
+            char *visual_node;
 
-            if (yaml_indent(out, 10) != 0
-                || buffer_append_str(out, "- visualType: ") != 0
-                || yaml_quoted(out, visual->visual_type != NULL ? visual->visual_type : "") != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
+            snprintf(visual_rest, sizeof(visual_rest), "%s#visual:%d", page_rest, visual->ordinal);
+            visual_node = node_id(name, report_file, visual_rest);
+            if (visual_node == NULL) {
+                free(page_node);
+                goto done;
             }
 
-            snprintf(number, sizeof(number), "%d", visual->ordinal);
-            if (yaml_indent(out, 12) != 0
-                || buffer_append_str(out, "ordinal: ") != 0
-                || buffer_append_str(out, number) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
+            if (emit_node(nodes, visual_node, "visual") != 0
+                || emit_id_field(nodes, 6, "visualType",
+                       visual->visual_type != NULL ? visual->visual_type : "") != 0
+                || (visual->title != NULL && emit_id_field(nodes, 6, "title", visual->title) != 0)
+                || (visual->sql != NULL && emit_field(nodes, 6, "sql", visual->sql) != 0)) {
+                free(visual_node);
+                free(page_node);
+                goto done;
             }
+            {
+                char number[32];
 
-            if (visual->title != NULL) {
-                if (yaml_indent(out, 12) != 0
-                    || buffer_append_str(out, "title: ") != 0
-                    || yaml_quoted(out, visual->title) != 0
-                    || buffer_append_str(out, "\n") != 0) {
-                    return -1;
+                snprintf(number, sizeof(number), "%d", visual->ordinal);
+                if (yaml_indent(nodes, 6) != 0
+                    || buffer_append_str(nodes, "ordinal: ") != 0
+                    || buffer_append_str(nodes, number) != 0
+                    || buffer_append_str(nodes, "\n") != 0) {
+                    free(visual_node);
+                    free(page_node);
+                    goto done;
                 }
             }
 
-            /* The visual's question as one SELECT, with every filter that applies to it folded into
-             * the WHERE clause. This is what turns a chart into a real consumption edge: it names
-             * the entities read, in a form the estate's existing T-SQL lineage parser already
-             * understands. */
-            if (visual->sql != NULL) {
-                if (yaml_indent(out, 12) != 0
-                    || buffer_append_str(out, "sql: ") != 0
-                    || yaml_quoted(out, visual->sql) != 0
-                    || buffer_append_str(out, "\n") != 0) {
-                    return -1;
-                }
-            }
-
-            if (visual->field_count == 0) {
-                continue;
-            }
-
-            if (yaml_indent(out, 12) != 0 || buffer_append_str(out, "fields:\n") != 0) {
-                return -1;
+            if (emit_edge_header(edges, page_node, visual_node, "hasVisual") != 0) {
+                free(visual_node);
+                free(page_node);
+                goto done;
             }
 
             for (field_index = 0; field_index < visual->field_count; field_index++) {
                 const VisualField *field = &visual->fields[field_index];
+                const char *table = field->table != NULL ? field->table : "";
+                const char *column = field->column_or_measure != NULL
+                    ? field->column_or_measure : "";
+                char *qualifier = qualified(table, column);
+                char *target_rest = NULL;
+                char *target_node = NULL;
 
-                if (yaml_indent(out, 14) != 0
-                    || buffer_append_str(out, "- role: ") != 0
-                    || yaml_quoted(out, field->role != NULL ? field->role : "") != 0
-                    || buffer_append_str(out, "\n") != 0) {
-                    return -1;
+                if (qualifier == NULL) {
+                    free(visual_node);
+                    free(page_node);
+                    goto done;
                 }
-                if (yaml_indent(out, 16) != 0
-                    || buffer_append_str(out, "table: ") != 0
-                    || yaml_quoted(out, field->table != NULL ? field->table : "") != 0
-                    || buffer_append_str(out, "\n") != 0) {
-                    return -1;
+
+                target_rest = tagged(field->is_measure ? "measure" : "col", qualifier);
+                free(qualifier);
+                if (target_rest == NULL) {
+                    free(visual_node);
+                    free(page_node);
+                    goto done;
                 }
-                if (yaml_indent(out, 16) != 0
-                    || buffer_append_str(out, "field: ") != 0
-                    || yaml_quoted(out,
-                           field->column_or_measure != NULL ? field->column_or_measure : "") != 0
-                    || buffer_append_str(out, "\n") != 0) {
-                    return -1;
+
+                target_node = node_id(name, report_file, target_rest);
+                free(target_rest);
+                if (target_node == NULL) {
+                    free(visual_node);
+                    free(page_node);
+                    goto done;
                 }
-                if (field->is_measure
-                    && (yaml_indent(out, 16) != 0
-                        || buffer_append_str(out, "isMeasure: true\n") != 0)) {
-                    return -1;
+
+                if (emit_edge_header(edges, visual_node, target_node, "projects") != 0
+                    || emit_id_field(
+                           edges, 6, "role", field->role != NULL ? field->role : "") != 0) {
+                    free(target_node);
+                    free(visual_node);
+                    free(page_node);
+                    goto done;
                 }
+                free(target_node);
             }
+
+            free(visual_node);
         }
+
+        free(page_node);
     }
 
-    /* What was dropped and why. A skipped visual is a question this extraction does NOT carry, so
-     * it is stated rather than left as a silent gap between the report and the spec. */
-    if (layout->warning_count > 0) {
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "reportWarnings:\n") != 0) {
+    status = 0;
+
+done:
+    free(report_node);
+    return status;
+}
+
+/*
+ * Emits the semantic model as nodes and edges: one node per table, column, measure, and
+ * calculated column; `hasColumn` edges from each table to its columns; `definedOn` edges from
+ * each measure/calculated column to the table it is defined on; and `relationship` edges between
+ * the tables a model relationship connects. A table's Power Query source is carried as a
+ * `powerQuery` property directly on the table node rather than as a separate node, which keeps
+ * the shape simpler without losing the expression text: nothing else ever needs to point AT a
+ * source independently of its table.
+ */
+static int emit_model(
+    Buffer *nodes, Buffer *edges, const ModelSpec *spec, const char *name, const char *report_file)
+{
+    size_t i;
+
+    /* Tables and their columns. A table node is emitted the first time a column names it, so a
+     * table with no columns of its own only gets a node from the sources loop below. */
+    for (i = 0; i < spec->column_count; i++) {
+        const Column *column = &spec->columns[i];
+        char *table_rest = NULL;
+        char *table_node = NULL;
+        char *column_rest = NULL;
+        char *column_node = NULL;
+
+        if (column->table == NULL || column->column == NULL) {
+            continue;
+        }
+
+        table_rest = tagged("table", column->table);
+        if (table_rest == NULL) {
             return -1;
         }
-        for (warning_index = 0; warning_index < layout->warning_count; warning_index++) {
-            if (yaml_indent(out, 6) != 0
-                || buffer_append_str(out, "- ") != 0
-                || yaml_quoted(out, layout->warnings[warning_index]) != 0
-                || buffer_append_str(out, "\n") != 0) {
+        table_node = node_id(name, report_file, table_rest);
+        free(table_rest);
+        if (table_node == NULL) {
+            return -1;
+        }
+
+        /* A table node is emitted once, the first time one of its columns is seen; the model
+         * reader lists a table's columns together, so consecutive columns sharing a table is the
+         * common case, but this check is correctness rather than an optimization. */
+        if (i == 0 || spec->columns[i - 1].table == NULL
+            || strcmp(spec->columns[i - 1].table, column->table) != 0) {
+            if (emit_node(nodes, table_node, "table") != 0) {
+                free(table_node);
                 return -1;
             }
         }
+
+        {
+            char *qualifier = qualified(column->table, column->column);
+
+            if (qualifier == NULL) {
+                free(table_node);
+                return -1;
+            }
+            column_rest = tagged("col", qualifier);
+            free(qualifier);
+        }
+        if (column_rest == NULL) {
+            free(table_node);
+            return -1;
+        }
+        column_node = node_id(name, report_file, column_rest);
+        free(column_rest);
+        if (column_node == NULL) {
+            free(table_node);
+            return -1;
+        }
+
+        if (emit_node(nodes, column_node, "column") != 0
+            || (column->data_type != NULL
+                   && emit_id_field(nodes, 6, "dataType", column->data_type) != 0)
+            || emit_edge_header(edges, table_node, column_node, "hasColumn") != 0) {
+            free(column_node);
+            free(table_node);
+            return -1;
+        }
+
+        free(column_node);
+        free(table_node);
+    }
+
+    /* A table's Power Query source rides as a property on its table node. When a table has no
+     * columns (so no node was emitted above), the source still needs the table to exist, so this
+     * loop emits the table node itself in that case; otherwise it only adds the property, to avoid
+     * emitting the same node id twice, which a consumer would then have to dedupe by id. */
+    for (i = 0; i < spec->source_count; i++) {
+        const TableSource *source = &spec->sources[i];
+        char *table_rest = NULL;
+        char *table_node = NULL;
+        int already_emitted = 0;
+        size_t j;
+
+        if (source->table == NULL) {
+            continue;
+        }
+
+        for (j = 0; j < spec->column_count; j++) {
+            if (spec->columns[j].table != NULL && strcmp(spec->columns[j].table, source->table) == 0) {
+                already_emitted = 1;
+                break;
+            }
+        }
+
+        table_rest = tagged("table", source->table);
+        if (table_rest == NULL) {
+            return -1;
+        }
+        table_node = node_id(name, report_file, table_rest);
+        free(table_rest);
+        if (table_node == NULL) {
+            return -1;
+        }
+
+        if (!already_emitted && emit_node(nodes, table_node, "table") != 0) {
+            free(table_node);
+            return -1;
+        }
+        if (emit_id_field(nodes, 6, "powerQuery",
+                source->expression != NULL ? source->expression : "") != 0) {
+            free(table_node);
+            return -1;
+        }
+
+        free(table_node);
+    }
+
+    /* Measures: a node per measure, carrying its DAX and description as properties, plus a
+     * `definedOn` edge to the table it belongs to. */
+    for (i = 0; i < spec->measure_count; i++) {
+        const Measure *measure = &spec->measures[i];
+        char *measure_node;
+        char *table_node = NULL;
+
+        if (measure->name == NULL) {
+            continue;
+        }
+
+        {
+            char *qualifier = qualified(
+                measure->table != NULL ? measure->table : "", measure->name);
+            char *measure_rest = NULL;
+
+            if (qualifier == NULL) {
+                return -1;
+            }
+            measure_rest = tagged("measure", qualifier);
+            free(qualifier);
+            if (measure_rest == NULL) {
+                return -1;
+            }
+            measure_node = node_id(name, report_file, measure_rest);
+            free(measure_rest);
+        }
+        if (measure_node == NULL) {
+            return -1;
+        }
+
+        if (emit_node(nodes, measure_node, "measure") != 0
+            || (measure->expression != NULL
+                   && emit_field(nodes, 6, "dax", measure->expression) != 0)
+            || (measure->description != NULL
+                   && emit_field(nodes, 6, "description", measure->description) != 0)) {
+            free(measure_node);
+            return -1;
+        }
+
+        if (measure->table != NULL) {
+            char *table_rest = tagged("table", measure->table);
+
+            if (table_rest == NULL) {
+                free(measure_node);
+                return -1;
+            }
+            table_node = node_id(name, report_file, table_rest);
+            free(table_rest);
+            if (table_node == NULL
+                || emit_edge_header(edges, measure_node, table_node, "definedOn") != 0) {
+                free(table_node);
+                free(measure_node);
+                return -1;
+            }
+            free(table_node);
+        }
+
+        free(measure_node);
+    }
+
+    /* Calculated columns: same shape as measures, distinguished by node kind. */
+    for (i = 0; i < spec->calculated_column_count; i++) {
+        const CalculatedColumn *column = &spec->calculated_columns[i];
+        char *calc_node;
+        char *table_node = NULL;
+
+        if (column->name == NULL) {
+            continue;
+        }
+
+        {
+            char *qualifier = qualified(
+                column->table != NULL ? column->table : "", column->name);
+            char *calc_rest = NULL;
+
+            if (qualifier == NULL) {
+                return -1;
+            }
+            calc_rest = tagged("calc", qualifier);
+            free(qualifier);
+            if (calc_rest == NULL) {
+                return -1;
+            }
+            calc_node = node_id(name, report_file, calc_rest);
+            free(calc_rest);
+        }
+        if (calc_node == NULL) {
+            return -1;
+        }
+
+        if (emit_node(nodes, calc_node, "calculatedColumn") != 0
+            || (column->expression != NULL
+                   && emit_field(nodes, 6, "dax", column->expression) != 0)) {
+            free(calc_node);
+            return -1;
+        }
+
+        if (column->table != NULL) {
+            char *table_rest = tagged("table", column->table);
+
+            if (table_rest == NULL) {
+                free(calc_node);
+                return -1;
+            }
+            table_node = node_id(name, report_file, table_rest);
+            free(table_rest);
+            if (table_node == NULL
+                || emit_edge_header(edges, calc_node, table_node, "definedOn") != 0) {
+                free(table_node);
+                free(calc_node);
+                return -1;
+            }
+            free(table_node);
+        }
+
+        free(calc_node);
+    }
+
+    /* Relationships: a table-to-table edge carrying the join columns, cardinality, and whether
+     * the relationship is active. */
+    for (i = 0; i < spec->relationship_count; i++) {
+        const Relationship *relationship = &spec->relationships[i];
+        char *from_rest = NULL;
+        char *from_node = NULL;
+        char *to_rest = NULL;
+        char *to_node = NULL;
+
+        if (relationship->from_table == NULL || relationship->to_table == NULL) {
+            continue;
+        }
+
+        from_rest = tagged("table", relationship->from_table);
+        if (from_rest == NULL) {
+            return -1;
+        }
+        from_node = node_id(name, report_file, from_rest);
+        free(from_rest);
+
+        to_rest = tagged("table", relationship->to_table);
+        if (from_node == NULL || to_rest == NULL) {
+            free(from_node);
+            free(to_rest);
+            return -1;
+        }
+        to_node = node_id(name, report_file, to_rest);
+        free(to_rest);
+        if (to_node == NULL) {
+            free(from_node);
+            return -1;
+        }
+
+        if (emit_edge_header(edges, from_node, to_node, "relationship") != 0
+            || (relationship->from_column != NULL
+                   && emit_id_field(edges, 6, "fromColumn", relationship->from_column) != 0)
+            || (relationship->to_column != NULL
+                   && emit_id_field(edges, 6, "toColumn", relationship->to_column) != 0)
+            || (relationship->cardinality != NULL
+                   && emit_id_field(edges, 6, "cardinality", relationship->cardinality) != 0)) {
+            free(to_node);
+            free(from_node);
+            return -1;
+        }
+        /* An inactive relationship exists but is not applied unless a measure invokes it
+         * (USERELATIONSHIP), so stating it is what keeps a generated join honest. */
+        if (yaml_indent(edges, 6) != 0
+            || buffer_append_str(edges, "active: ") != 0
+            || buffer_append_str(edges, relationship->active ? "true\n" : "false\n") != 0) {
+            free(to_node);
+            free(from_node);
+            return -1;
+        }
+
+        free(to_node);
+        free(from_node);
     }
 
     return 0;
@@ -257,20 +694,28 @@ static int emit_spec(
     Buffer *out, const ModelSpec *spec, const ReportLayout *layout,
     const char *name, const char *source_file, const char *report_file)
 {
-    size_t i;
+    Buffer nodes;
+    Buffer edges;
+    int status = -1;
+    size_t warning_index;
+
+    buffer_init(&nodes);
+    buffer_init(&edges);
 
     if (buffer_append_str(out,
             "# Generated by tools/pbix-extract from a Power BI report.\n"
-            "# Two halves: the semantic model (what its tables, columns, measures and\n"
-            "# relationships are) and the report itself (the pages and visuals built on that\n"
-            "# model, and the role each field plays in them). Review before use.\n"
+            "# The report as an explicit graph: flat `nodes:` and `edges:` lists rather than a\n"
+            "# name-keyed tree, so a consumer loads it directly into an in-memory graph with no\n"
+            "# cross-referencing step. Node ids are globally unique (subscriber#reportFile#...),\n"
+            "# so graphs from many subscribers and reports can be merged without collisions.\n"
+            "# Review before use.\n"
             "#\n") != 0) {
-        return -1;
+        goto done;
     }
     if (buffer_append_str(out, "# Source report: ") != 0
         || buffer_append_str(out, source_file) != 0
         || buffer_append_str(out, "\n\n") != 0) {
-        return -1;
+        goto done;
     }
 
     if (buffer_append_str(out, "subscribers:\n") != 0
@@ -279,151 +724,51 @@ static int emit_spec(
         || buffer_append_str(out, ":\n") != 0
         || yaml_indent(out, 4) != 0
         || buffer_append_str(out, "type: PowerBI\n") != 0) {
-        return -1;
+        goto done;
     }
 
-    /* Tables and their columns, with the model's declared type for each. This is the vocabulary
-     * every other section refers to. */
-    if (spec->column_count > 0) {
-        const char *current_table = NULL;
+    if (emit_model(&nodes, &edges, spec, name, report_file) != 0
+        || emit_report(&nodes, &edges, layout, name, report_file) != 0) {
+        goto done;
+    }
 
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "tables:\n") != 0) {
-            return -1;
+    if (nodes.size > 0) {
+        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "nodes:\n") != 0
+            || buffer_append(out, nodes.data, nodes.size) != 0) {
+            goto done;
         }
-        for (i = 0; i < spec->column_count; i++) {
-            const Column *column = &spec->columns[i];
-
-            if (column->table == NULL || column->column == NULL) {
-                continue;
-            }
-
-            if (current_table == NULL || strcmp(current_table, column->table) != 0) {
-                current_table = column->table;
-                if (yaml_indent(out, 6) != 0
-                    || buffer_append_str(out, "- name: ") != 0
-                    || yaml_quoted(out, current_table) != 0
-                    || buffer_append_str(out, "\n") != 0
-                    || yaml_indent(out, 8) != 0
-                    || buffer_append_str(out, "columns:\n") != 0) {
-                    return -1;
-                }
-            }
-
-            if (yaml_indent(out, 10) != 0
-                || buffer_append_str(out, "- name: ") != 0
-                || yaml_quoted(out, column->column) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
-            }
-            if (column->data_type != NULL
-                && emit_field(out, 12, "dataType", column->data_type) != 0) {
-                return -1;
-            }
+    }
+    if (edges.size > 0) {
+        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "edges:\n") != 0
+            || buffer_append(out, edges.data, edges.size) != 0) {
+            goto done;
         }
     }
 
-    if (spec->measure_count > 0) {
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "measures:\n") != 0) {
-            return -1;
+    /* What was dropped and why. A skipped visual is a question this extraction does NOT carry, so
+     * it is stated rather than left as a silent gap between the report and the spec. Kept as a
+     * flat list rather than nodes/edges: these are diagnostics about extraction itself, not facts
+     * about the model or the report a consumer would walk edges to reach. */
+    if (layout->warning_count > 0) {
+        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "reportWarnings:\n") != 0) {
+            goto done;
         }
-        for (i = 0; i < spec->measure_count; i++) {
-            const Measure *measure = &spec->measures[i];
-
-            if (measure->name == NULL) {
-                continue;
-            }
+        for (warning_index = 0; warning_index < layout->warning_count; warning_index++) {
             if (yaml_indent(out, 6) != 0
-                || buffer_append_str(out, "- name: ") != 0
-                || yaml_quoted(out, measure->name) != 0
+                || buffer_append_str(out, "- ") != 0
+                || yaml_quoted(out, layout->warnings[warning_index]) != 0
                 || buffer_append_str(out, "\n") != 0) {
-                return -1;
-            }
-            if (emit_field(out, 8, "table", measure->table) != 0
-                || emit_field(out, 8, "dax", measure->expression) != 0
-                || emit_field(out, 8, "description", measure->description) != 0) {
-                return -1;
+                goto done;
             }
         }
     }
 
-    if (spec->calculated_column_count > 0) {
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "calculatedColumns:\n") != 0) {
-            return -1;
-        }
-        for (i = 0; i < spec->calculated_column_count; i++) {
-            const CalculatedColumn *column = &spec->calculated_columns[i];
+    status = 0;
 
-            if (column->name == NULL) {
-                continue;
-            }
-            if (yaml_indent(out, 6) != 0
-                || buffer_append_str(out, "- name: ") != 0
-                || yaml_quoted(out, column->name) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
-            }
-            if (emit_field(out, 8, "table", column->table) != 0
-                || emit_field(out, 8, "dax", column->expression) != 0) {
-                return -1;
-            }
-        }
-    }
-
-    if (spec->relationship_count > 0) {
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "relationships:\n") != 0) {
-            return -1;
-        }
-        for (i = 0; i < spec->relationship_count; i++) {
-            const Relationship *relationship = &spec->relationships[i];
-
-            if (relationship->from_table == NULL || relationship->to_table == NULL) {
-                continue;
-            }
-            if (yaml_indent(out, 6) != 0
-                || buffer_append_str(out, "- fromTable: ") != 0
-                || yaml_quoted(out, relationship->from_table) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
-            }
-            if (emit_field(out, 8, "fromColumn", relationship->from_column) != 0
-                || emit_field(out, 8, "toTable", relationship->to_table) != 0
-                || emit_field(out, 8, "toColumn", relationship->to_column) != 0
-                || emit_field(out, 8, "cardinality", relationship->cardinality) != 0) {
-                return -1;
-            }
-            /* An inactive relationship exists but is not applied unless a measure invokes it
-             * (USERELATIONSHIP), so stating it is what keeps a generated join honest. */
-            if (yaml_indent(out, 8) != 0
-                || buffer_append_str(out, "active: ") != 0
-                || buffer_append_str(out, relationship->active ? "true\n" : "false\n") != 0) {
-                return -1;
-            }
-        }
-    }
-
-    if (spec->source_count > 0) {
-        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "tableSources:\n") != 0) {
-            return -1;
-        }
-        for (i = 0; i < spec->source_count; i++) {
-            const TableSource *source = &spec->sources[i];
-
-            if (source->table == NULL) {
-                continue;
-            }
-            if (yaml_indent(out, 6) != 0
-                || buffer_append_str(out, "- table: ") != 0
-                || yaml_quoted(out, source->table) != 0
-                || buffer_append_str(out, "\n") != 0) {
-                return -1;
-            }
-            if (emit_field(out, 8, "powerQuery", source->expression) != 0) {
-                return -1;
-            }
-        }
-    }
-
-    return emit_report(out, layout, report_file);
+done:
+    buffer_free(&nodes);
+    buffer_free(&edges);
+    return status;
 }
 
 int main(int argc, char **argv)
