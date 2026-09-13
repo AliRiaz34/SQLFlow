@@ -83,3 +83,6 @@ AGENTS.md
 ## Power BI sample reports: the binary .pbix files are large and are not the product.
 ## The extracted *.spec.yaml specifications ARE tracked, since they are reviewable text.
 samples/powerbi/*.pbix
+
+## Manual PowerAI test estate (throwaway, not part of the product)
+.powerai-manual-test/

@@ -1,5 +1,6 @@
-# The full SQLFlow stack for local/parity deployments: SQL Server (catalog + demo sink), the control plane, one
-# scalable worker, and the GUI. Copy .env.example to .env and set the secrets first.
+# The full SQLFlow stack for local/parity deployments: SQL Server (catalog + demo sink + the AdventureWorks
+# sample, restored once by adventureworks-init), the control plane, one scalable worker, and the GUI. Copy
+# .env.example to .env and set the secrets first.
 #
 #   docker compose up -d --build
 #   docker compose up -d --scale worker=3        # more compute, no other change
@@ -30,6 +31,26 @@ services:
     # Published for host-side tooling only; the stack talks to it on the compose network.
     ports:
       - "14333:1433"
+
+  # One-shot: downloads Microsoft's official AdventureWorksDW2022 sample (the dimensional edition, matching
+  # the shape of samples/powerbi/AdventureWorks Sales.pbix's model) and restores it into `mssql` as database
+  # `AdventureWorks`, then exits. Idempotent (deploy/docker/adventureworks-restore.sh skips the
+  # download/restore once the database already exists), so repeated `docker compose up` is a no-op here.
+  # This is a real Sql.Database-backed sample for PowerAI/lineage work; the sample .pbix's own model tables
+  # are Excel-sourced today and so never resolve to a warehouse object.
+  adventureworks-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - mssql-data:/var/opt/mssql
+      - ../docker/adventureworks-restore.sh:/adventureworks-restore.sh:ro
+    environment:
+      MSSQL_HOST: mssql
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:?set MSSQL_SA_PASSWORD in .env}
+    entrypoint: ["/bin/bash", "/adventureworks-restore.sh"]
+    restart: "no"
 
   controlplane:
     build:
