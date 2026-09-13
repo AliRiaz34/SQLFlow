@@ -20,12 +20,15 @@ sourceRefs:
   - src/SqlFlow.Lineage/Collection/PbixExtractTool.cs
   - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
   - src/SqlFlow.Lineage/Collection/LineageFacts.cs
+  - samples/powerbi/AdventureWorks_Sales.spec.yaml
 rawRefs:
   - docs/powerai-model-entity-resolution-design.md
   - POWERAI.md
 referenceRefs:
   - flow-subscribers
   - concept-lineage-graph-and-plan
+related:
+  - wiki-pbix-split-report-format
 updated: 2026-09-13
 ---
 
@@ -109,14 +112,47 @@ see the lineage is incomplete. A table resolved WRONGLY points a report's entire
 at an object it never read, and nothing about the result looks wrong. The first is a visible gap; the
 second is silent corruption of the graph everything else trusts, so every ambiguity fails closed.
 
-## What is still unproven
+## Proven against a real SQL-backed report
 
 The matcher is covered by its own checks in the tool's suite, clean under AddressSanitizer and
-UndefinedBehaviorSanitizer, and verified against the one real report on file, whose eight tables are
-all Excel- or JSON-backed and correctly produce eight refusals.
+UndefinedBehaviorSanitizer. For a long while that was all the assurance there was, because the one
+real report on file had eight Excel- and JSON-backed tables which correctly produced eight refusals:
+only the refusal path had ever run against a genuine file.
 
-That is also the limitation: no sample report reads a SQL database, so only the refusal path has run
-end to end. The C# test fixture cannot close this either, because it builds a `.pbix` as a zip holding
-only a report layout, while a model source lives in the compressed Analysis Services image the tool is
-decode-only against. Proving the resolved path from file through to a unified edge needs a genuinely
-SQL-backed report.
+That is now closed on the extractor side. The sample report's model was repointed, table by table, in
+PowerBI Desktop onto the restored AdventureWorksDW2022 database, and extraction resolves all seven of
+its SQL-backed tables to real warehouse objects, each carrying `sourceServer`, `sourceDatabase`,
+`sourceSchema` and `sourceName`:
+
+| model entity | warehouse object |
+| --- | --- |
+| `Customer` | `dbo.DimCustomer` |
+| `Date` | `dbo.DimDate` |
+| `Product` | `dbo.DimProduct` |
+| `Reseller` | `dbo.DimReseller` |
+| `Sales` | `dbo.FactResellerSales` |
+| `Sales Order` | `dbo.FactResellerSales` |
+| `Sales Territory` | `dbo.DimSalesTerritory` |
+
+The refusal path did not have to be given up to get this: the same report still carries the `Table`
+helper, report-local sort metadata built by `Json.Document`, which is correctly reported unresolved
+in `reportWarnings`. One file now exercises both branches at once, which is a better test than either
+alone. The committed evidence is the generated spec, since the `.pbix` itself is gitignored.
+
+Two details of that repointing are worth keeping, because they are modeling decisions a later reader
+would otherwise mistake for mistakes. `FactResellerSales` has no `CustomerKey` at all, this warehouse
+shipping reseller-channel sales only, with retail sales in an unrelated `FactInternetSales`, so the
+report's `Customer`-to-`Sales` relationship was dropped rather than fabricated. And rebuilding a
+table under a new query loses the model objects bound to the old one, which is how the sample lost a
+calculated column and two visuals' field bindings; the `Sales Amount by Due Date` measure was
+restored by hand because its `USERELATIONSHIP` over the deliberately inactive `DueDateKey`
+relationship is exactly the knowledge this extraction exists to carry.
+
+## What is still unproven
+
+Only the extractor half. No `db sync` has been run against the repointed report, so `FlowSetCollector`
+turning those four source fields into a `SynonymLink`, and `LineageGraphBuilder` rewriting the bare
+model name onto the node an ingestion flow writes, are still exercised by their own tests rather than
+against a real resolved report. The rendered SQL in the spec is accordingly still in model terms
+(`FROM [Sales] AS [Sales]`), which is correct at that layer: the rewrite belongs to the graph builder,
+downstream of anything the C tool emits.

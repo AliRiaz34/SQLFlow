@@ -3533,6 +3533,34 @@
       "sourceRefs": []
     },
     {
+      "id": "wiki-pbix-split-report-format",
+      "corpus": "wiki",
+      "path": "incidents/pbix-split-report-format.md",
+      "title": "A report saved by a current PowerBI Desktop extracted with no visuals at all",
+      "type": "incident",
+      "summary": "Power BI Desktop replaced Report/Layout with a tree of per-visual documents, so every question a report stated vanished from extraction, with no error.",
+      "keywords": [
+        "pbix",
+        "Report/Layout",
+        "Report/definition",
+        "PBIR",
+        "visual layer",
+        "report format",
+        "silent",
+        "vendor format change"
+      ],
+      "related": [
+        "wiki-powerbi-model-entity-resolution"
+      ],
+      "sourceRefs": [
+        "tools/pbix-extract/src/reportlayout.c",
+        "tools/pbix-extract/src/reportlayout.h",
+        "tools/pbix-extract/src/datamodel.c",
+        "tools/pbix-extract/src/datamodel.h",
+        "tools/pbix-extract/tests/test_reportlayout.c"
+      ]
+    },
+    {
       "id": "wiki-powerbi-model-entity-resolution",
       "corpus": "wiki",
       "path": "decisions/powerbi-model-entity-resolution.md",
@@ -3550,14 +3578,17 @@
         "node identity",
         "Sql.Database"
       ],
-      "related": [],
+      "related": [
+        "wiki-pbix-split-report-format"
+      ],
       "sourceRefs": [
         "tools/pbix-extract/src/msource.c",
         "tools/pbix-extract/src/msource.h",
         "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
         "src/SqlFlow.Lineage/Collection/PbixExtractTool.cs",
         "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
-        "src/SqlFlow.Lineage/Collection/LineageFacts.cs"
+        "src/SqlFlow.Lineage/Collection/LineageFacts.cs",
+        "samples/powerbi/AdventureWorks_Sales.spec.yaml"
       ]
     },
     {

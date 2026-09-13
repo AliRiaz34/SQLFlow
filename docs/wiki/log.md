@@ -137,3 +137,35 @@ the existing synonym mechanism, not by a test spanning the seam between them.
 `docs/reference/flow/subscribers.md` gained the table node's new `source*` properties and a section on
 what resolves and what does not; that is reference material (what the surface does), so it lives there
 rather than here.
+
+## [2026-09-13] ingest | Proving model-entity resolution, and the report format that changed underneath it
+
+Source: a working session repointing `samples/powerbi/AdventureWorks Sales.pbix` from its original
+Excel workbook onto the restored AdventureWorksDW2022 database, plus the `tools/pbix-extract` change
+that came out of it.
+
+The decision page on model-entity resolution had a "What is still unproven" section saying only the
+refusal path had ever run against a real file. That is now half closed and the page says so precisely:
+all seven SQL-backed tables resolve to real `dbo.*` warehouse objects, the `Json.Document` helper table
+is still correctly refused in the same report, and the remaining gap is the control-plane half
+(`FlowSetCollector` to `SynonymLink` to `LineageGraphBuilder`), against which no `db sync` has run.
+Narrowing the claim rather than deleting it matters here, because the chain stops halfway and the
+rendered SQL still being in model terms is easy to misread as a failure when it is correct at that
+layer.
+
+The page also now records two things about the repointing that a later reader would otherwise take for
+mistakes: the `Customer`-to-`Sales` relationship was dropped because `FactResellerSales` genuinely has
+no `CustomerKey`, and rebuilding tables under new queries cost the model a calculated column and two
+visuals' field bindings.
+
+One new incident page: extracting the re-saved report returned zero pages and zero visuals, because
+Power BI Desktop now writes the visual layer as `Report/definition/...`, one document per page and per
+visual, instead of a single `Report/Layout`. What generalizes is the shape of the failure rather than
+the format detail. The loss arrived as a smaller number instead of an error, below the layer where the
+tool's refusal discipline operates; the shared "member not found" message explained it as a missing
+model, a cause that fit only the caller it was written for; and the expression vocabulary turned out to
+be unchanged, so the fix was a translation of structure rather than a second implementation.
+
+Both report shapes must stay supported, and the sample having been re-saved means the real file now
+exercises the new reader while synthetic fixtures hold the old one, exactly reversing which path had
+real coverage the day before.

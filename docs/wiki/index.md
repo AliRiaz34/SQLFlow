@@ -88,6 +88,9 @@ to narrow a search to one kind of page.
 
 - [A misspelled or misplaced YAML key does nothing](incidents/ignored-yaml-keys.md) - unmatched
   properties are silently dropped; a live production flow configures a retry knob that is not real.
+- [A report saved by a current PowerBI Desktop extracted with no visuals](incidents/pbix-split-report-format.md) -
+  the vendor replaced one report part with a tree of per-visual documents, the loss showed up as a
+  smaller number rather than an error, and a shared error message named the wrong cause.
 
 ### Narratives: recipes
 
