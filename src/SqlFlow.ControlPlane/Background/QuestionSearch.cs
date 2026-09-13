@@ -118,8 +118,13 @@ public static class QuestionSearch
             return new QuestionSearchResult(terms, []);
         }
 
+        // Every candidate already matched at least one term in the database. Scoring re-checks each term here
+        // to count and name them, and must credit a STEM match too: where the full-text index matched "sells"
+        // from "sell", a literal-only check would score that row 0 and discard the very row the index just
+        // found. Rows that still score nothing are dropped, which only happens on the LIKE path, where a
+        // substring match can fall inside a longer word ("sale" within "wholesale").
         var ranked = candidates
-            .Select(c => (c.Question, c.VisualKey, Matched: terms.Where(t => ContainsWord(c.Question, t)).ToList()))
+            .Select(c => (c.Question, c.VisualKey, Matched: terms.Where(t => MatchesTerm(c.Question, t)).ToList()))
             .Select(c => (c.Question, c.VisualKey, c.Matched, Score: c.Matched.Count))
             .Where(c => c.Score > 0)
             .OrderByDescending(c => c.Score)
@@ -184,14 +189,17 @@ public static class QuestionSearch
 
         if (await HasFullTextIndexAsync(db, ct).ConfigureAwait(false))
         {
-            // EF.Functions.Contains parameterizes each term, so a term carrying an apostrophe or a full-text
-            // operator is matched as text rather than changing the predicate.
+            // FORMSOF(INFLECTIONAL, ...) is what actually buys stemming: a plain CONTAINS matches the word
+            // literally, so it would find neither "sells" from "sell" nor "category" from "categories". The
+            // whole condition is still passed as a PARAMETER by EF.Functions.Contains, so a term carrying an
+            // apostrophe or a full-text operator is matched as text rather than changing the predicate.
             var predicate = terms.Aggregate(
                 (System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>>?)null,
                 (acc, term) =>
                 {
+                    var condition = InflectionalCondition(term);
                     System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>> one =
-                        q => EF.Functions.Contains(q.Question, term);
+                        q => EF.Functions.Contains(q.Question, condition);
                     return acc is null ? one : Or(acc, one);
                 })!;
 
@@ -252,6 +260,17 @@ public static class QuestionSearch
     /// <summary>Resets the cached full-text probe. For tests, which migrate a catalog mid-process and so can
     /// see the index appear after a probe has already run.</summary>
     internal static void ResetFullTextProbe() => _hasFullText = null;
+
+    /// <summary>
+    /// Wraps one term as an inflectional full-text condition, so the index matches its grammatical forms
+    /// ("sell" reaching "sells"/"selling"/"sold", "categories" reaching "category") rather than only the exact
+    /// word. The term is quoted so a multi-word phrase stays one unit, and any embedded quote is doubled,
+    /// which is how a full-text phrase escapes one: without that a term carrying a quote would end the phrase
+    /// early and the rest would be read as operators. The result is still passed to SQL as a parameter, never
+    /// concatenated into the statement.
+    /// </summary>
+    private static string InflectionalCondition(string term)
+        => $"FORMSOF(INFLECTIONAL, \"{term.Replace("\"", "\"\"", StringComparison.Ordinal)}\")";
 
     /// <summary>The most stored questions one search pulls back before ranking. A ceiling rather than a page:
     /// past this many term hits the query is too broad for the extra rows to change the winners.</summary>
@@ -316,6 +335,68 @@ public static class QuestionSearch
         "these", "those", "there", "their", "have", "has", "had", "can", "could", "would", "should",
         "many", "much", "most", "more", "per", "into", "out", "over", "up", "down", "about",
     };
+
+    /// <summary>
+    /// Whether a question matches a term for SCORING: the term as a whole word, or one of its grammatical
+    /// forms. The inflected comparison exists because the full-text index matches inflections, so a row it
+    /// returned for "sell" (because the question says "sells") has to be credited here or it would be found
+    /// and then silently discarded. It is a deliberately small suffix comparison rather than a real stemmer:
+    /// its only job is to agree with matches the database already made, not to find new ones.
+    /// </summary>
+    private static bool MatchesTerm(string question, string term)
+    {
+        if (ContainsWord(question, term))
+        {
+            return true;
+        }
+
+        // Compare against each word of the question with common inflectional endings removed from both sides.
+        var stem = Stem(term);
+        if (stem.Length < MinStemLength)
+        {
+            return false;
+        }
+
+        foreach (var word in question.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (string.Equals(Stem(word), stem, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Strips the regular English endings that separate one form of a word from another, so "sells",
+    /// "selling" and "sell" reduce alike, as do "categories" and "category". Irregulars ("sold") are out of
+    /// scope on purpose: the expansion supplies those, and a rule that tried to cover them would mis-stem far
+    /// more words than it fixed.</summary>
+    private static string Stem(string word)
+    {
+        var w = word.Trim().ToLowerInvariant();
+        if (w.EndsWith("ies", StringComparison.Ordinal) && w.Length > 4)
+        {
+            return string.Concat(w.AsSpan(0, w.Length - 3), "y");
+        }
+        foreach (var suffix in Suffixes)
+        {
+            if (w.Length - suffix.Length >= MinStemLength && w.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                return w[..^suffix.Length];
+            }
+        }
+        return w;
+    }
+
+    private static readonly string[] Suffixes = ["ing", "ed", "es", "s"];
+
+    /// <summary>Below this many characters a stem is too short to be a meaningful match, and stripping a
+    /// suffix from an already-short word ("sales" to "sal") produces noise rather than a root.</summary>
+    private const int MinStemLength = 3;
+
+    private static readonly char[] WordSeparators =
+        [' ', '\t', '\n', '\r', '?', '!', ',', '.', ';', ':', '(', ')', '"', '\'', '-', '/'];
 
     /// <summary>Whether a question contains a term as a whole word, so "sale" does not score against
     /// "wholesale". A term that is itself multi-word (a short noun phrase from the expansion) is matched as a

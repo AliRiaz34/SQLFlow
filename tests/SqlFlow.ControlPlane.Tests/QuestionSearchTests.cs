@@ -74,23 +74,25 @@ public sealed class QuestionSearchTests
     }
 
     /// <summary>
-    /// Pins a real limitation rather than hiding it: without SQL Server's full-text feature installed the
-    /// search falls back to plain word matching, which has NO stemming, so "sales" does not reach a question
-    /// worded "sells". Where full-text IS installed the engine supplies that inflection matching. The
-    /// expansion step is what covers the gap in the meantime, by returning inflected forms among its terms.
-    /// This test asserts the fallback's honest behavior; it is not asserting that the gap is desirable.
+    /// Inflections match: the term "sell" reaches a question worded "sells", and "categories" reaches
+    /// "category". Both the full-text path (via FORMSOF(INFLECTIONAL, ...)) and the LIKE fallback's scoring
+    /// handle this, so the assertion holds on either kind of instance.
+    /// <para>
+    /// What does NOT match, verified directly against SQL Server: "sales" does not reach "sells". They are
+    /// different lemmas (a noun and a verb), not two forms of one word, so neither the engine's stemmer nor a
+    /// suffix rule connects them. That is precisely the case the LLM expansion exists to cover, by returning
+    /// both words among its terms.
+    /// </para>
     /// </summary>
     [SkippableFact]
-    public async Task WithoutFullText_InflectionsDoNotMatch_WhichIsWhatExpansionIsFor()
+    public async Task InflectionsMatch_ButDifferentLemmasDoNot()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
 
-        Skip.If(await HasFullTextAsync(cs), "SQL Server has full-text installed; its engine stems for us.");
-
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var repoId = Guid.NewGuid();
-        var subscriberKey = $"subscriber|stem_{suffix}";
+        var subscriberKey = $"subscriber|stemfts_{suffix}";
         var pageKey = $"{subscriberKey}#report.pbix#1";
 
         await using var db = CatalogDatabase.Create(cs);
@@ -101,13 +103,24 @@ public sealed class QuestionSearchTests
                 ("Which product category sells the most?", "SELECT 1", "[Dw].[arc].[Sales]", "Top Categories"),
             ]);
 
-            var unstemmed = await QuestionSearch.FindSimilarAsync(
-                db, "sales", topK: 3, ["sales"], repoId, CancellationToken.None);
-            Assert.Empty(unstemmed.Matches);
+            // A different grammatical form of a word in the question.
+            var inflected = await QuestionSearch.FindSimilarAsync(
+                db, "sell", topK: 3, ["sell"], repoId, CancellationToken.None);
+            Assert.Single(inflected.Matches);
 
-            // An expansion that includes the inflected form finds it, which is how this is meant to work.
+            // A plural whose singular appears in the question.
+            var plural = await QuestionSearch.FindSimilarAsync(
+                db, "categories", topK: 3, ["categories"], repoId, CancellationToken.None);
+            Assert.Single(plural.Matches);
+
+            // A different lemma entirely: no stemmer bridges this, which is what expansion is for.
+            var otherLemma = await QuestionSearch.FindSimilarAsync(
+                db, "sales", topK: 3, ["sales"], repoId, CancellationToken.None);
+            Assert.Empty(otherLemma.Matches);
+
+            // ...and with expansion supplying the related word, it is found.
             var expanded = await QuestionSearch.FindSimilarAsync(
-                db, "sales", topK: 3, ["sales", "sells"], repoId, CancellationToken.None);
+                db, "sales", topK: 3, ["sales", "sell"], repoId, CancellationToken.None);
             Assert.Single(expanded.Matches);
         }
         finally
@@ -293,6 +306,52 @@ public sealed class QuestionSearchTests
         }
 
         await db.SaveChangesAsync();
+        await WaitForFullTextAsync(db, repoId, rows.Count);
+    }
+
+    /// <summary>
+    /// Waits until the full-text index has caught up with the rows just inserted, because SQL Server populates
+    /// it ASYNCHRONOUSLY: a CONTAINS query run immediately after an insert finds nothing, then finds the row a
+    /// second or two later. Production is unaffected (questions are written by a sync and searched long
+    /// afterwards) but a test that seeds and immediately searches would otherwise fail intermittently for a
+    /// reason that has nothing to do with the code under test. A no-op where full-text is absent, since the
+    /// LIKE fallback reads the table directly and needs no catch-up.
+    /// </summary>
+    private static async Task WaitForFullTextAsync(CatalogDbContext db, Guid repoId, int expected)
+    {
+        if (expected == 0 || !await HasFullTextAsync(db.Database.GetConnectionString()!))
+        {
+            return;
+        }
+
+        // Poll the catalog's own indexed-item count rather than a probe query: it counts rows the index has
+        // actually absorbed, and PopulateStatus 0 means the crawl has gone idle rather than still running.
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            var (items, status) = await FullTextProgressAsync(db.Database.GetConnectionString()!);
+            if (items >= expected && status == 0)
+            {
+                return;
+            }
+
+            await Task.Delay(250);
+        }
+
+        throw new TimeoutException(
+            $"The full-text index did not catch up with {expected} seeded question(s) within 30s.");
+    }
+
+    private static async Task<(int Items, int Status)> FullTextProgressAsync(string connectionString)
+    {
+        await using var connection = new Microsoft.Data.SqlClient.SqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT CAST(FULLTEXTCATALOGPROPERTY('CatalogFullText','ItemCount') AS int), "
+            + "CAST(FULLTEXTCATALOGPROPERTY('CatalogFullText','PopulateStatus') AS int)";
+        await using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync() ? (reader.GetInt32(0), reader.GetInt32(1)) : (0, 0);
     }
 
     private static async Task CleanupAsync(CatalogDbContext db, Guid repoId)

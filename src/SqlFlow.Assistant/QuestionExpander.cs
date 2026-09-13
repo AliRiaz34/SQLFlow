@@ -9,9 +9,15 @@ namespace SqlFlow.Assistant;
 /// <summary>
 /// Expands a typed business question into the related vocabulary a stored question might have used instead, so
 /// a search for "turnover" also reaches a dashboard question phrased as "revenue" (POWERAI.md Section 6). This
-/// is the paraphrase gap a plain word search cannot close on its own: SQL Server's full-text engine already
-/// handles inflections ("sell"/"selling"/"sold"), but not the business-vocabulary synonymy that two people
-/// naming the same metric will produce.
+/// is the paraphrase gap a plain word search cannot close on its own.
+/// <para>
+/// The expansion covers BOTH synonymy ("turnover"/"revenue") and grammatical form ("sales"/"sells"/"sold").
+/// Where SQL Server's full-text feature is installed the engine stems for us and the forms are redundant but
+/// harmless; where it is absent the search falls back to literal word matching and these forms are the only
+/// thing bridging "sales" to a question worded "sells". Asking for them unconditionally keeps retrieval
+/// behaving the same on both kinds of instance, and covers irregulars ("sold") that no stemmer derives from
+/// the root anyway.
+/// </para>
 /// <para>
 /// Like <see cref="QuestionGenerator"/>, this is a plain, stateless, single-turn completion rather than an
 /// <see cref="IAssistantGateway"/> consumer: it needs none of that gateway's MCP tool loop, streaming, or
@@ -64,14 +70,24 @@ public sealed class QuestionExpander : IDisposable
                         Model = _options.Model,
                         MaxTokens = 512,
                         System = "You expand a business question into the words a SEARCH should look for, to "
-                            + "find questions that a company's existing BI dashboards already answer. Return "
-                            + "the question's own meaningful words (drop filler like 'what', 'our', 'is', "
-                            + "'the') PLUS the business-vocabulary synonyms another analyst might have used "
-                            + "for the same concepts: for example 'turnover' should also yield 'revenue', "
-                            + "'sales', 'income'; 'clients' should also yield 'customers', 'accounts'. Return "
-                            + "single words or short noun phrases only, lowercase, no punctuation, no boolean "
-                            + "operators, no wildcards, and no explanation. Stay in the vocabulary of business "
-                            + "metrics and entities; do not invent table or column names.",
+                            + "find questions that a company's existing BI dashboards already answer. The "
+                            + "search matches words literally, so every form a concept might be written in "
+                            + "has to be listed explicitly. Return three things:\n"
+                            + "1. The question's own meaningful words, dropping filler like 'what', 'our', "
+                            + "'is', 'the'.\n"
+                            + "2. The business-vocabulary synonyms another analyst might have used for the "
+                            + "same concepts: 'turnover' should also yield 'revenue', 'sales', 'income'; "
+                            + "'clients' should also yield 'customers', 'accounts'.\n"
+                            + "3. The GRAMMATICAL FORMS of each of those words that a question could "
+                            + "plausibly use, including irregular ones: for 'sales' also give 'sell', "
+                            + "'sells', 'selling', 'sold'; for 'category' also give 'categories'; for "
+                            + "'buy' also give 'bought', 'purchase', 'purchased'. A dashboard question "
+                            + "worded 'which category sells the most' must be reachable from the word "
+                            + "'sales', so omitting these forms loses real matches.\n"
+                            + "Return single words or short noun phrases only, lowercase, no punctuation, "
+                            + "no boolean operators, no wildcards, and no explanation. Stay in the "
+                            + "vocabulary of business metrics and entities; do not invent table or column "
+                            + "names.",
                         Messages = [new MessageParam { Role = "user", Content = question }],
                     },
                     ct).ConfigureAwait(false);
@@ -102,7 +118,12 @@ public sealed class QuestionExpander : IDisposable
         return [];
     }
 
-    /// <summary>How many expanded terms are kept. Past this the added terms are increasingly loose associations
-    /// that pull in unrelated questions rather than finding the right one.</summary>
-    private const int MaxTerms = 24;
+    /// <summary>
+    /// How many expanded terms are kept. Past this the added terms are increasingly loose associations that
+    /// pull in unrelated questions rather than finding the right one. Set well above the count of distinct
+    /// CONCEPTS a question carries, because each concept contributes several grammatical forms
+    /// (sell/sells/selling/sold) on top of its synonyms, and truncating mid-concept would drop exactly the
+    /// inflection a stored question happened to use.
+    /// </summary>
+    private const int MaxTerms = 48;
 }

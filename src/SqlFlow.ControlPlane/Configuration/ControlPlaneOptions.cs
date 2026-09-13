@@ -1018,9 +1018,10 @@ public sealed class RetrievalOptions
 
     /// <summary>
     /// Expands a typed question into related business vocabulary before searching, so "turnover" also matches
-    /// a stored question phrased as "revenue". Reuses <c>ControlPlane:Assistant:Anthropic</c>'s key and model,
-    /// exactly as question generation does. Off, the search still runs on the words the user typed (plus SQL
-    /// Server's own stemming), which is weaker but costs no LLM call and needs no key.
+    /// a stored question phrased as "revenue", and so related words no stemmer connects ("sales" and "sells")
+    /// reach each other. Reuses <c>ControlPlane:Assistant:Anthropic</c>'s key and model, exactly as question
+    /// generation does. Off, the search still runs on the words the user typed and their inflections, which is
+    /// weaker but costs no LLM call and needs no key.
     /// </summary>
     public bool ExpandSynonyms { get; set; } = true;
 

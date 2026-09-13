@@ -53,7 +53,7 @@ artifact kept in step with its text: the searched column IS the stored question.
 
 **Built: an LLM expands the typed question into related business vocabulary, and the stored questions
 are ranked by how many of those terms they match.** SQL Server's full-text index supplies the
-linguistic half (inflections such as "sell"/"selling"/"sold"), and the expansion supplies the
+linguistic half (inflections such as "sell"/"sells"/"selling"), and the expansion supplies the
 business-vocabulary half a database cannot know ("turnover" also meaning "revenue", "clients" also
 meaning "customers"). No embedding vendor is involved: the expansion reuses the same Anthropic
 account/model `QuestionGenerator` already uses, and can be switched off to search the typed words
@@ -76,9 +76,24 @@ vendor but adds a runtime dependency and a model download to the same contributo
 needs neither, and degrades to something that still works when the LLM is unreachable.
 
 **Why not naive `LIKE` alone.** It is the fallback, not the mechanism: it runs only where SQL Server's
-full-text feature is absent (Section 4). Without the index there is no stemming, so "sales" will not
-reach a question worded "sells"; a test pins that limitation rather than hiding it, and the expansion
-is what covers it in the meantime by returning inflected forms among its terms.
+full-text feature is absent (Section 4). Both paths credit inflections, the index through
+`FORMSOF(INFLECTIONAL, ...)` and the fallback through a small suffix comparison in the scoring step, so
+"sell" reaches a question worded "sells" either way.
+
+**What no stemmer bridges, verified directly against SQL Server rather than assumed.** "sales" does
+NOT reach "sells", under plain `CONTAINS`, under `FORMSOF(INFLECTIONAL, ...)`, or under `FREETEXT`.
+They are different lemmas (a noun and a verb), not two forms of one word. An earlier draft of this
+document claimed the engine covered that case; a test proved otherwise, and the prompt in
+`QuestionExpander` now asks explicitly for grammatical forms including irregulars ("sold", "bought")
+precisely because this is the class of gap only the expansion can close. A test asserts both halves:
+the inflections that do match, and the different lemma that does not until expansion supplies it.
+
+**A plain `CONTAINS` would have bought nothing.** Worth recording, since it was a real bug caught only
+by running against an instance that actually had the feature: `EF.Functions.Contains(column, term)`
+emits a literal `CONTAINS`, which matches the exact word and nothing else. The index was present and
+being queried, but no inflection was being matched, so the full-text path was doing strictly less than
+the `LIKE` fallback while appearing to work. The condition has to say `FORMSOF(INFLECTIONAL, "term")`
+(still passed as a parameter) for the index to earn its place.
 
 ## 4. Storage: no new columns, one full-text index
 
@@ -176,7 +191,8 @@ what replaced it, not as outstanding work.
    a real SQL Server: the differently-worded match ("turnover per territory" finding "revenue by region"),
    stop-word-only input matching nothing rather than everything, word-boundary matching ("sale" not
    matching "wholesale"), apostrophes and full-text operators treated as text, the no-expander fallback,
-   and the no-stemming limitation of the `LIKE` path pinned explicitly.
+   and the inflection behavior of both paths pinned explicitly (what stems, and the different-lemma case
+   that does not until the expansion supplies it).
 5. ~~MCP tool surface so an assistant surface can call it.~~ **Done**: `find_similar_questions`
    (`tools/sqlflow-mcp/src/server.rs`) over `GET /api/v1/lineage/subscribers/similar-questions`
    (`FindSimilarQuestionsAsync`, `src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs`), on the SHARED read
