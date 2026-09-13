@@ -95,15 +95,19 @@ static void *push_row(void **array, size_t *count, size_t element_size)
 
 /*
  * Reads a visual's authored title, which Power BI stores as a single-quoted literal nested under
- * the visual's container objects: vcObjects.title[].properties.text.expr.Literal.Value.
+ * the visual's container objects: <objects_key>.title[].properties.text.expr.Literal.Value.
+ *
+ * `objects_key` differs by report format ("vcObjects" in the single-part layout,
+ * "visualContainerObjects" in the split one); everything below that key is identical, so one reader
+ * serves both.
  *
  * The title matters more than its depth suggests: it is the report author's own words for the
  * question the visual answers, which is exactly the phrasing a person would use when asking it
  * again.
  */
-static char *read_title(json_t *single_visual)
+static char *read_title(json_t *single_visual, const char *objects_key)
 {
-    json_t *vc_objects = json_object_get(single_visual, "vcObjects");
+    json_t *vc_objects = json_object_get(single_visual, objects_key);
     json_t *titles;
     size_t index;
     json_t *entry;
@@ -762,36 +766,24 @@ static int parse_query(json_t *query_node, VisualQuery *query, ExprStatus *statu
 }
 
 /*
- * Reads a filter array, stored as a JSON string inside the outer JSON. A filter's condition is kept
- * as a tree so the renderer can fold it into the synthesized query's WHERE clause: the filter is
- * part of the question, and a question missing its filter is a different question.
+ * Reads an already-parsed filter array. A filter's condition is kept as a tree so the renderer can
+ * fold it into the synthesized query's WHERE clause: the filter is part of the question, and a
+ * question missing its filter is a different question.
  *
  * A filter entry with no condition constrains nothing (Power BI keeps the field binding for the UI
  * even when no values are selected), so it contributes no predicate and is not an error.
+ *
+ * Shared by both report formats: one stores this array as a JSON string (see `parse_filters`), the
+ * newer one stores it as a native array under `filterConfig`, but the entries are identical.
  */
-static int parse_filters(
-    const char *filters_text, ReportFilter **filters, size_t *count, ExprStatus *status)
+static int parse_filters_array(
+    json_t *root, ReportFilter **filters, size_t *count, ExprStatus *status)
 {
-    json_error_t json_error;
-    json_t *root;
     size_t index;
     json_t *entry;
     int result = 0;
 
-    if (filters_text == NULL || filters_text[0] == '\0') {
-        return 0;
-    }
-
-    root = json_loads(filters_text, 0, &json_error);
-    if (root == NULL) {
-        /* Power BI writes this member as a string holding JSON; text that does not parse carries no
-         * recoverable condition, and treating it as "no filter" would widen the question. */
-        set_refusal(status, "a filter list that is not valid JSON (line %d: %s)",
-            json_error.line, json_error.text);
-        return -1;
-    }
     if (!json_is_array(root)) {
-        json_decref(root);
         return 0;
     }
 
@@ -884,6 +876,34 @@ static int parse_filters(
     }
 
 done:
+    return result;
+}
+
+/*
+ * Reads a filter array stored as a JSON string inside the outer JSON, the form the single-part
+ * `Report/Layout` uses. The entries themselves are read by `parse_filters_array`.
+ */
+static int parse_filters(
+    const char *filters_text, ReportFilter **filters, size_t *count, ExprStatus *status)
+{
+    json_error_t json_error;
+    json_t *root;
+    int result;
+
+    if (filters_text == NULL || filters_text[0] == '\0') {
+        return 0;
+    }
+
+    root = json_loads(filters_text, 0, &json_error);
+    if (root == NULL) {
+        /* Power BI writes this member as a string holding JSON; text that does not parse carries no
+         * recoverable condition, and treating it as "no filter" would widen the question. */
+        set_refusal(status, "a filter list that is not valid JSON (line %d: %s)",
+            json_error.line, json_error.text);
+        return -1;
+    }
+
+    result = parse_filters_array(root, filters, count, status);
     json_decref(root);
     return result;
 }
@@ -1131,7 +1151,7 @@ static int read_visual(
     if (visual->visual_type == NULL) {
         visual->visual_type = strdup("unknown");
     }
-    visual->title = read_title(single_visual);
+    visual->title = read_title(single_visual, "vcObjects");
 
     visual_type = visual->visual_type != NULL ? visual->visual_type : "unknown";
     page_label = page->display_name != NULL ? page->display_name : "";
@@ -1345,6 +1365,510 @@ static int read_page(json_t *section, int ordinal, ReportLayout *layout,
     return 0;
 }
 
+/* ---- The split report format (Report/definition/...) ------------------------------------- */
+
+/*
+ * Power BI Desktop now writes a report as a tree of small JSON documents rather than one
+ * `Report/Layout` blob: `Report/definition/pages/pages.json` orders the pages, each page is
+ * `.../pages/<page>/page.json`, and each visual on it is `.../visuals/<id>/visual.json`.
+ *
+ * The documents are plain UTF-8 JSON, and the expression vocabulary inside them (Column, Measure,
+ * HierarchyLevel, Aggregation, In, Comparison, ...) is byte-for-byte the one the older format uses,
+ * so every expression, filter and field parser above is reused verbatim. What differs is only the
+ * shape AROUND those expressions, which is what these functions translate:
+ *
+ *   - a visual's fields live in `visual.query.queryState.<role>.projections[].field`, which holds
+ *     the expression INLINE, rather than a `queryRef` pointing into a separate `prototypeQuery`;
+ *   - there is no query-level `From`, because references name their entity directly rather than an
+ *     alias, so the FROM clause is reconstructed from the entities the fields actually name;
+ *   - filters sit in a native `filterConfig.filters` array instead of a stringified one;
+ *   - ordering sits in `visual.query.sortDefinition.sort[]` with a spelled-out direction.
+ */
+
+/* Reads a member of the archive as UTF-8 JSON. Returns NULL with `error` set. */
+static json_t *read_json_member(
+    const char *pbix_path, const char *member_name, char *error, size_t error_size)
+{
+    Buffer member;
+    json_error_t json_error;
+    json_t *root;
+
+    buffer_init(&member);
+    if (pbix_read_member(pbix_path, member_name, &member, error, error_size) != 0) {
+        buffer_free(&member);
+        return NULL;
+    }
+
+    /* These documents are UTF-8 and carry no terminator of their own, so the size is given
+     * explicitly rather than relying on one. */
+    root = json_loadb((const char *)member.data, member.size, 0, &json_error);
+    if (root == NULL) {
+        set_errorf(error, error_size, "'%s' is not valid JSON (line %d: %s)",
+            member_name, json_error.line, json_error.text);
+    }
+    buffer_free(&member);
+    return root;
+}
+
+/*
+ * Binds an entity into the query's FROM, once per distinct entity.
+ *
+ * The split format drops the query-level FROM because its references are already entity-qualified,
+ * but the rendered SQL still has to say which tables the visual reads: that list is the visual's
+ * consumption lineage. The alias is the entity's own name, which is what the field references use.
+ */
+static int bind_entity(VisualQuery *query, const char *entity)
+{
+    size_t i;
+    QuerySource *grown;
+
+    if (entity == NULL || entity[0] == '\0') {
+        return 0;
+    }
+    for (i = 0; i < query->from_count; i++) {
+        if (strcmp(query->from[i].entity, entity) == 0) {
+            return 0;
+        }
+    }
+
+    grown = (QuerySource *)realloc(query->from, (query->from_count + 1) * sizeof(*grown));
+    if (grown == NULL) {
+        return -1;
+    }
+    query->from = grown;
+    query->from[query->from_count].alias = strdup(entity);
+    query->from[query->from_count].entity = strdup(entity);
+    query->from_count++;
+    if (query->from[query->from_count - 1].alias == NULL
+        || query->from[query->from_count - 1].entity == NULL) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Reads `sortDefinition.sort[]` into the query's ORDER BY. */
+static int parse_sort_definition(json_t *query_node, VisualQuery *query, ExprStatus *status)
+{
+    json_t *sort_definition = json_object_get(query_node, "sortDefinition");
+    json_t *sort;
+    size_t index;
+    json_t *entry;
+
+    if (!json_is_object(sort_definition)) {
+        return 0;
+    }
+    sort = json_object_get(sort_definition, "sort");
+    if (!json_is_array(sort)) {
+        return 0;
+    }
+
+    json_array_foreach(sort, index, entry) {
+        json_t *field = json_object_get(entry, "field");
+        const char *direction = json_text(entry, "direction");
+        QueryOrdering *grown;
+        QueryExpr *parsed;
+
+        if (!json_is_object(field)) {
+            continue;
+        }
+
+        parsed = parse_expression(field, status);
+        if (parsed == NULL) {
+            return -1;
+        }
+
+        grown = (QueryOrdering *)realloc(query->order_by,
+            (query->order_by_count + 1) * sizeof(*grown));
+        if (grown == NULL) {
+            query_expr_free(parsed);
+            status->out_of_memory = 1;
+            return -1;
+        }
+        query->order_by = grown;
+        query->order_by[query->order_by_count].expression = parsed;
+        query->order_by[query->order_by_count].descending =
+            direction != NULL && strcmp(direction, "Descending") == 0;
+        query->order_by_count++;
+    }
+
+    return 0;
+}
+
+/*
+ * Reads one visual.json, appending it to the page when it carries a question.
+ *
+ * As in the older format, a visual that projects no field states no business question (a textbox, a
+ * shape, an image) and is deliberately not recorded rather than stored empty.
+ */
+static int read_visual_split(
+    json_t *document, int ordinal, ReportPage *page, ReportLayout *layout,
+    char *error, size_t error_size)
+{
+    json_t *single_visual = json_object_get(document, "visual");
+    json_t *query_node;
+    json_t *query_state;
+    json_t *filter_config;
+    json_t *role_value;
+    const char *role_name;
+    ReportVisual *visual;
+    ExprStatus expr_status;
+    char refusal[256];
+    const char *visual_type;
+    const char *page_label;
+    json_t *empty_aliases;
+    size_t index;
+    json_t *entry;
+    int render_result;
+    int status = -1;
+
+    if (!json_is_object(single_visual)) {
+        return 0;
+    }
+
+    query_node = json_object_get(single_visual, "query");
+    query_state = json_is_object(query_node) ? json_object_get(query_node, "queryState") : NULL;
+    if (!json_is_object(query_state) || json_object_size(query_state) == 0) {
+        return 0;
+    }
+
+    /* References in this format are entity-qualified rather than alias-bound, so there are no alias
+     * bindings to resolve against; `resolve_field` falls through to the entity on an empty map. */
+    empty_aliases = json_object();
+    if (empty_aliases == NULL) {
+        set_error(error, error_size, "out of memory reading a visual");
+        return -1;
+    }
+
+    visual = (ReportVisual *)push_row(
+        (void **)&page->visuals, &page->visual_count, sizeof(*page->visuals));
+    if (visual == NULL) {
+        set_error(error, error_size, "out of memory reading a visual");
+        goto done;
+    }
+
+    visual->ordinal = ordinal;
+    visual->visual_type = dup_text(single_visual, "visualType");
+    if (visual->visual_type == NULL) {
+        visual->visual_type = strdup("unknown");
+    }
+    visual->title = read_title(single_visual, "visualContainerObjects");
+
+    visual_type = visual->visual_type != NULL ? visual->visual_type : "unknown";
+    page_label = page->display_name != NULL ? page->display_name : "";
+
+    memset(&expr_status, 0, sizeof(expr_status));
+
+    /* Each projection bucket is a ROLE, and its name is kept verbatim: Category/Y for a chart,
+     * Rows/Values for a matrix, Size for a map. Unlike the older format the field's expression is
+     * inline, so it is both parsed for the query and resolved for the field list from one node. */
+    json_object_foreach(query_state, role_name, role_value) {
+        json_t *projections = json_is_object(role_value)
+            ? json_object_get(role_value, "projections") : NULL;
+
+        if (!json_is_array(projections)) {
+            continue;
+        }
+
+        json_array_foreach(projections, index, entry) {
+            const char *query_ref = json_text(entry, "queryRef");
+            json_t *field_node = json_object_get(entry, "field");
+            const char *table = NULL;
+            const char *name = NULL;
+            int is_measure = 0;
+            VisualField *field;
+            QuerySelection *grown;
+            QueryExpr *parsed;
+
+            if (query_ref == NULL || !json_is_object(field_node)) {
+                continue;
+            }
+
+            if (resolve_field(field_node, empty_aliases, &table, &name, &is_measure) != 0
+                || table == NULL || name == NULL) {
+                if (add_warning(layout,
+                        "page '%s' visual #%d (%s) projects '%s' in role '%s', which resolves to no "
+                        "column or measure; that field was skipped.",
+                        page_label, ordinal, visual_type, query_ref, role_name) != 0) {
+                    set_error(error, error_size, "out of memory recording a warning");
+                    goto done;
+                }
+                continue;
+            }
+
+            parsed = parse_expression(field_node, &expr_status);
+            if (parsed == NULL) {
+                if (expr_status.out_of_memory) {
+                    set_error(error, error_size, "out of memory reading a visual's query");
+                    goto done;
+                }
+                if (add_warning(layout,
+                        "page '%s' visual #%d (%s) uses a query expression the extractor does not "
+                        "support (%s); the visual was skipped rather than recorded with an "
+                        "incomplete query.",
+                        page_label, ordinal, visual_type, expr_status.reason) != 0) {
+                    set_error(error, error_size, "out of memory recording a warning");
+                    goto done;
+                }
+                goto drop_visual;
+            }
+
+            grown = (QuerySelection *)realloc(visual->query.select,
+                (visual->query.select_count + 1) * sizeof(*grown));
+            if (grown == NULL) {
+                query_expr_free(parsed);
+                set_error(error, error_size, "out of memory reading a visual's query");
+                goto done;
+            }
+            visual->query.select = grown;
+            visual->query.select[visual->query.select_count].name = strdup(query_ref);
+            visual->query.select[visual->query.select_count].expression = parsed;
+            visual->query.select_count++;
+            if (visual->query.select[visual->query.select_count - 1].name == NULL
+                || bind_entity(&visual->query, table) != 0) {
+                set_error(error, error_size, "out of memory reading a visual's query");
+                goto done;
+            }
+
+            field = (VisualField *)push_row(
+                (void **)&visual->fields, &visual->field_count, sizeof(*visual->fields));
+            if (field == NULL) {
+                set_error(error, error_size, "out of memory reading a visual's fields");
+                goto done;
+            }
+
+            field->role = strdup(role_name);
+            field->query_ref = strdup(query_ref);
+            field->table = strdup(table);
+            field->column_or_measure = strdup(name);
+            field->is_measure = is_measure;
+            if (field->role == NULL || field->query_ref == NULL || field->table == NULL
+                || field->column_or_measure == NULL) {
+                set_error(error, error_size, "out of memory reading a visual's fields");
+                goto done;
+            }
+        }
+    }
+
+    if (visual->field_count == 0) {
+        goto drop_visual;
+    }
+
+    if (parse_sort_definition(query_node, &visual->query, &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a visual's ordering");
+            goto done;
+        }
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) orders by an expression the extractor does not support "
+                "(%s); the visual was skipped rather than recorded with an incomplete query.",
+                page_label, ordinal, visual_type, expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
+    filter_config = json_object_get(single_visual, "filterConfig");
+    if (json_is_object(filter_config)
+        && parse_filters_array(json_object_get(filter_config, "filters"), &visual->filters,
+            &visual->filter_count, &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a visual's filters");
+            goto done;
+        }
+        /* Same reasoning as the older format: a filter that cannot be translated must not be
+         * dropped quietly, because without it the synthesized query is BROADER than the question
+         * the visual actually asks. */
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) has a filter using an unsupported expression (%s); the "
+                "visual was skipped, because recording it without the filter would widen the "
+                "question it asks.",
+                page_label, ordinal, visual_type, expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
+    render_result = sql_render_visual(
+        visual, page->filters, page->filter_count, &visual->sql, refusal, sizeof(refusal));
+    if (render_result < 0) {
+        set_error(error, error_size, "out of memory rendering a visual's query");
+        goto done;
+    }
+    if (render_result > 0) {
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) has a filter using an unsupported expression (%s); the "
+                "visual was skipped, because recording it without the filter would widen the "
+                "question it asks.",
+                page_label, ordinal, visual_type, refusal) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
+    status = 0;
+    goto done;
+
+drop_visual:
+    free_visual(visual);
+    page->visual_count--;
+    status = 0;
+
+done:
+    json_decref(empty_aliases);
+    return status;
+}
+
+/* Orders a page's visual members, so a report's visuals are numbered stably across runs. */
+static int compare_names(const void *left, const void *right)
+{
+    return strcmp(*(const char *const *)left, *(const char *const *)right);
+}
+
+/* Reads one page directory: its page.json, then every visual.json beneath it. */
+static int read_page_split(
+    const char *pbix_path, const char *page_name, int ordinal, ReportLayout *layout,
+    char *error, size_t error_size)
+{
+    char member_name[1024];
+    char prefix[1024];
+    json_t *document;
+    json_t *filter_config;
+    ReportPage *page;
+    ExprStatus expr_status;
+    char **visual_members = NULL;
+    size_t visual_count = 0;
+    size_t index;
+    int visual_ordinal = 0;
+    int status = -1;
+
+    snprintf(member_name, sizeof(member_name),
+        "Report/definition/pages/%s/page.json", page_name);
+    document = read_json_member(pbix_path, member_name, error, error_size);
+    if (document == NULL) {
+        return -1;
+    }
+
+    page = (ReportPage *)push_row(
+        (void **)&layout->pages, &layout->page_count, sizeof(*layout->pages));
+    if (page == NULL) {
+        set_error(error, error_size, "out of memory reading the report's pages");
+        goto done;
+    }
+
+    page->ordinal = ordinal;
+    page->name = dup_text(document, "name");
+    page->display_name = dup_text(document, "displayName");
+    if (page->name == NULL) {
+        page->name = strdup(page_name);
+    }
+    if (page->display_name == NULL && page->name != NULL) {
+        page->display_name = strdup(page->name);
+    }
+
+    /* A page-level filter narrows every visual on the page, so it is read before them and folded
+     * into each one's rendered query. Refusing it for the whole page beats ignoring it, which would
+     * widen every question on the page at once. */
+    memset(&expr_status, 0, sizeof(expr_status));
+    filter_config = json_object_get(document, "filterConfig");
+    if (json_is_object(filter_config)
+        && parse_filters_array(json_object_get(filter_config, "filters"), &page->filters,
+            &page->filter_count, &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a page's filters");
+            goto done;
+        }
+        if (add_warning(layout,
+                "page '%s' has a filter using an unsupported expression (%s); every visual on it "
+                "was skipped, because recording them without the filter would widen the questions "
+                "they ask.",
+                page->display_name != NULL ? page->display_name : "", expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        status = 0;
+        goto done;
+    }
+
+    /* The visuals are one member each under a generated id, so they are enumerated rather than
+     * named, then sorted: the archive's order is not meaningful, and a stable order keeps a
+     * visual's ordinal the same from one extraction to the next. */
+    snprintf(prefix, sizeof(prefix), "Report/definition/pages/%s/visuals/", page_name);
+    if (pbix_list_members(pbix_path, prefix, "/visual.json", &visual_members, &visual_count,
+            error, error_size) != 0) {
+        goto done;
+    }
+    qsort(visual_members, visual_count, sizeof(*visual_members), compare_names);
+
+    for (index = 0; index < visual_count; index++) {
+        json_t *visual_document = read_json_member(
+            pbix_path, visual_members[index], error, error_size);
+
+        if (visual_document == NULL) {
+            goto done;
+        }
+        visual_ordinal++;
+        if (read_visual_split(visual_document, visual_ordinal, page, layout, error, error_size)
+            != 0) {
+            json_decref(visual_document);
+            goto done;
+        }
+        json_decref(visual_document);
+    }
+
+    status = 0;
+
+done:
+    pbix_member_names_free(visual_members, visual_count);
+    json_decref(document);
+    return status;
+}
+
+/* Reads a report stored in the split format, page order taken from pages.json. */
+static int report_layout_read_split(
+    const char *pbix_path, ReportLayout *layout, char *error, size_t error_size)
+{
+    json_t *document = read_json_member(
+        pbix_path, "Report/definition/pages/pages.json", error, error_size);
+    json_t *page_order;
+    size_t index;
+    json_t *entry;
+    int ordinal = 0;
+    int status = -1;
+
+    if (document == NULL) {
+        return -1;
+    }
+
+    page_order = json_object_get(document, "pageOrder");
+    if (!json_is_array(page_order)) {
+        /* A definition with no page order lists no pages, which is no questions rather than a
+         * failure, exactly as an empty `sections` array is in the older format. */
+        status = 0;
+        goto done;
+    }
+
+    json_array_foreach(page_order, index, entry) {
+        const char *page_name = json_is_string(entry) ? json_string_value(entry) : NULL;
+
+        if (page_name == NULL || page_name[0] == '\0') {
+            continue;
+        }
+        ordinal++;
+        if (read_page_split(pbix_path, page_name, ordinal, layout, error, error_size) != 0) {
+            goto done;
+        }
+    }
+
+    status = 0;
+
+done:
+    json_decref(document);
+    return status;
+}
+
 int report_layout_read(const char *pbix_path, ReportLayout *layout, char *error, size_t error_size)
 {
     Buffer member;
@@ -1361,7 +1885,15 @@ int report_layout_read(const char *pbix_path, ReportLayout *layout, char *error,
     buffer_init(&member);
 
     if (pbix_read_member(pbix_path, "Report/Layout", &member, error, error_size) != 0) {
-        goto done;
+        /* No single-part layout: the report is either in the newer split format or has no visual
+         * layer at all. Both are read from `Report/definition`, and only a file with neither part
+         * is the failure this reports. */
+        buffer_free(&member);
+        if (report_layout_read_split(pbix_path, layout, error, error_size) != 0) {
+            report_layout_free(layout);
+            return -1;
+        }
+        return 0;
     }
 
     /* The layout is UTF-16LE, with no byte order mark in the files seen so far. */

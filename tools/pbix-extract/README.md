@@ -22,7 +22,8 @@ on disk. Nothing here links into the SQLFlow control plane, and the only thing t
 is reviewed YAML text. A malformed or hostile report can at worst crash this tool.
 
 This tool also reads the report's *visual* layer (pages, visuals, which fields sit in which role),
-which is plain UTF-16 JSON in the `Report/Layout` part and carries no native-code risk. Both halves
+which is plain JSON and carries no native-code risk. Power BI Desktop writes that layer in either of
+two shapes, and both are read (see "Report formats" below). Both halves
 live here so there is ONE reader of a `.pbix` rather than two implementations to keep in step: the
 visual layer tracks the questions a report asks, and the model describes what those questions are
 asked against. SQLFlow consumes this tool's YAML output rather than parsing `.pbix` itself.
@@ -84,7 +85,7 @@ Power BI's auto-generated date-hierarchy tables (the `LocalDateTable_*` /
 `DateTableTemplate_*` scaffolding, flagged in the model as system objects) are excluded: nobody
 authored them, and they would bury the real model in noise.
 
-Read from the report's visual layer (`Report/Layout`):
+Read from the report's visual layer:
 
 - **pages**: display name, internal name, position, and the report file they came from
 - **visuals**: chart type, authored title, position on the page
@@ -104,6 +105,30 @@ trusted.
 Not read: row-level security, perspectives, translations, KPIs, visual styling (colors, positions,
 sizes), and the column data itself. A model whose inner files are XPress8-compressed
 (`ApplyCompression`) is reported as unsupported rather than silently returning nothing.
+
+## Report formats
+
+Power BI Desktop writes the visual layer in one of two shapes, and which one a file uses depends on
+the Desktop version that last saved it. Both are read, and which is present is detected from the
+file rather than configured:
+
+- **`Report/Layout`**, the older single part: UTF-16LE JSON holding every page and visual, with a
+  visual's `config` and `filters` nested as JSON *strings* inside that JSON, and each field behind a
+  `queryRef` pointing into a separate `prototypeQuery`.
+- **`Report/definition/...`**, the newer split form: plain UTF-8 JSON spread over one document per
+  page (`pages/<page>/page.json`) and per visual (`pages/<page>/visuals/<id>/visual.json`), ordered
+  by `pages/pages.json`. Field expressions sit INLINE under their role, filters are a native
+  `filterConfig.filters` array, and sort direction is spelled out rather than numeric.
+
+The expression vocabulary inside both (`Column`, `Measure`, `HierarchyLevel`, `Aggregation`, `In`,
+`Comparison`, ...) is identical, so one set of expression, filter and SQL-rendering code serves
+both; only the shape around those expressions differs. One consequence is worth knowing: the split
+form states no query-level `FROM`, because its references name their entity directly instead of
+binding an alias, so the rendered `FROM` is reconstructed from the entities a visual's fields
+actually name.
+
+A file with neither part is reported as having no readable visual layer, which is distinct from a
+file that has one holding no pages.
 
 ## Schema variation
 

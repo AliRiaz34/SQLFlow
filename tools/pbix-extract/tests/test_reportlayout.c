@@ -8,11 +8,13 @@
  * down, and pin down the thing that would make an extracted question WRONG: dropping a filter,
  * which would leave a query broader than the question actually on screen.
  *
- * The fixtures are synthetic .pbix files built here rather than checked-in binaries. Their shape
- * mirrors a real Power BI Desktop file part for part (a zip whose `Report/Layout` is UTF-16LE JSON,
- * with a visual's `config` and `filters` held as JSON STRINGS inside that JSON), which is exactly
- * what the reader has to cope with. The expected values were confirmed against a genuine
- * AdventureWorks report.
+ * The fixtures are synthetic .pbix files built here rather than checked-in binaries, and cover BOTH
+ * shapes Power BI Desktop writes. The older one is a zip whose `Report/Layout` is UTF-16LE JSON
+ * with a visual's `config` and `filters` held as JSON STRINGS inside that JSON; the newer one
+ * spreads the report over `Report/definition/...`, one plain UTF-8 document per page and per
+ * visual, with field expressions inline rather than behind a queryRef. Both are what the reader has
+ * to cope with, so both are exercised here. The expected values were confirmed against a genuine
+ * AdventureWorks report saved in each format.
  */
 
 #include <stdio.h>
@@ -514,6 +516,231 @@ static void test_a_report_with_no_sections_is_not_an_error(void)
     report_layout_free(&layout);
 }
 
+/* ---- The split report format (Report/definition/...) ------------------------------------- */
+
+/* One member of a split-format fixture: a path in the zip and the UTF-8 JSON stored at it. */
+typedef struct {
+    const char *path;
+    const char *json;
+} SplitMember;
+
+/*
+ * Writes a .pbix in the split format: one member per document, plain UTF-8 rather than the older
+ * format's UTF-16LE, and no stringified JSON anywhere. That difference is the reader contract
+ * these fixtures exist to exercise.
+ */
+static int write_pbix_split(const char *path, const SplitMember *members, size_t count)
+{
+    zip_t *archive;
+    int error = 0;
+    size_t i;
+
+    remove(path);
+    archive = zip_open(path, ZIP_CREATE | ZIP_TRUNCATE, &error);
+    if (archive == NULL) {
+        return -1;
+    }
+
+    for (i = 0; i < count; i++) {
+        /* The buffer is NOT copied by libzip, so each fixture's JSON must outlive zip_close; every
+         * caller passes string literals, which do. */
+        zip_source_t *source = zip_source_buffer(
+            archive, members[i].json, strlen(members[i].json), 0);
+
+        if (source == NULL
+            || zip_file_add(archive, members[i].path, source, ZIP_FL_ENC_UTF_8) < 0) {
+            if (source != NULL) {
+                zip_source_free(source);
+            }
+            zip_discard(archive);
+            return -1;
+        }
+    }
+
+    return zip_close(archive) == 0 ? 0 : -1;
+}
+
+static int read_split_layout(const SplitMember *members, size_t count, ReportLayout *layout)
+{
+    const char *path = "build/test-fixture-split.pbix";
+    char error[512];
+
+    error[0] = '\0';
+    if (write_pbix_split(path, members, count) != 0) {
+        fprintf(stderr, "FAIL: could not write the split test fixture\n");
+        failures++;
+        return -1;
+    }
+    if (report_layout_read(path, layout, error, sizeof(error)) != 0) {
+        fprintf(stderr, "FAIL: reading the split fixture failed: %s\n", error);
+        failures++;
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * The split format's own shape, read end to end: a field expression held INLINE under its role
+ * rather than behind a queryRef, a FROM reconstructed from the entities those fields name, a
+ * spelled-out sort direction, and a title under `visualContainerObjects`.
+ */
+static void test_reads_the_split_report_format(void)
+{
+    static const SplitMember MEMBERS[] = {
+        { "Report/definition/pages/pages.json",
+          "{\"pageOrder\":[\"p1\"],\"activePageName\":\"p1\"}" },
+        { "Report/definition/pages/p1/page.json",
+          "{\"name\":\"p1\",\"displayName\":\"Page 1\"}" },
+        { "Report/definition/pages/p1/visuals/v1/visual.json",
+          "{\"name\":\"v1\",\"visual\":{\"visualType\":\"pivotTable\",\"query\":{\"queryState\":{"
+          "\"Rows\":{\"projections\":[{\"field\":{\"Column\":{\"Expression\":{\"SourceRef\":"
+          "{\"Entity\":\"Product\"}},\"Property\":\"Category\"}},"
+          "\"queryRef\":\"Product.Category\"}]},"
+          "\"Values\":{\"projections\":[{\"field\":{\"Aggregation\":{\"Expression\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Entity\":\"Sales\"}},\"Property\":\"Sales Amount\"}},"
+          "\"Function\":0}},\"queryRef\":\"Sum(Sales.Sales Amount)\"}]}},"
+          "\"sortDefinition\":{\"sort\":[{\"field\":{\"Aggregation\":{\"Expression\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Entity\":\"Sales\"}},\"Property\":\"Sales Amount\"}},"
+          "\"Function\":0}},\"direction\":\"Descending\"}]}},"
+          "\"visualContainerObjects\":{\"title\":[{\"properties\":{\"text\":{\"expr\":{\"Literal\":"
+          "{\"Value\":\"'Sales Amount by Category'\"}}}}}]}}}" }
+    };
+    ReportLayout layout;
+
+    if (read_split_layout(MEMBERS, sizeof(MEMBERS) / sizeof(MEMBERS[0]), &layout) != 0) {
+        return;
+    }
+
+    check(layout.page_count == 1, "the split format yields its one page");
+    if (layout.page_count == 1) {
+        const ReportPage *page = &layout.pages[0];
+
+        check_str(page->display_name, "Page 1", "the page's display name is read");
+        check(page->visual_count == 1, "the page's one visual is read");
+        if (page->visual_count == 1) {
+            const ReportVisual *visual = &page->visuals[0];
+
+            check_str(visual->visual_type, "pivotTable", "the visual's type is read");
+            check_str(visual->title, "Sales Amount by Category",
+                "the title is read from visualContainerObjects");
+            check(visual->field_count == 2, "both inline projections become fields");
+            if (visual->field_count == 2) {
+                check_str(visual->fields[0].role, "Rows", "the first field keeps its role");
+                check_str(visual->fields[0].table, "Product",
+                    "an entity-qualified reference resolves without an alias binding");
+                check_str(visual->fields[0].column_or_measure, "Category",
+                    "the first field's column is resolved");
+                check_str(visual->fields[1].column_or_measure, "Sales Amount",
+                    "an aggregation resolves to the field it aggregates");
+            }
+            /* The FROM is reconstructed: this format states no query-level FROM of its own. */
+            check_str(visual->sql,
+                "SELECT [Product].[Category] AS [Product.Category], "
+                "SUM([Sales].[Sales Amount]) AS [Sum(Sales.Sales Amount)] "
+                "FROM [Product] AS [Product], [Sales] AS [Sales] "
+                "ORDER BY SUM([Sales].[Sales Amount]) DESC;",
+                "the question renders as one SELECT over the entities its fields name");
+        }
+    }
+    report_layout_free(&layout);
+}
+
+/*
+ * A split-format filter reaches the WHERE clause. This is the same failure the older format's test
+ * guards: a filter silently dropped leaves a query BROADER than the question on screen.
+ */
+static void test_folds_split_format_filters_into_the_query(void)
+{
+    static const SplitMember MEMBERS[] = {
+        { "Report/definition/pages/pages.json", "{\"pageOrder\":[\"p1\"]}" },
+        { "Report/definition/pages/p1/page.json",
+          "{\"name\":\"p1\",\"displayName\":\"Page 1\",\"filterConfig\":{\"filters\":[{"
+          "\"name\":\"pageFilter\",\"filter\":{\"From\":[{\"Name\":\"d\",\"Entity\":\"Date\"}],"
+          "\"Where\":[{\"Condition\":{\"Comparison\":{\"ComparisonKind\":2,\"Left\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Source\":\"d\"}},\"Property\":\"Fiscal Year\"}},"
+          "\"Right\":{\"Literal\":{\"Value\":\"2020L\"}}}}}]}}]}}" },
+        { "Report/definition/pages/p1/visuals/v1/visual.json",
+          "{\"name\":\"v1\",\"visual\":{\"visualType\":\"barChart\",\"query\":{\"queryState\":{"
+          "\"Y\":{\"projections\":[{\"field\":{\"Column\":{\"Expression\":{\"SourceRef\":"
+          "{\"Entity\":\"Sales\"}},\"Property\":\"Sales Amount\"}},"
+          "\"queryRef\":\"Sales.Sales Amount\"}]}}},"
+          "\"filterConfig\":{\"filters\":[{\"name\":\"visualFilter\",\"filter\":{"
+          "\"From\":[{\"Name\":\"r\",\"Entity\":\"Reseller\"}],"
+          "\"Where\":[{\"Condition\":{\"In\":{\"Expressions\":[{\"Column\":{\"Expression\":"
+          "{\"SourceRef\":{\"Source\":\"r\"}},\"Property\":\"Business Type\"}}],"
+          "\"Values\":[[{\"Literal\":{\"Value\":\"'Warehouse'\"}}]]}}}]}}]}}}" }
+    };
+    ReportLayout layout;
+
+    if (read_split_layout(MEMBERS, sizeof(MEMBERS) / sizeof(MEMBERS[0]), &layout) != 0) {
+        return;
+    }
+
+    check(layout.page_count == 1 && layout.pages[0].visual_count == 1,
+        "the filtered visual is kept");
+    if (layout.page_count == 1 && layout.pages[0].visual_count == 1) {
+        const char *sql = layout.pages[0].visuals[0].sql;
+
+        /* Both filters apply: the page's narrows every visual on it, the visual's only itself. */
+        check(contains(sql, "WHERE ([d].[Fiscal Year] >= 2020L)"),
+            "the page filter reaches the WHERE clause");
+        check(contains(sql, "AND [r].[Business Type] IN ('Warehouse')"),
+            "the visual's own filter is ANDed onto it");
+    }
+    report_layout_free(&layout);
+}
+
+/*
+ * A visual carrying no query states no business question: a textbox or a shape is decoration, and
+ * is dropped rather than recorded with an empty field list.
+ */
+static void test_a_split_visual_with_no_query_states_no_question(void)
+{
+    static const SplitMember MEMBERS[] = {
+        { "Report/definition/pages/pages.json", "{\"pageOrder\":[\"p1\"]}" },
+        { "Report/definition/pages/p1/page.json", "{\"name\":\"p1\",\"displayName\":\"Page 1\"}" },
+        { "Report/definition/pages/p1/visuals/v1/visual.json",
+          "{\"name\":\"v1\",\"visual\":{\"visualType\":\"textbox\",\"objects\":{}}}" }
+    };
+    ReportLayout layout;
+
+    if (read_split_layout(MEMBERS, sizeof(MEMBERS) / sizeof(MEMBERS[0]), &layout) != 0) {
+        return;
+    }
+
+    check(layout.page_count == 1, "the page is still read");
+    if (layout.page_count == 1) {
+        check(layout.pages[0].visual_count == 0, "a visual with no query is not recorded");
+    }
+    report_layout_free(&layout);
+}
+
+/* A file with neither report part is the one case that is a real failure. */
+static void test_a_file_with_no_report_part_at_all_fails(void)
+{
+    static const SplitMember MEMBERS[] = {
+        { "Version", "{}" }
+    };
+    const char *path = "build/test-fixture-split.pbix";
+    ReportLayout layout;
+    char error[512];
+
+    if (write_pbix_split(path, MEMBERS, sizeof(MEMBERS) / sizeof(MEMBERS[0])) != 0) {
+        fprintf(stderr, "FAIL: could not write the split test fixture\n");
+        failures++;
+        return;
+    }
+
+    error[0] = '\0';
+    check(report_layout_read(path, &layout, error, sizeof(error)) != 0,
+        "a file holding neither report part is reported as a failure");
+    /* The older format's absence must not be explained as a missing DataModel, which would send a
+     * reader after the wrong problem entirely. */
+    check(!contains(error, "DataModel"),
+        "the failure names the missing report part rather than the model");
+    report_layout_free(&layout);
+}
+
 int main(void)
 {
     test_extracts_pages_visuals_and_field_roles();
@@ -523,8 +750,13 @@ int main(void)
     test_refuses_a_visual_whose_filter_it_cannot_translate();
     test_reports_a_projection_the_query_does_not_select();
     test_a_report_with_no_sections_is_not_an_error();
+    test_reads_the_split_report_format();
+    test_folds_split_format_filters_into_the_query();
+    test_a_split_visual_with_no_query_states_no_question();
+    test_a_file_with_no_report_part_at_all_fails();
 
     remove("build/test-fixture.pbix");
+    remove("build/test-fixture-split.pbix");
 
     /* The M-source resolver's own checks, folded into this suite's totals so one run covers both. */
     {

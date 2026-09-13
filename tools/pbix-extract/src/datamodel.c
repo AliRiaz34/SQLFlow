@@ -421,10 +421,17 @@ int pbix_read_member(
     }
 
     if (zip_stat(archive, member_name, 0, &stat) != 0) {
-        set_errorf(error, error_size,
-            "'%s' contains no '%s' part. A report with a live connection to a published dataset "
-            "keeps its model on the server rather than in the file, and so has no 'DataModel'.",
-            pbix_path, member_name);
+        /* The explanation is specific to the part asked for: only a missing DataModel means a live
+         * connection to a published dataset. Attaching that reason to any other absent part (the
+         * report layout, say) sends a reader looking for the wrong problem. */
+        if (strcmp(member_name, "DataModel") == 0) {
+            set_errorf(error, error_size,
+                "'%s' contains no 'DataModel' part. A report with a live connection to a published "
+                "dataset keeps its model on the server rather than in the file.",
+                pbix_path);
+        } else {
+            set_errorf(error, error_size, "'%s' contains no '%s' part.", pbix_path, member_name);
+        }
         zip_close(archive);
         return -1;
     }
@@ -480,6 +487,88 @@ int pbix_read_member(
         return -1;
     }
 
+    return 0;
+}
+
+void pbix_member_names_free(char **names, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        free(names[i]);
+    }
+    free(names);
+}
+
+int pbix_list_members(
+    const char *pbix_path, const char *prefix, const char *suffix,
+    char ***names, size_t *count, char *error, size_t error_size)
+{
+    int zip_error = 0;
+    zip_t *archive;
+    zip_int64_t entry_count;
+    zip_int64_t index;
+    size_t prefix_length = prefix != NULL ? strlen(prefix) : 0;
+    size_t suffix_length = suffix != NULL ? strlen(suffix) : 0;
+
+    *names = NULL;
+    *count = 0;
+
+    archive = zip_open(pbix_path, ZIP_RDONLY, &zip_error);
+    if (archive == NULL) {
+        zip_error_t details;
+
+        zip_error_init_with_code(&details, zip_error);
+        set_errorf(error, error_size,
+            "'%s' could not be opened as a .pbix (zip) file: %s",
+            pbix_path, zip_error_strerror(&details));
+        zip_error_fini(&details);
+        return -1;
+    }
+
+    entry_count = zip_get_num_entries(archive, 0);
+    for (index = 0; index < entry_count; index++) {
+        const char *name = zip_get_name(archive, (zip_uint64_t)index, 0);
+        size_t name_length;
+        char **grown;
+
+        if (name == NULL) {
+            continue;
+        }
+        name_length = strlen(name);
+
+        if (prefix_length > 0 && strncmp(name, prefix, prefix_length) != 0) {
+            continue;
+        }
+        if (suffix_length > 0
+            && (name_length < suffix_length
+                || strcmp(name + name_length - suffix_length, suffix) != 0)) {
+            continue;
+        }
+
+        grown = (char **)realloc(*names, (*count + 1) * sizeof(*grown));
+        if (grown == NULL) {
+            set_error(error, error_size, "out of memory listing the archive's members");
+            pbix_member_names_free(*names, *count);
+            *names = NULL;
+            *count = 0;
+            zip_close(archive);
+            return -1;
+        }
+        *names = grown;
+        (*names)[*count] = strdup(name);
+        if ((*names)[*count] == NULL) {
+            set_error(error, error_size, "out of memory listing the archive's members");
+            pbix_member_names_free(*names, *count);
+            *names = NULL;
+            *count = 0;
+            zip_close(archive);
+            return -1;
+        }
+        (*count)++;
+    }
+
+    zip_close(archive);
     return 0;
 }
 

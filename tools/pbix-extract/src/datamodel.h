@@ -67,6 +67,22 @@ int pbix_read_member(
     char *error, size_t error_size);
 
 /*
+ * Lists the archive's member names matching an optional `prefix` and `suffix` (either may be NULL
+ * or empty to match everything), in the archive's own order.
+ *
+ * Needed because a report saved in the newer split format spreads its visuals across one member per
+ * visual, at paths whose middle segment is a generated id: they can only be found by enumerating
+ * the archive, not by asking for a name known in advance. Returns 0 on success, including when
+ * nothing matches; the caller frees with `pbix_member_names_free`.
+ */
+int pbix_list_members(
+    const char *pbix_path, const char *prefix, const char *suffix,
+    char ***names, size_t *count, char *error, size_t error_size);
+
+/* Releases a name list from `pbix_list_members`. Safe on NULL. */
+void pbix_member_names_free(char **names, size_t count);
+
+/*
  * Converts UTF-16LE to UTF-8, returning a NUL-terminated malloc'd string the caller frees, or
  * NULL on malformed input or allocation failure. Surrogate pairs are decoded; a leading byte
  * order mark and trailing NUL padding are dropped.
