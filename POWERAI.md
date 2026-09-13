@@ -174,17 +174,16 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
 
 1. ~~Confirm the PowerBI file format available (PBIP/TMDL vs `.pbix`).~~ **Done**: `.pbix` (Section 4).
 2. ~~Extract queries and relationships first.~~ **Done**, and gone further than originally scoped:
-   built both a standalone C tool (`tools/pbix-extract`, no .NET/Python dependency, for offline/
-   scriptable extraction to a reviewable YAML spec) and a C# extraction path
-   (`SqlFlow.PowerBi` + `FlowSetCollector`) wired directly into `sqlflow db sync` and
-   `sqlflow lineage`. This closes consumption lineage for every report and feeds the join graph,
-   plus (beyond original scope) extracts the full semantic model: measures, calculated columns,
-   relationships, table sources. See Section 10 for the duplication this created between the two
-   tools and the open question of what to do about it.
+   built a standalone C tool (`tools/pbix-extract`, no .NET/Python dependency) that reads both the
+   semantic model and the visual layer, renders each visual's question as SQL, and is invoked by
+   `FlowSetCollector` (used by `sqlflow db sync` and `sqlflow lineage`). This closes consumption
+   lineage for every report and feeds the join graph, plus (beyond original scope) extracts the full
+   semantic model: measures, calculated columns, relationships, table sources. See Section 10 for
+   the tool duplication this once created between two readers, since resolved.
 3. **Add the "business question" field.** Not started. Extend the subscriber query shape to capture
    the question a query/visual answers, not just its short name. Requires a migration.
-4. ~~Extract measures.~~ **Done** (Section 5), via `tools/pbix-extract`; not yet via the C# path or
-   dedicated catalog tables (Section 8).
+4. ~~Extract measures.~~ **Done** (Section 5), via `tools/pbix-extract`; not yet in dedicated catalog
+   tables (Section 8).
 5. ~~Extract declared model relationships and cardinality.~~ **Done** (Section 5), tagged `active`;
    kept out of `CatalogObjectRelationship` per Section 7, not (yet) in dedicated catalog tables.
 6. **Build the confirmed-example store and the retrieval step.** Not started.
@@ -199,29 +198,31 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
 
 ### Built and verified
 
-- **A full `.pbix` reader, twice over** (see "Open: tool duplication" below for why this is not
-  simply good news):
-  - `tools/pbix-extract`: a standalone C binary with no .NET/Python dependency. Decompresses the
-    `DataModel` (vendored MIT-licensed XPress9 decoder, decode-only), parses the ABF container and
-    its embedded `metadata.sqlitedb` (via `sqlite3_deserialize`, no temp files), and reads
-    `Report/Layout` for the visual layer. Emits one YAML spec file per report: model (tables,
-    columns, measures, calculated columns, relationships, table sources/M) plus report (pages,
-    visuals, field roles). Runtime schema probing handles PowerBI SQLite schema drift across
-    versions with a stated error naming the missing table/column, rather than a silent empty result.
-    Verified clean under AddressSanitizer/UndefinedBehaviorSanitizer, including catching and fixing a
-    genuine upstream bug in Microsoft's reference decoder (`memcpy` over an overlapping range).
-    Redacts the report author's local file paths (a `File.Contents("C:\Users\...")`-shaped literal)
-    out of extracted M expressions before they reach disk.
-  - `SqlFlow.PowerBi` + `SqlFlow.Lineage`'s `FlowSetCollector`: the C# path, reading only
-    `Report/Layout` (the visual layer; it does not touch `DataModel`). A subscriber's declared
-    `pbix:` (one file, or a directory of them, extracted under one subscriber) is read, each
-    visual's `prototypeQuery` and filters translated to one SQL `SELECT ... WHERE ...` by
-    `VisualQueryTranslator`, and fed through the *existing* `TSqlLineageExtractor`/
-    `ScriptFactBuilder` path, so a visual's question becomes a real consumption edge with no second
-    lineage mechanism. Decoration visuals (textboxes, shapes with no field projections) are dropped.
-    An untranslatable filter refuses the whole visual with a warning rather than recording it
-    silently narrowed. Wired into `sqlflow db sync` (writes the three catalog tables below) and
-    `sqlflow lineage` (works with no catalog database at all).
+- **One `.pbix` reader**: `tools/pbix-extract`, a standalone C binary with no .NET/Python dependency.
+  Decompresses the `DataModel` (vendored MIT-licensed XPress9 decoder, decode-only), parses the ABF
+  container and its embedded `metadata.sqlitedb` (via `sqlite3_deserialize`, no temp files), and
+  reads `Report/Layout` for the visual layer, keeping each visual's query and filters as an
+  expression tree rather than flattening them. Renders each visual's question as one T-SQL
+  `SELECT ... WHERE ...` (`sqlrender.c`, ported from the former `VisualQueryTranslator` so the output
+  matches character for character), folding page-level filters into every visual on that page.
+  Emits one YAML spec per report: model (tables, columns, measures, calculated columns,
+  relationships, table sources/M) plus report (pages, visuals, field roles, each visual's rendered
+  SQL, and `reportWarnings:` naming anything dropped). Runtime schema probing handles PowerBI SQLite
+  schema drift across versions with a stated error naming the missing table/column, rather than a
+  silent empty result. Verified clean under AddressSanitizer/UndefinedBehaviorSanitizer, including
+  catching and fixing a genuine upstream bug in Microsoft's reference decoder (`memcpy` over an
+  overlapping range). Redacts the report author's local file paths (a
+  `File.Contents("C:\Users\...")`-shaped literal) out of extracted M expressions before they reach
+  disk. A report connected live to a published dataset (no `DataModel` part) still yields its full
+  visual layer; the model and report halves degrade independently.
+- **`SqlFlow.Lineage`'s `FlowSetCollector` invokes the tool** rather than parsing `.pbix` itself: it
+  locates the binary (`SQLFLOW_PBIX_EXTRACT`, then beside the entry assembly, then `PATH`), runs it
+  per declared report, and reads back its YAML, feeding each visual's pre-rendered SQL through the
+  *existing* `TSqlLineageExtractor`/`ScriptFactBuilder` path, so a visual's question becomes a real
+  consumption edge with no second lineage mechanism. An absent binary is a warning naming
+  `SQLFLOW_PBIX_EXTRACT`, not a failure, exactly like an unreadable report; the rest of the estate's
+  lineage still resolves. Wired into `sqlflow db sync` (writes the three catalog tables below) and
+  `sqlflow lineage` (works with no catalog database at all).
 - **Catalog storage**: `CatalogSubscriberReportPage` / `Visual` / `Field`, migrated, keyed by derived
   string (not surrogate FK, since a whole sync commits in one `SaveChanges`). A subscriber's report
   file is part of the page key, so two reports in one directory sharing a page name (the common case:
@@ -229,11 +230,14 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
 - **Directory-of-reports subscribers**: `pbix:` names either a file or a folder; every `.pbix` under
   a folder becomes part of the same subscriber, so a team's workspace of several reports needs one
   hand-written subscriber entry, not one per file.
-- Verified end to end against a real report (AdventureWorks Sales, both extraction paths cross-
-  checked and produced identical page/visual/field structure): 8 tables / 57 columns, 1 measure, 1
-  calculated column, 9 relationships, 8 table sources, 3 pages, 6 visuals.
-- Solution builds with 0 errors and no new warnings; 21 tests over the C# extraction/collector path,
-  9 over the C reader; the whole suite (4472 tests) passes.
+- Verified end to end against a real report (AdventureWorks Sales): 8 tables / 57 columns, 1
+  measure, 1 calculated column, 9 relationships, 8 table sources, 3 pages, 6 visuals, every visual
+  carrying its rendered SQL.
+- Solution builds with 0 errors and no new warnings. 28 checks in the C tool's own suite (`make test`
+  / `make test-asan`, both clean), plus the collector-level suite in
+  `LineagePowerBiSubscriberTests` (13 facts, running against the real tool in CI via a
+  `pbix-extract` job, skipping loudly elsewhere when the binary is absent); the whole .NET suite
+  passes.
 
 ### Extraction noise audit
 
@@ -280,24 +284,48 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
   An LLM given the YAML file directly can already read it, but there is no catalog-backed, MCP-queryable
   path to a measure's DAX or a relationship's cardinality the way there is for a table's columns.
 
-### Open: tool duplication
+### Resolved: tool duplication
 
-`SqlFlow.PowerBi` and `tools/pbix-extract` both read `Report/Layout` and both derive a visual's
-pages/visuals/field roles; the logic exists twice, in two languages. This was not a planned split:
-the C tool was built after the C# path already existed, once the requirement changed to "a binary
-tool written in C, it should do everything, no Python/.NET dependency", and the C# path was never
-removed once the C tool could do the same job (and more: it also reads `DataModel`, which the C#
-path cannot). Left as is, a future fix to one reader (a new visual type, a schema-drift case) has to
-be remembered and re-applied to the other, or the two silently diverge. Not yet decided: drop the C#
-visual extraction and have `sqlflow db sync` consume the C tool's YAML output instead, or keep both
-deliberately for some reason not yet stated.
+`SqlFlow.PowerBi` and `tools/pbix-extract` both read `Report/Layout` and both derived a visual's
+pages/visuals/field roles, so the logic existed twice, in two languages, and a fix to either had to
+be remembered twice or the two silently diverged. **Settled by deleting the C# reader.**
+`tools/pbix-extract` is now the single reader of a `.pbix`: it gained the query expression tree and
+a SQL renderer (`sqlrender.c`, ported from `VisualQueryTranslator` so the output matches character
+for character), and `FlowSetCollector` runs it and consumes its YAML.
+
+The binary is located via `SQLFLOW_PBIX_EXTRACT`, then next to the entry assembly, then `PATH`. It
+is deliberately **not** declared in the estate's YAML, since the binary is a property of the machine
+running the sync rather than of the repository.
+
+This also fixed a refusal found while wiring it up: a report connected live to a published dataset
+keeps its model on the server and so carries no `DataModel` part, which the tool had treated as
+fatal even though such a file still has a complete visual layer. The model and report halves now
+degrade independently, and only a file yielding neither is an error.
+
+### The security posture: extraction does not run in the control plane
+
+Extraction runs where the report files live (a developer machine, a build agent), never inside the
+control-plane container, and this is a deliberate choice rather than an unfinished packaging step.
+
+A `.pbix` is untrusted, attacker-influenceable input: reaching its contents means running a vendored
+XPress9 decoder and a SQLite reader over bytes SQLFlow did not write. The risk is not theoretical,
+since sanitizer runs already caught a real overlapping-`memcpy` bug in Microsoft's reference
+decoder. Confining that parser to a laptop or an ephemeral build agent keeps a malicious report away
+from the process holding catalog credentials and warehouse reach, and keeps libzip, expat and
+sqlite3 out of the production runtime image.
+
+The consequence is stated rather than hidden: `sqlflow db sync` running inside the container will
+warn that a `pbix:` subscriber was not extracted, naming `SQLFLOW_PBIX_EXTRACT`, and the rest of the
+estate's lineage still resolves. If in-container extraction is ever needed, the right shape is a
+separate sandboxed job (its own minimal image, no catalog credentials) on top of this same code
+path, not linking the decoder into the server.
 
 ### What remains for a finished product
 
 In roughly the order it would need to land, since each depends on groundwork the previous step laid:
 
-1. **Resolve the tool duplication** (above). Whichever direction is chosen, this should happen before
-   more logic is added to either reader, so new work does not get built twice again.
+1. ~~Resolve the tool duplication.~~ **Done** (above): `tools/pbix-extract` is the single reader,
+   `SqlFlow.PowerBi` is deleted, and `FlowSetCollector` consumes the tool's YAML.
 2. **An MCP surface over pages/visuals/fields**, and ideally over the model spec (measures,
    relationships, calculated columns) too, so an LLM can retrieve "what questions does this report
    already ask, and with what field roles" the same way it retrieves a table's columns today. This is
@@ -316,6 +344,10 @@ In roughly the order it would need to land, since each depends on groundwork the
 7. **Broader version coverage**: extraction is proven against one report from one PowerBI version.
    Widening this is a matter of running the tool against more real files as they turn up and fixing
    what the schema probes catch, not a design change.
+8. **In-container extraction, if ever needed.** Extraction currently runs only where the tool is
+   reachable (a developer machine, CI); the control plane warns and skips. Should that prove
+   insufficient, the right shape is a separate sandboxed job (its own minimal image, no catalog
+   credentials) invoking the same binary, not linking the decoder into the control plane.
 
 Each item is scoped so it can be picked up, implemented, and landed independently; nothing here
 should be treated as a single large batch of work.
