@@ -218,6 +218,31 @@ if (options.PowerAI.QuestionGeneration.Enabled)
     builder.Services.AddSingleton<SqlFlow.Assistant.QuestionGenerator>();
 }
 
+// ---- PowerAI retrieval: the embedding provider behind similarity search over stored questions. Independent of
+// both the chat assistant and question generation, and declaring its own credential rather than reusing the
+// assistant's, since Anthropic serves no embeddings endpoint. Registered only when its own switch is on, so a
+// deployment without it never holds an embeddings credential or attempts a call.
+if (options.PowerAI.Retrieval.Enabled)
+{
+    builder.Services.AddSingleton(sp =>
+    {
+        var resolver = sp.GetRequiredService<SqlFlow.Core.Secrets.ISecretResolver>();
+        var embedding = sp.GetRequiredService<IOptions<ControlPlaneOptions>>().Value.PowerAI.Retrieval.Embedding;
+        return new SqlFlow.Assistant.EmbeddingOptions
+        {
+            Provider = embedding.Provider,
+            Model = embedding.Model,
+            Dimensions = embedding.Dimensions,
+            ApiKey = resolver.Resolve(embedding.ApiKey),
+            BaseUrl = embedding.BaseUrl,
+            Endpoint = embedding.Endpoint,
+            BatchSize = embedding.BatchSize,
+            TimeoutSeconds = embedding.TimeoutSeconds,
+        };
+    });
+    builder.Services.AddSingleton<SqlFlow.Assistant.IEmbeddingProvider, SqlFlow.Assistant.EmbeddingGateway>();
+}
+
 // ---- Catalog read model: pooled, read-only, transient-retry --------------------------------------------------
 // The provider setup (migrations history table, transient-error resiliency) comes from CatalogDatabase.Configure,
 // the single definition shared with the CLI, the worker and bootstrap, so no host runs with weaker resiliency than

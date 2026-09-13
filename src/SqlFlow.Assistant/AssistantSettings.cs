@@ -297,6 +297,94 @@ public sealed class OpenAIOptions
     public string TranscriptionModel { get; set; } = "";
 }
 
+/// <summary>
+/// How questions are turned into vectors for similarity retrieval (POWERAI.md Section 6). Deliberately its
+/// own options object rather than a field on one provider's settings: embedding is chosen independently of
+/// <see cref="AssistantSettings.Provider"/>, because Anthropic serves no embeddings endpoint, so a deployment
+/// running the Anthropic chat provider still embeds through OpenAI or Azure.
+/// </summary>
+public sealed class EmbeddingOptions
+{
+    /// <summary>Which service produces the vectors.</summary>
+    public EmbeddingProviderKind Provider { get; set; } = EmbeddingProviderKind.OpenAI;
+
+    /// <summary>The embedding model (OpenAI) or the deployment name (Azure). Persisted with every vector so a
+    /// model change is detectable and the affected rows can be re-embedded.</summary>
+    public string Model { get; set; } = "text-embedding-3-small";
+
+    /// <summary>The vector width. Must match what the model returns; text-embedding-3-* accept a shortened
+    /// output, so this is sent explicitly rather than inferred.</summary>
+    public int Dimensions { get; set; } = 1536;
+
+    /// <summary>The OpenAI platform API key (sk-...). Used only in <see cref="EmbeddingProviderKind.OpenAI"/>
+    /// mode; Azure authenticates with the Azure credential and needs no key.</summary>
+    public string ApiKey { get; set; } = "";
+
+    /// <summary>The OpenAI API base; override only for an OpenAI-compatible proxy.</summary>
+    public string BaseUrl { get; set; } = "https://api.openai.com";
+
+    /// <summary>The Azure OpenAI account endpoint (https://&lt;account&gt;.openai.azure.com), used only in
+    /// <see cref="EmbeddingProviderKind.AzureFoundry"/> mode.</summary>
+    public string Endpoint { get; set; } = "";
+
+    /// <summary>How many texts go in one request. The APIs cap inputs per call, and a sync can present many
+    /// more questions than one call accepts, so a batch is chunked to this size.</summary>
+    public int BatchSize { get; set; } = 100;
+
+    /// <summary>Per-request ceiling. An embeddings call is a single short round-trip, not a streamed agent
+    /// run, so a real timeout applies here unlike the chat gateways.</summary>
+    public int TimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Appends one entry per missing or invalid value to <paramref name="missing"/>, each prefixed
+    /// with <paramref name="sectionPrefix"/> so a startup failure names the exact configuration key.</summary>
+    public void CollectMissing(string sectionPrefix, ICollection<string> missing)
+    {
+        ArgumentNullException.ThrowIfNull(sectionPrefix);
+        ArgumentNullException.ThrowIfNull(missing);
+
+        if (string.IsNullOrWhiteSpace(Model))
+        {
+            missing.Add($"{sectionPrefix}:Model (e.g. text-embedding-3-small)");
+        }
+        if (Dimensions < 1)
+        {
+            missing.Add($"{sectionPrefix}:Dimensions must be at least 1 (was {Dimensions})");
+        }
+        if (BatchSize < 1)
+        {
+            missing.Add($"{sectionPrefix}:BatchSize must be at least 1 (was {BatchSize})");
+        }
+        if (TimeoutSeconds < 5)
+        {
+            missing.Add($"{sectionPrefix}:TimeoutSeconds must be at least 5 (was {TimeoutSeconds})");
+        }
+
+        switch (Provider)
+        {
+            case EmbeddingProviderKind.OpenAI:
+                if (string.IsNullOrWhiteSpace(ApiKey))
+                {
+                    missing.Add($"{sectionPrefix}:ApiKey (sk-..., an OpenAI platform API key)");
+                }
+                if (string.IsNullOrWhiteSpace(BaseUrl))
+                {
+                    missing.Add($"{sectionPrefix}:BaseUrl");
+                }
+                break;
+            case EmbeddingProviderKind.AzureFoundry:
+                if (string.IsNullOrWhiteSpace(Endpoint))
+                {
+                    missing.Add($"{sectionPrefix}:Endpoint (https://<account>.openai.azure.com)");
+                }
+                break;
+            default:
+                missing.Add(
+                    $"{sectionPrefix}:Provider '{Provider}' is not a supported embedding provider (OpenAI, AzureFoundry)");
+                break;
+        }
+    }
+}
+
 /// <summary>Settings for <see cref="AssistantProvider.Anthropic"/> mode: the Claude Messages API
 /// with the MCP connector calling the same SQLFlow MCP server.</summary>
 public sealed class AnthropicOptions

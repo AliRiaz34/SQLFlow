@@ -131,6 +131,7 @@ public sealed class ControlPlaneOptions
         Assistant.Validate();
         DataOps.Validate();
         PowerAI.QuestionGeneration.Validate(Assistant.Anthropic);
+        PowerAI.Retrieval.Validate();
     }
 }
 
@@ -976,6 +977,68 @@ public sealed class DataOpsOptions
 public sealed class PowerAiOptions
 {
     public QuestionGenerationOptions QuestionGeneration { get; set; } = new();
+
+    public RetrievalOptions Retrieval { get; set; } = new();
+}
+
+/// <summary>
+/// Similarity retrieval over stored questions (POWERAI.md Section 6): embedding a question at sync time and
+/// ranking stored examples against a new one at query time. Independently toggleable from both the chat
+/// assistant and question generation, because the three draw on different vendors and a deployment may want
+/// any one without the others.
+///
+/// Environment: <c>ControlPlane__PowerAI__Retrieval__Enabled=true</c>. Unlike question generation, this
+/// declares its own credential rather than reusing the assistant's: Anthropic serves no embeddings endpoint,
+/// so there is nothing on <c>ControlPlane:Assistant</c> to reuse.
+/// </summary>
+public sealed class RetrievalOptions
+{
+    /// <summary>Turns question embedding and similarity search on. Off, no embedding is computed at sync time
+    /// and the search surface reports itself unconfigured rather than falling back to a weaker mechanism.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Where the vectors come from.</summary>
+    public SqlFlow.Assistant.EmbeddingOptions Embedding { get; set; } = new();
+
+    /// <summary>How many ranked examples a search returns by default. POWERAI.md's framing throughout is that
+    /// 1-3 examples is the useful amount of grounding context, matching the 1-3 questions per visual.</summary>
+    public int DefaultTopK { get; set; } = 3;
+
+    /// <summary>
+    /// The cosine similarity below which a match is not treated as a proven precedent, so an answer built on
+    /// it is reported as an unverified guess. This never decides WHETHER a human confirms (the DataOps gate
+    /// always applies); it decides how much a caller is told to trust a result already flagged for review.
+    /// </summary>
+    public double SimilarityThreshold { get; set; } = 0.75;
+
+    public void Validate()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var missing = new List<string>();
+        Embedding.CollectMissing("ControlPlane:PowerAI:Retrieval:Embedding", missing);
+
+        if (DefaultTopK < 1)
+        {
+            missing.Add($"ControlPlane:PowerAI:Retrieval:DefaultTopK must be at least 1 (was {DefaultTopK})");
+        }
+        if (SimilarityThreshold is < 0 or > 1)
+        {
+            missing.Add(
+                "ControlPlane:PowerAI:Retrieval:SimilarityThreshold must be between 0 and 1 "
+                + $"(was {SimilarityThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture)})");
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "ControlPlane:PowerAI:Retrieval:Enabled is true but its configuration is incomplete: "
+                + string.Join(", ", missing));
+        }
+    }
 }
 
 /// <summary>

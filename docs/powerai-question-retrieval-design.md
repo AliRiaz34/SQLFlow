@@ -1,6 +1,8 @@
 # PowerAI Question Retrieval: Design
 
-Status: design only, not implemented. This is POWERAI.md Section 6 ("the learning loop") and Section
+Status: step 1 of Section 8 has landed (the `IEmbeddingProvider` abstraction, its OpenAI/Azure
+implementation, and the config gate); steps 2 onward are not implemented. This is POWERAI.md Section 6
+("the learning loop") and Section
 9 step 6 ("build the confirmed-example store and the retrieval step"), scoped out in detail now that
 step 3 (the business-question field, `CatalogSubscriberReportVisualQuestion`) has landed and gives
 this something real to retrieve against. See
@@ -171,10 +173,19 @@ public class CatalogQuestionExample
 
 ## 8. Sequencing (each step landable and testable independently, no time estimates)
 
-1. `IEmbeddingProvider` abstraction + one implementation (OpenAI first, since it is the simpler API
-   surface), config-gated the same way question generation is
-   (`ControlPlane:PowerAI:Retrieval:Enabled`, independent of both `Assistant.Enabled` and
-   `PowerAI:QuestionGeneration:Enabled`).
+1. ~~`IEmbeddingProvider` abstraction + one implementation~~ **Done**. `IEmbeddingProvider`
+   (`src/SqlFlow.Assistant/IEmbeddingProvider.cs`) with `EmbeddingGateway`
+   (`src/SqlFlow.Assistant/EmbeddingGateway.cs`) serving BOTH backends rather than OpenAI only: the two
+   speak the same wire format, so like `ResponsesApiGateway` they differ in endpoint and credential
+   alone and a second implementation would have been duplicated code. `EmbeddingMath` (cosine similarity
+   plus the `varbinary` byte round-trip) sits beside the interface, since sync-time writing and
+   query-time ranking need the identical encoding. Config-gated by
+   `ControlPlane:PowerAI:Retrieval:Enabled` (`RetrievalOptions`), independent of both `Assistant.Enabled`
+   and `PowerAI:QuestionGeneration:Enabled`, and unlike question generation it declares its own
+   credential rather than reusing `Assistant:Anthropic`, because Anthropic serves no embeddings endpoint.
+   Batching is the unit of `EmbedAsync` (a sync embeds many questions at once and both backends charge
+   and rate-limit per request), responses are re-sorted by each entry's `index` rather than array
+   position, and throttle retries reuse the chat gateway's Retry-After policy.
 2. Migration: `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc` on `CatalogSubscriberReportVisualQuestion`.
 3. Extend `SubscriberQuestionEnrichment` to embed newly-generated/carried-forward questions lacking a
    current embedding.
@@ -190,9 +201,10 @@ public class CatalogQuestionExample
 
 - **Estate-wide vs repo-scoped search.** Recommended default is estate-wide (Section 5), but this needs
   confirming against how multi-repo deployments actually want scoping to behave.
-- **Which embedding provider is the default when neither OpenAI nor Foundry is otherwise configured.**
-  Likely: retrieval simply stays disabled and reports "not configured" the same way `Assistant.Enabled`
-  does today, rather than silently falling back to a third provider.
+- ~~**Which embedding provider is the default when neither OpenAI nor Foundry is otherwise configured.**~~
+  **Settled** in step 1: retrieval is off by default, and enabling it without the credential its chosen
+  provider needs is a startup error naming the exact configuration key (`RetrievalOptions.Validate`),
+  the same posture question generation already takes. There is no silent fallback to a third provider.
 - **Re-embedding on a model upgrade.** `EmbeddingModel` gates detection, but nothing yet defines the
   operational trigger (a config change? a CLI command? automatic on next sync?) — needs a decision
   before step 2 above ships.
