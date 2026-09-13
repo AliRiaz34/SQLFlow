@@ -364,6 +364,7 @@ public sealed class CatalogDbContext : DbContext
             entity.HasKey(q => q.Id);
             entity.Property(q => q.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(q => q.Question).HasMaxLength(400).IsRequired();
+            entity.Property(q => q.EmbeddingModel).HasMaxLength(200);
             entity.HasIndex(q => q.VisualKey);
             entity.HasIndex(q => q.RepoId);
         });
