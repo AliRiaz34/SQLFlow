@@ -1485,6 +1485,7 @@ public sealed class CatalogSync
                         Ordinal = visual.Ordinal,
                         VisualType = visual.VisualType,
                         Title = visual.Title,
+                        QueryName = visual.QueryName,
                     });
 
                     foreach (var field in visual.Fields)

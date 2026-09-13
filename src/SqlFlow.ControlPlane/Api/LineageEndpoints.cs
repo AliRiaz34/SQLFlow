@@ -201,6 +201,35 @@ public sealed record SubscriberObjectDto(
     string Key, string? Database, string? Schema, string Name, string Kind, int? Level,
     IReadOnlyList<string> Queries);
 
+/// <summary>One field or measure a report visual projects, and the ROLE it plays in the question: whether it
+/// is the axis a chart is broken down BY (<c>Category</c>/<c>Rows</c>) or the value it plots
+/// (<c>Y</c>/<c>Values</c>), the one fact a flattened column list from SQL-derived lineage cannot express.
+/// <c>TableName</c> is the Power BI MODEL entity the field belongs to (e.g. <c>Sales</c>), not yet resolved to
+/// a physical warehouse object.</summary>
+public sealed record SubscriberReportFieldDto(
+    string Role, string TableName, string ColumnOrMeasure, bool IsMeasure);
+
+/// <summary>One visual on a report page: its chart type, its authored title (when it has one), the fields it
+/// projects with their roles, and the name of the <see cref="SubscriberQueryDto"/> it was rendered as, so a
+/// caller can go from "this visual plots Sales Amount as Y" to the actual SQL without matching text.</summary>
+public sealed record SubscriberReportVisualDto(
+    int Ordinal, string VisualType, string? Title, string QueryName,
+    IReadOnlyList<SubscriberReportFieldDto> Fields);
+
+/// <summary>One page of a report, with the visuals on it. <c>ReportFile</c> names which <c>.pbix</c> the page
+/// came from, which only distinguishes pages when a subscriber's <c>pbix:</c> names a directory of several
+/// reports that can each independently have a "Page 1".</summary>
+public sealed record SubscriberReportPageDto(
+    string ReportFile, int Ordinal, string DisplayName, IReadOnlyList<SubscriberReportVisualDto> Visuals);
+
+/// <summary>The Power BI report structure behind one subscriber: every page, the visuals on it, and each
+/// field's role. This is the consumption-side answer to "what questions does this dashboard already ask, and
+/// in what shape", distinct from <see cref="SubscriberDossierDto"/>'s queries/objects (which answer "what
+/// tables does it read"). Empty <c>Pages</c> means the subscriber has no extracted report, not that one failed
+/// to load.</summary>
+public sealed record SubscriberReportDto(
+    string SubscriberKey, string SubscriberName, IReadOnlyList<SubscriberReportPageDto> Pages);
+
 /// <summary>One repo whose lineage references an object: how many edges in that repo touch it, and whether any of
 /// them writes/creates it (the repo where a flow populates it). The list is ranked so the writing repo comes
 /// first, which is the repo the lineage graph opens on when a search result jumps to "how is this populated".</summary>
@@ -335,6 +364,7 @@ public static class LineageEndpoints
         lineage.MapGet("/script", GetNodeScriptAsync).WithName("GetLineageNodeScript");
         lineage.MapGet("/subscribers", ListSubscribersAsync).WithName("ListLineageSubscribers");
         lineage.MapGet("/subscribers/dossier", GetSubscriberDossierAsync).WithName("GetLineageSubscriberDossier");
+        lineage.MapGet("/subscribers/report", GetSubscriberReportAsync).WithName("GetLineageSubscriberReport");
         lineage.MapGet("/projects", ListProjectsAsync).WithName("ListLineageProjects");
         lineage.MapGet("/project-graph", GetProjectGraphAsync).WithName("GetLineageProjectGraph");
 
@@ -1454,6 +1484,59 @@ public static class LineageEndpoints
         => string.IsNullOrEmpty(joined)
             ? []
             : joined.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// The report structure behind one subscriber: every page, the visuals on it, and each field's role. Built
+    /// from the three tables a sync writes keyed by derived string (<c>PageKey</c>/<c>VisualKey</c>), loaded
+    /// parent-to-child and grouped in memory rather than joined in SQL, since a report's total row count is
+    /// small enough per subscriber that the extra round trips cost nothing and the code stays as readable as
+    /// <see cref="GetSubscriberDossierAsync"/>'s own grouping.
+    /// </summary>
+    private static async Task<Results<Ok<SubscriberReportDto>, ProblemHttpResult>> GetSubscriberReportAsync(
+        string key, CatalogDbContext db, CancellationToken ct)
+    {
+        var subscriber = await db.Subscribers.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.ObjectKey == key, ct).ConfigureAwait(false);
+        if (subscriber is null)
+        {
+            return NotFound("subscriber", key);
+        }
+
+        var pageRows = await db.SubscriberReportPages.AsNoTracking()
+            .Where(p => p.SubscriberKey == key)
+            .OrderBy(p => p.ReportFile).ThenBy(p => p.Ordinal)
+            .Take(MaxDossierRows)
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var pageKeys = pageRows.Select(p => p.PageKey).ToList();
+        var visualRows = await db.SubscriberReportVisuals.AsNoTracking()
+            .Where(v => pageKeys.Contains(v.PageKey))
+            .OrderBy(v => v.Ordinal)
+            .Take(MaxDossierRows)
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var visualKeys = visualRows.Select(v => v.VisualKey).ToList();
+        var fieldRows = await db.SubscriberReportFields.AsNoTracking()
+            .Where(f => visualKeys.Contains(f.VisualKey))
+            .Take(MaxDossierRows)
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var fieldsByVisual = fieldRows.ToLookup(f => f.VisualKey);
+        var visualsByPage = visualRows
+            .Select(v => (v.PageKey, Dto: new SubscriberReportVisualDto(
+                v.Ordinal, v.VisualType, v.Title, v.QueryName,
+                fieldsByVisual[v.VisualKey]
+                    .Select(f => new SubscriberReportFieldDto(f.Role, f.TableName, f.ColumnOrMeasure, f.IsMeasure))
+                    .ToList())))
+            .ToLookup(x => x.PageKey, x => x.Dto);
+
+        var pages = pageRows
+            .Select(p => new SubscriberReportPageDto(
+                p.ReportFile, p.Ordinal, p.DisplayName, visualsByPage[p.PageKey].ToList()))
+            .ToList();
+
+        return TypedResults.Ok(new SubscriberReportDto(subscriber.ObjectKey, subscriber.Name, pages));
+    }
 
     /// <summary>The subscribers consuming one object, for its dossier: the read edges attributed to a subscriber
     /// node, joined to the consumer rows and to the individual queries that name the object.</summary>

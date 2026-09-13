@@ -1832,10 +1832,31 @@ and fix every finding first."
             \"what does this dashboard use\" or \"where does this report get its data\". The consumption-side \
             twin of describe_object: that answers 'who consumes this table', this answers 'what does this \
             report consume'. Use it for impact analysis before changing a table, and to see the SQL a report \
-            actually runs. Takes the `key` from list_subscribers."
+            actually runs. For the report's PAGES, VISUALS, and each field's ROLE (the axis a chart is broken \
+            down BY versus the value it plots, which this payload's query texts alone do not label), use \
+            describe_subscriber_report instead. Takes the `key` from list_subscribers."
     )]
     async fn describe_subscriber(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/subscribers/dossier", &[("key", i.key)]).await
+    }
+
+    #[tool(
+        description = "Describe the PAGES, VISUALS, and FIELD ROLES of one Power BI report backing a data \
+            subscriber: every page (with the report file it came from, for a subscriber whose pbix: names a \
+            directory of several reports), every visual on it (chart type, authored title, and the name of \
+            the query it was rendered as), and every field a visual projects with its ROLE \
+            (Category/Y/Rows/Values/Size/...): whether it is the axis a chart is broken down BY or the value \
+            it plots, which a flattened column list from parsed SQL cannot express. Cross-reference a \
+            visual's `queryName` against describe_subscriber's `queries` to get the actual rendered SQL. This \
+            is how you answer \"what questions does this dashboard already ask, and in what shape\", rather \
+            than only \"what tables does it read\". `tableName` on a field is the Power BI MODEL entity name \
+            (e.g. \"Sales\"), not yet resolved to a physical warehouse object, so do not treat it as a \
+            catalog key. An empty `pages` list means the subscriber has no extracted report (a hand-authored \
+            subscriber, or one whose report has not synced yet), not that one failed to load. Takes the `key` \
+            from list_subscribers."
+    )]
+    async fn describe_subscriber_report(&self, Parameters(i): Parameters<KeyInput>) -> String {
+        self.get("/api/v1/lineage/subscribers/report", &[("key", i.key)]).await
     }
 
     // ---- Schedules, nodes, sources, summary (read) -----------------------

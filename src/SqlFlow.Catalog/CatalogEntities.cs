@@ -745,6 +745,12 @@ public class CatalogSubscriberReportVisual
     /// <summary>The visual's title as authored, when it has one. Many visuals (a slicer, a KPI tile) carry no
     /// title and are still worth keeping for their field projections.</summary>
     public string? Title { get; set; }
+
+    /// <summary>The name of the <see cref="CatalogSubscriberQuery"/> this visual was synthesized as, so a
+    /// caller can go from a field's role straight to the rendered SQL that answers it without matching text.
+    /// Matches <c>Core.Lineage.LineageSubscriberVisual.QueryName</c>, the in-memory value this is persisted
+    /// from.</summary>
+    public string QueryName { get; set; } = string.Empty;
 }
 
 /// <summary>
