@@ -37,6 +37,7 @@ OWN_SOURCES := $(SRC_DIR)/main.c \
                $(SRC_DIR)/datamodel.c \
                $(SRC_DIR)/metadata.c \
                $(SRC_DIR)/reportlayout.c \
+               $(SRC_DIR)/sqlrender.c \
                $(SRC_DIR)/redact.c \
                $(SRC_DIR)/yamlout.c \
                $(SRC_DIR)/xpress9_decode.c
@@ -50,7 +51,28 @@ VENDOR_OBJECTS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(VENDOR_SOURCES))
 
 TARGET := $(BUILD_DIR)/pbix-extract
 
-.PHONY: all clean
+# The test binary links the reader and renderer directly, without main.o, so the parsers can be
+# driven over synthetic .pbix fixtures built in-process.
+TEST_DIR := tests
+TEST_SOURCES := $(TEST_DIR)/test_reportlayout.c
+TESTED_SOURCES := $(SRC_DIR)/reportlayout.c \
+                  $(SRC_DIR)/sqlrender.c \
+                  $(SRC_DIR)/buffer.c \
+                  $(SRC_DIR)/datamodel.c \
+                  $(SRC_DIR)/metadata.c \
+                  $(SRC_DIR)/redact.c \
+                  $(SRC_DIR)/xpress9_decode.c
+TEST_TARGET := $(BUILD_DIR)/pbix-extract-tests
+
+# asprintf is a GNU extension these tests use to assemble fixtures; the shipped tool does not.
+TEST_CFLAGS := -O1 -g -std=c11 -D_GNU_SOURCE $(WARNINGS) \
+               -I$(SRC_DIR) -I$(VENDOR_DIR)/include $(DEP_CFLAGS)
+
+# The parsers run over untrusted report input, so the sanitizers cover exactly the code that most
+# needs them. A leak in the expression tree fails the run rather than passing quietly.
+SANITIZERS := -fsanitize=address,undefined -fno-omit-frame-pointer
+
+.PHONY: all clean test test-asan
 
 all: $(TARGET)
 
@@ -65,6 +87,27 @@ $(BUILD_DIR)/$(SRC_DIR)/%.o: $(SRC_DIR)/%.c
 $(BUILD_DIR)/$(VENDOR_DIR)/src/%.o: $(VENDOR_DIR)/src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(VENDOR_CFLAGS) -c $< -o $@
+
+$(TEST_TARGET): $(TEST_SOURCES) $(TESTED_SOURCES) $(VENDOR_OBJECTS)
+	@mkdir -p $(dir $@)
+	$(CC) $(TEST_CFLAGS) $(TEST_SOURCES) $(TESTED_SOURCES) $(VENDOR_OBJECTS) -o $@ $(LDFLAGS)
+
+test: $(TEST_TARGET)
+	cd $(CURDIR) && ./$(TEST_TARGET)
+
+# Same suite under AddressSanitizer and UndefinedBehaviorSanitizer. The vendored decoder is rebuilt
+# with them too, since it is the code handling the least trustworthy bytes in the file.
+ASAN_VENDOR_OBJECTS := $(patsubst %.c,$(BUILD_DIR)/asan/%.o,$(VENDOR_SOURCES))
+
+$(BUILD_DIR)/asan/$(VENDOR_DIR)/src/%.o: $(VENDOR_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(VENDOR_CFLAGS) $(SANITIZERS) -c $< -o $@
+
+test-asan: $(TEST_SOURCES) $(TESTED_SOURCES) $(ASAN_VENDOR_OBJECTS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) $(SANITIZERS) $(TEST_SOURCES) $(TESTED_SOURCES) \
+	    $(ASAN_VENDOR_OBJECTS) -o $(BUILD_DIR)/pbix-extract-tests-asan $(LDFLAGS)
+	cd $(CURDIR) && ./$(BUILD_DIR)/pbix-extract-tests-asan
 
 clean:
 	rm -rf $(BUILD_DIR)

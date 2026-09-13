@@ -21,11 +21,16 @@ So this is a separate executable, built outside `SqlFlow.sln`, run offline again
 on disk. Nothing here links into the SQLFlow control plane, and the only thing that crosses back
 is reviewed YAML text. A malformed or hostile report can at worst crash this tool.
 
-The report's *visual* layer (pages, visuals, which fields sit in which role) is a different
-matter: it is plain UTF-16 JSON in the `Report/Layout` part, carries no native-code risk, and is
-read inside SQLFlow directly by `SqlFlow.PowerBi` at every `sqlflow db sync` via a subscriber's
-`pbix:` key. The two are complementary — that half tracks the questions a report asks, this half
-describes the model those questions are asked against.
+This tool also reads the report's *visual* layer (pages, visuals, which fields sit in which role),
+which is plain UTF-16 JSON in the `Report/Layout` part and carries no native-code risk. Both halves
+live here so there is ONE reader of a `.pbix` rather than two implementations to keep in step: the
+visual layer tracks the questions a report asks, and the model describes what those questions are
+asked against. SQLFlow consumes this tool's YAML output rather than parsing `.pbix` itself.
+
+Keeping extraction out of the control plane is deliberate and is the security posture: a `.pbix` is
+attacker-influenceable input fed to a memory-unsafe decoder, so it is parsed on a developer machine
+or a build agent, never inside the long-running server process that holds catalog credentials and
+reaches the warehouse.
 
 ## Build
 
@@ -38,15 +43,27 @@ make
 
 The binary lands at `build/pbix-extract`. `make clean` removes the build tree.
 
+`make test` builds and runs the test suite, which drives the reader and the SQL renderer over
+synthetic `.pbix` fixtures built in-process. `make test-asan` runs the same suite under
+AddressSanitizer and UndefinedBehaviorSanitizer, including the vendored decoder: these parsers
+handle untrusted input, so a leak or an out-of-bounds read fails the run rather than passing
+quietly.
+
 ## Usage
 
 ```sh
 build/pbix-extract "reports/AdventureWorks Sales.pbix"                 # to standard output
 build/pbix-extract report.pbix --name Sales_Report --out spec.yaml     # to a file
+build/pbix-extract report.pbix --report-file "team/sales.pbix"         # label its pages
 ```
 
 `--name` sets the subscriber key in the emitted YAML (default: the file's base name with spaces
 replaced by underscores). `--out` writes to a file instead of standard output.
+
+`--report-file` labels every extracted page with the report it came from (default: the file's
+name). Pass the path relative to the subscriber's declared directory when several reports are
+extracted under one subscriber, so that two reports built from the same template, each with a
+"Page 1", stay distinguishable.
 
 The output is a fragment, not a complete `subscribers.yaml`. Merging it into the estate means
 adding the things the `.pbix` does not itself declare: `owner:`, `description:`, `url:`, and the
@@ -67,14 +84,31 @@ Power BI's auto-generated date-hierarchy tables (the `LocalDateTable_*` /
 `DateTableTemplate_*` scaffolding, flagged in the model as system objects) are excluded: nobody
 authored them, and they would bury the real model in noise.
 
-Not read: the report's visual layer (see above), row-level security, perspectives, translations,
-KPIs, and the column data itself. A model whose inner files are XPress8-compressed
+Read from the report's visual layer (`Report/Layout`):
+
+- **pages**: display name, internal name, position, and the report file they came from
+- **visuals**: chart type, authored title, position on the page
+- **fields**: the table and column/measure each one names, and its ROLE (`Category`, `Y`, `Rows`,
+  `Values`, `Size`, and so on), which is the one fact SQL alone cannot express: it is the difference
+  between "sales by month" and "months by sales"
+- **sql**: each visual's question rendered as one T-SQL `SELECT`, with every filter that applies to
+  it (its own, and the page's) folded into the `WHERE` clause
+
+A visual that projects no field is decoration (a textbox, a shape, an image), asks no question, and
+is deliberately not recorded. A visual whose query or filter uses an expression this tool cannot
+represent is DROPPED rather than recorded without it, and the reason appears under
+`reportWarnings:`. That refusal is the point: a query missing part of its filter is broader than
+the question actually on the page, and silently widening a question is how a wrong answer gets
+trusted.
+
+Not read: row-level security, perspectives, translations, KPIs, visual styling (colors, positions,
+sizes), and the column data itself. A model whose inner files are XPress8-compressed
 (`ApplyCompression`) is reported as unsupported rather than silently returning nothing.
 
 ## Schema variation
 
 Power BI's embedded metadata schema changes between versions: columns are renamed and added. Every
-query this tool runs is built against the columns the database actually has, probed at runtime —
+query this tool runs is built against the columns the database actually has, probed at runtime:
 for example a relationship's endpoints are `FromColumnID` on current models and
 `FromEndColumnID` on older ones.
 

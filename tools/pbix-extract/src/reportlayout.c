@@ -8,6 +8,21 @@
 
 #include "buffer.h"
 #include "datamodel.h"
+#include "sqlrender.h"
+
+/*
+ * Threaded through expression parsing, since C has no exceptions.
+ *
+ * A NULL return with `refused == 0` means the node was ABSENT, which is a different thing from a
+ * node that could not be represented: a filter entry with no condition constrains nothing and is
+ * simply not recorded, while a filter whose condition uses an unsupported expression must drop the
+ * whole visual. Confusing the two would silently widen a question.
+ */
+typedef struct {
+    int refused;
+    int out_of_memory;
+    char reason[256];
+} ExprStatus;
 
 static void set_error(char *error, size_t error_size, const char *message)
 {
@@ -116,6 +131,810 @@ static char *read_title(json_t *single_visual)
     return NULL;
 }
 
+void query_expr_free(QueryExpr *expression)
+{
+    size_t row;
+    size_t column;
+
+    if (expression == NULL) {
+        return;
+    }
+
+    free(expression->source_alias);
+    free(expression->source_entity);
+    free(expression->property);
+    free(expression->hierarchy);
+    free(expression->level);
+    free(expression->literal);
+
+    query_expr_free(expression->inner);
+    query_expr_free(expression->left);
+    query_expr_free(expression->right);
+
+    for (column = 0; column < expression->in_expression_count; column++) {
+        query_expr_free(expression->in_expressions[column]);
+    }
+    free(expression->in_expressions);
+
+    /* The value tuples are a rectangular array of rows, each as wide as `in_expression_count`.
+     * Freeing it is the easiest leak site in this tree, so it is done in exactly one place and
+     * reached from both the parse error path and here. */
+    for (row = 0; row < expression->in_value_count; row++) {
+        if (expression->in_values[row] == NULL) {
+            continue;
+        }
+        for (column = 0; column < expression->in_expression_count; column++) {
+            query_expr_free(expression->in_values[row][column]);
+        }
+        free(expression->in_values[row]);
+    }
+    free(expression->in_values);
+
+    free(expression);
+}
+
+static void query_source_free(QuerySource *sources, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        free(sources[i].alias);
+        free(sources[i].entity);
+    }
+    free(sources);
+}
+
+void report_filters_free(ReportFilter *filters, size_t count)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        free(filters[i].name);
+        query_source_free(filters[i].from, filters[i].from_count);
+        query_expr_free(filters[i].condition);
+    }
+    free(filters);
+}
+
+static void visual_query_free(VisualQuery *query)
+{
+    size_t i;
+
+    query_source_free(query->from, query->from_count);
+    for (i = 0; i < query->select_count; i++) {
+        free(query->select[i].name);
+        query_expr_free(query->select[i].expression);
+    }
+    free(query->select);
+    for (i = 0; i < query->order_by_count; i++) {
+        query_expr_free(query->order_by[i].expression);
+    }
+    free(query->order_by);
+    memset(query, 0, sizeof(*query));
+}
+
+static void set_refusal(ExprStatus *status, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static void set_refusal(ExprStatus *status, const char *format, ...)
+{
+    va_list args;
+
+    if (status->refused || status->out_of_memory) {
+        return;
+    }
+    status->refused = 1;
+    va_start(args, format);
+    vsnprintf(status->reason, sizeof(status->reason), format, args);
+    va_end(args);
+}
+
+/* Allocates a zeroed node of the given kind, or records out-of-memory and returns NULL. */
+static QueryExpr *expr_new(ExprKind kind, ExprStatus *status)
+{
+    QueryExpr *expression = (QueryExpr *)calloc(1, sizeof(*expression));
+
+    if (expression == NULL) {
+        status->out_of_memory = 1;
+        return NULL;
+    }
+    expression->kind = kind;
+    return expression;
+}
+
+/* Duplicates a string, recording out-of-memory. Returns NULL when the source is NULL. */
+static char *dup_or_null(const char *text, ExprStatus *status)
+{
+    char *copy;
+
+    if (text == NULL) {
+        return NULL;
+    }
+    copy = strdup(text);
+    if (copy == NULL) {
+        status->out_of_memory = 1;
+    }
+    return copy;
+}
+
+/* Reads a SourceRef, which names either an alias from the query's FROM or an entity. */
+static void read_source_ref(json_t *owner, char **alias, char **entity, ExprStatus *status)
+{
+    json_t *expression = json_object_get(owner, "Expression");
+    json_t *source_ref = expression != NULL ? json_object_get(expression, "SourceRef") : NULL;
+
+    *alias = NULL;
+    *entity = NULL;
+    if (!json_is_object(source_ref)) {
+        return;
+    }
+    *alias = dup_or_null(json_text(source_ref, "Source"), status);
+    *entity = dup_or_null(json_text(source_ref, "Entity"), status);
+}
+
+/* Power BI's numeric aggregate codes, as written into a visual's prototypeQuery. */
+static int map_aggregate(json_t *aggregation, AggregateFunction *function, ExprStatus *status)
+{
+    json_t *code = json_object_get(aggregation, "Function");
+
+    if (!json_is_integer(code)) {
+        set_refusal(status, "an aggregation with no function code");
+        return -1;
+    }
+
+    switch (json_integer_value(code)) {
+    case 0: *function = AGGREGATE_SUM; return 0;
+    case 1: *function = AGGREGATE_AVERAGE; return 0;
+    case 2: *function = AGGREGATE_COUNT; return 0;
+    case 3: *function = AGGREGATE_MIN; return 0;
+    case 4: *function = AGGREGATE_MAX; return 0;
+    case 5: *function = AGGREGATE_COUNT_NON_NULL; return 0;
+    default:
+        set_refusal(status, "aggregate function code %lld",
+            (long long)json_integer_value(code));
+        return -1;
+    }
+}
+
+static int map_comparison(json_t *comparison, ComparisonOperator *result, ExprStatus *status)
+{
+    json_t *kind = json_object_get(comparison, "ComparisonKind");
+
+    if (!json_is_integer(kind)) {
+        set_refusal(status, "a comparison with no kind");
+        return -1;
+    }
+
+    switch (json_integer_value(kind)) {
+    case 0: *result = COMPARISON_EQUAL; return 0;
+    case 1: *result = COMPARISON_GREATER_THAN; return 0;
+    case 2: *result = COMPARISON_GREATER_THAN_OR_EQUAL; return 0;
+    case 3: *result = COMPARISON_LESS_THAN; return 0;
+    case 4: *result = COMPARISON_LESS_THAN_OR_EQUAL; return 0;
+    case 5: *result = COMPARISON_NOT_EQUAL; return 0;
+    default:
+        set_refusal(status, "comparison kind %lld", (long long)json_integer_value(kind));
+        return -1;
+    }
+}
+
+static QueryExpr *parse_expression(json_t *node, ExprStatus *status);
+
+/* Parses an And/Or node, whose two operands are themselves expressions. */
+static QueryExpr *parse_logical(json_t *node, int is_or, ExprStatus *status)
+{
+    QueryExpr *expression;
+    json_t *left = json_object_get(node, "Left");
+    json_t *right = json_object_get(node, "Right");
+
+    if (!json_is_object(left) || !json_is_object(right)) {
+        set_refusal(status, "a logical %s missing an operand", is_or ? "OR" : "AND");
+        return NULL;
+    }
+
+    expression = expr_new(EXPR_LOGICAL, status);
+    if (expression == NULL) {
+        return NULL;
+    }
+    expression->is_or = is_or;
+    expression->left = parse_expression(left, status);
+    expression->right = parse_expression(right, status);
+    if (expression->left == NULL || expression->right == NULL) {
+        query_expr_free(expression);
+        return NULL;
+    }
+    return expression;
+}
+
+/* Parses an In node: one or more expressions tested against a set of value tuples. */
+static QueryExpr *parse_in(json_t *node, ExprStatus *status)
+{
+    QueryExpr *expression = expr_new(EXPR_IN, status);
+    json_t *expressions = json_object_get(node, "Expressions");
+    json_t *values = json_object_get(node, "Values");
+    size_t index;
+    json_t *entry;
+
+    if (expression == NULL) {
+        return NULL;
+    }
+
+    if (json_is_array(expressions)) {
+        json_array_foreach(expressions, index, entry) {
+            QueryExpr **grown = (QueryExpr **)realloc(expression->in_expressions,
+                (expression->in_expression_count + 1) * sizeof(*grown));
+            QueryExpr *parsed;
+
+            if (grown == NULL) {
+                status->out_of_memory = 1;
+                query_expr_free(expression);
+                return NULL;
+            }
+            expression->in_expressions = grown;
+            parsed = parse_expression(entry, status);
+            if (parsed == NULL) {
+                query_expr_free(expression);
+                return NULL;
+            }
+            expression->in_expressions[expression->in_expression_count++] = parsed;
+        }
+    }
+
+    if (expression->in_expression_count == 0 || !json_is_array(values)
+        || json_array_size(values) == 0) {
+        set_refusal(status, "a membership test with no expressions or no values");
+        query_expr_free(expression);
+        return NULL;
+    }
+
+    json_array_foreach(values, index, entry) {
+        QueryExpr ***grown;
+        QueryExpr **tuple;
+        size_t column;
+        json_t *value;
+
+        if (!json_is_array(entry) || json_array_size(entry) != expression->in_expression_count) {
+            set_refusal(status,
+                "a membership test whose value tuples do not match its expression count");
+            query_expr_free(expression);
+            return NULL;
+        }
+
+        grown = (QueryExpr ***)realloc(expression->in_values,
+            (expression->in_value_count + 1) * sizeof(*grown));
+        if (grown == NULL) {
+            status->out_of_memory = 1;
+            query_expr_free(expression);
+            return NULL;
+        }
+        expression->in_values = grown;
+
+        /* The row is published to the node zeroed BEFORE its members are parsed, so a failure part
+         * way through the tuple still frees what was built via query_expr_free. */
+        tuple = (QueryExpr **)calloc(expression->in_expression_count, sizeof(*tuple));
+        if (tuple == NULL) {
+            status->out_of_memory = 1;
+            query_expr_free(expression);
+            return NULL;
+        }
+        expression->in_values[expression->in_value_count++] = tuple;
+
+        json_array_foreach(entry, column, value) {
+            tuple[column] = parse_expression(value, status);
+            if (tuple[column] == NULL) {
+                query_expr_free(expression);
+                return NULL;
+            }
+        }
+    }
+
+    return expression;
+}
+
+/*
+ * Reads one expression node. The node's KIND is which property it carries, so the set is matched
+ * explicitly and anything else is refused: silently ignoring an unknown node would corrupt the
+ * meaning of the query or filter it appears in.
+ *
+ * Returns NULL with `status->refused` set when the node cannot be represented, and NULL with
+ * `status->out_of_memory` set on allocation failure. Every failure frees the partial node first.
+ */
+static QueryExpr *parse_expression(json_t *node, ExprStatus *status)
+{
+    QueryExpr *expression;
+    json_t *inner;
+
+    if (status->refused || status->out_of_memory) {
+        return NULL;
+    }
+    if (!json_is_object(node)) {
+        set_refusal(status, "an expression that is not an object");
+        return NULL;
+    }
+
+    inner = json_object_get(node, "Column");
+    if (json_is_object(inner)) {
+        const char *property = json_text(inner, "Property");
+
+        if (property == NULL) {
+            set_refusal(status, "a column reference with no property");
+            return NULL;
+        }
+        expression = expr_new(EXPR_COLUMN, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        read_source_ref(inner, &expression->source_alias, &expression->source_entity, status);
+        expression->property = dup_or_null(property, status);
+        if (status->out_of_memory) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "Measure");
+    if (json_is_object(inner)) {
+        const char *property = json_text(inner, "Property");
+
+        if (property == NULL) {
+            set_refusal(status, "a measure reference with no property");
+            return NULL;
+        }
+        expression = expr_new(EXPR_MEASURE, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        read_source_ref(inner, &expression->source_alias, &expression->source_entity, status);
+        expression->property = dup_or_null(property, status);
+        if (status->out_of_memory) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "HierarchyLevel");
+    if (json_is_object(inner)) {
+        const char *level = json_text(inner, "Level");
+        json_t *hierarchy_expression = json_object_get(inner, "Expression");
+        json_t *hierarchy = hierarchy_expression != NULL
+            ? json_object_get(hierarchy_expression, "Hierarchy") : NULL;
+        const char *hierarchy_name;
+
+        if (level == NULL) {
+            set_refusal(status, "a hierarchy level with no level name");
+            return NULL;
+        }
+        if (!json_is_object(hierarchy)) {
+            set_refusal(status, "a hierarchy level with no hierarchy");
+            return NULL;
+        }
+        hierarchy_name = json_text(hierarchy, "Hierarchy");
+        if (hierarchy_name == NULL) {
+            set_refusal(status, "a hierarchy with no name");
+            return NULL;
+        }
+
+        expression = expr_new(EXPR_HIERARCHY_LEVEL, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        read_source_ref(hierarchy, &expression->source_alias, &expression->source_entity, status);
+        expression->hierarchy = dup_or_null(hierarchy_name, status);
+        expression->level = dup_or_null(level, status);
+        if (status->out_of_memory) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "Aggregation");
+    if (json_is_object(inner)) {
+        json_t *aggregated = json_object_get(inner, "Expression");
+
+        if (!json_is_object(aggregated)) {
+            set_refusal(status, "an aggregation with no expression");
+            return NULL;
+        }
+        expression = expr_new(EXPR_AGGREGATION, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        if (map_aggregate(inner, &expression->function, status) != 0) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        expression->inner = parse_expression(aggregated, status);
+        if (expression->inner == NULL) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "Literal");
+    if (json_is_object(inner)) {
+        const char *value = json_text(inner, "Value");
+
+        if (value == NULL) {
+            set_refusal(status, "a literal with no value");
+            return NULL;
+        }
+        expression = expr_new(EXPR_LITERAL, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        expression->literal = dup_or_null(value, status);
+        if (status->out_of_memory) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "In");
+    if (json_is_object(inner)) {
+        return parse_in(inner, status);
+    }
+
+    inner = json_object_get(node, "Not");
+    if (json_is_object(inner)) {
+        json_t *negated = json_object_get(inner, "Expression");
+
+        if (!json_is_object(negated)) {
+            set_refusal(status, "a negation with no expression");
+            return NULL;
+        }
+        expression = expr_new(EXPR_NOT, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        expression->inner = parse_expression(negated, status);
+        if (expression->inner == NULL) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    inner = json_object_get(node, "And");
+    if (json_is_object(inner)) {
+        return parse_logical(inner, 0, status);
+    }
+
+    inner = json_object_get(node, "Or");
+    if (json_is_object(inner)) {
+        return parse_logical(inner, 1, status);
+    }
+
+    inner = json_object_get(node, "Comparison");
+    if (json_is_object(inner)) {
+        json_t *left = json_object_get(inner, "Left");
+        json_t *right = json_object_get(inner, "Right");
+
+        if (!json_is_object(left) || !json_is_object(right)) {
+            set_refusal(status, "a comparison missing an operand");
+            return NULL;
+        }
+        expression = expr_new(EXPR_COMPARISON, status);
+        if (expression == NULL) {
+            return NULL;
+        }
+        if (map_comparison(inner, &expression->comparison, status) != 0) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        expression->left = parse_expression(left, status);
+        expression->right = parse_expression(right, status);
+        if (expression->left == NULL || expression->right == NULL) {
+            query_expr_free(expression);
+            return NULL;
+        }
+        return expression;
+    }
+
+    set_refusal(status, "an unrecognized node");
+    return NULL;
+}
+
+/* Reads a From array into alias/entity bindings. Entries missing either half are skipped. */
+static int parse_sources(
+    json_t *from_array, QuerySource **sources, size_t *count, ExprStatus *status)
+{
+    size_t index;
+    json_t *entry;
+
+    if (!json_is_array(from_array)) {
+        return 0;
+    }
+
+    json_array_foreach(from_array, index, entry) {
+        const char *alias = json_text(entry, "Name");
+        const char *entity = json_text(entry, "Entity");
+        QuerySource *grown;
+
+        if (alias == NULL || alias[0] == '\0' || entity == NULL || entity[0] == '\0') {
+            continue;
+        }
+
+        grown = (QuerySource *)realloc(*sources, (*count + 1) * sizeof(*grown));
+        if (grown == NULL) {
+            status->out_of_memory = 1;
+            return -1;
+        }
+        *sources = grown;
+        (*sources)[*count].alias = strdup(alias);
+        (*sources)[*count].entity = strdup(entity);
+        if ((*sources)[*count].alias == NULL || (*sources)[*count].entity == NULL) {
+            /* Publish the row before bailing so the half-filled entry is freed with the rest. */
+            (*count)++;
+            status->out_of_memory = 1;
+            return -1;
+        }
+        (*count)++;
+    }
+
+    return 0;
+}
+
+/* Reads a visual's prototypeQuery: what it reads, what it projects, and in what order. */
+static int parse_query(json_t *query_node, VisualQuery *query, ExprStatus *status)
+{
+    json_t *array;
+    size_t index;
+    json_t *entry;
+
+    if (parse_sources(json_object_get(query_node, "From"), &query->from, &query->from_count,
+            status) != 0) {
+        return -1;
+    }
+
+    array = json_object_get(query_node, "Select");
+    if (json_is_array(array)) {
+        json_array_foreach(array, index, entry) {
+            const char *name = json_text(entry, "Name");
+            QuerySelection *grown;
+            QueryExpr *parsed;
+
+            if (name == NULL || name[0] == '\0') {
+                continue;
+            }
+
+            parsed = parse_expression(entry, status);
+            if (parsed == NULL) {
+                return -1;
+            }
+
+            grown = (QuerySelection *)realloc(query->select,
+                (query->select_count + 1) * sizeof(*grown));
+            if (grown == NULL) {
+                query_expr_free(parsed);
+                status->out_of_memory = 1;
+                return -1;
+            }
+            query->select = grown;
+            query->select[query->select_count].name = strdup(name);
+            query->select[query->select_count].expression = parsed;
+            query->select_count++;
+            if (query->select[query->select_count - 1].name == NULL) {
+                status->out_of_memory = 1;
+                return -1;
+            }
+        }
+    }
+
+    array = json_object_get(query_node, "OrderBy");
+    if (json_is_array(array)) {
+        json_array_foreach(array, index, entry) {
+            json_t *expression_node = json_object_get(entry, "Expression");
+            json_t *direction = json_object_get(entry, "Direction");
+            QueryOrdering *grown;
+            QueryExpr *parsed;
+
+            if (!json_is_object(expression_node)) {
+                continue;
+            }
+
+            parsed = parse_expression(expression_node, status);
+            if (parsed == NULL) {
+                return -1;
+            }
+
+            grown = (QueryOrdering *)realloc(query->order_by,
+                (query->order_by_count + 1) * sizeof(*grown));
+            if (grown == NULL) {
+                query_expr_free(parsed);
+                status->out_of_memory = 1;
+                return -1;
+            }
+            query->order_by = grown;
+            query->order_by[query->order_by_count].expression = parsed;
+            /* Power BI encodes direction as 1 (ascending) or 2 (descending). */
+            query->order_by[query->order_by_count].descending =
+                json_is_integer(direction) && json_integer_value(direction) == 2;
+            query->order_by_count++;
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * Reads a filter array, stored as a JSON string inside the outer JSON. A filter's condition is kept
+ * as a tree so the renderer can fold it into the synthesized query's WHERE clause: the filter is
+ * part of the question, and a question missing its filter is a different question.
+ *
+ * A filter entry with no condition constrains nothing (Power BI keeps the field binding for the UI
+ * even when no values are selected), so it contributes no predicate and is not an error.
+ */
+static int parse_filters(
+    const char *filters_text, ReportFilter **filters, size_t *count, ExprStatus *status)
+{
+    json_error_t json_error;
+    json_t *root;
+    size_t index;
+    json_t *entry;
+    int result = 0;
+
+    if (filters_text == NULL || filters_text[0] == '\0') {
+        return 0;
+    }
+
+    root = json_loads(filters_text, 0, &json_error);
+    if (root == NULL) {
+        /* Power BI writes this member as a string holding JSON; text that does not parse carries no
+         * recoverable condition, and treating it as "no filter" would widen the question. */
+        set_refusal(status, "a filter list that is not valid JSON (line %d: %s)",
+            json_error.line, json_error.text);
+        return -1;
+    }
+    if (!json_is_array(root)) {
+        json_decref(root);
+        return 0;
+    }
+
+    json_array_foreach(root, index, entry) {
+        const char *name = json_text(entry, "name");
+        json_t *body = json_object_get(entry, "filter");
+        json_t *where;
+        QueryExpr *condition = NULL;
+        ReportFilter *filter;
+        QuerySource *from = NULL;
+        size_t from_count = 0;
+        size_t where_index;
+        json_t *clause;
+
+        if (!json_is_object(body)) {
+            continue;
+        }
+
+        if (parse_sources(json_object_get(body, "From"), &from, &from_count, status) != 0) {
+            query_source_free(from, from_count);
+            result = -1;
+            goto done;
+        }
+
+        where = json_object_get(body, "Where");
+        if (json_is_array(where)) {
+            json_array_foreach(where, where_index, clause) {
+                json_t *condition_node = json_object_get(clause, "Condition");
+                QueryExpr *parsed;
+
+                if (!json_is_object(condition_node)) {
+                    continue;
+                }
+
+                parsed = parse_expression(condition_node, status);
+                if (parsed == NULL) {
+                    query_expr_free(condition);
+                    query_source_free(from, from_count);
+                    result = -1;
+                    goto done;
+                }
+
+                if (condition == NULL) {
+                    condition = parsed;
+                } else {
+                    /* Several Where entries are ANDed, exactly as separate predicates would be. */
+                    QueryExpr *combined = expr_new(EXPR_LOGICAL, status);
+
+                    if (combined == NULL) {
+                        query_expr_free(parsed);
+                        query_expr_free(condition);
+                        query_source_free(from, from_count);
+                        result = -1;
+                        goto done;
+                    }
+                    combined->left = condition;
+                    combined->right = parsed;
+                    combined->is_or = 0;
+                    condition = combined;
+                }
+            }
+        }
+
+        if (condition == NULL) {
+            query_source_free(from, from_count);
+            continue;
+        }
+
+        filter = (ReportFilter *)realloc(*filters, (*count + 1) * sizeof(*filter));
+        if (filter == NULL) {
+            query_expr_free(condition);
+            query_source_free(from, from_count);
+            status->out_of_memory = 1;
+            result = -1;
+            goto done;
+        }
+        *filters = filter;
+        filter = &(*filters)[*count];
+        memset(filter, 0, sizeof(*filter));
+        filter->name = strdup(name != NULL ? name : "filter");
+        filter->from = from;
+        filter->from_count = from_count;
+        filter->condition = condition;
+        (*count)++;
+        if (filter->name == NULL) {
+            status->out_of_memory = 1;
+            result = -1;
+            goto done;
+        }
+    }
+
+done:
+    json_decref(root);
+    return result;
+}
+
+/* Releases everything one visual owns, leaving it zeroed. */
+static void free_visual(ReportVisual *visual)
+{
+    size_t i;
+
+    for (i = 0; i < visual->field_count; i++) {
+        free(visual->fields[i].role);
+        free(visual->fields[i].query_ref);
+        free(visual->fields[i].table);
+        free(visual->fields[i].column_or_measure);
+    }
+    free(visual->fields);
+    free(visual->visual_type);
+    free(visual->title);
+    free(visual->sql);
+    visual_query_free(&visual->query);
+    report_filters_free(visual->filters, visual->filter_count);
+    memset(visual, 0, sizeof(*visual));
+}
+
+/* Appends a warning, taking ownership of nothing: the text is copied. */
+static int add_warning(ReportLayout *layout, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static int add_warning(ReportLayout *layout, const char *format, ...)
+{
+    char text[512];
+    char **grown;
+    va_list args;
+
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+
+    grown = (char **)realloc(layout->warnings, (layout->warning_count + 1) * sizeof(*grown));
+    if (grown == NULL) {
+        return -1;
+    }
+    layout->warnings = grown;
+    layout->warnings[layout->warning_count] = strdup(text);
+    if (layout->warnings[layout->warning_count] == NULL) {
+        return -1;
+    }
+    layout->warning_count++;
+    return 0;
+}
+
 /*
  * Resolves a selected expression to the table and column/measure it names.
  *
@@ -210,7 +1029,8 @@ static int resolve_field(
  * business question, so it is deliberately not recorded rather than stored as an empty visual.
  */
 static int read_visual(
-    json_t *container, int ordinal, ReportPage *page, char *error, size_t error_size)
+    json_t *container, int ordinal, ReportPage *page, ReportLayout *layout,
+    char *error, size_t error_size)
 {
     const char *config_text = json_text(container, "config");
     json_error_t json_error;
@@ -225,8 +1045,13 @@ static int read_visual(
     json_t *role_value;
     const char *role_name;
     ReportVisual *visual;
+    ExprStatus expr_status;
+    char refusal[256];
+    const char *visual_type;
+    const char *page_label;
     size_t index;
     json_t *entry;
+    int render_result;
     int status = -1;
 
     if (config_text == NULL) {
@@ -308,6 +1133,48 @@ static int read_visual(
     }
     visual->title = read_title(single_visual);
 
+    visual_type = visual->visual_type != NULL ? visual->visual_type : "unknown";
+    page_label = page->display_name != NULL ? page->display_name : "";
+
+    /* The query and the filters are kept as trees so the visual's question can be rendered as one
+     * SELECT. Both are parsed before any field is resolved, because a refusal in either drops the
+     * whole visual and there is no point resolving fields for a visual that will not be kept. */
+    memset(&expr_status, 0, sizeof(expr_status));
+    if (parse_query(prototype_query, &visual->query, &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a visual's query");
+            goto done;
+        }
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) uses a query expression the extractor does not support "
+                "(%s); the visual was skipped rather than recorded with an incomplete query.",
+                page_label, ordinal, visual_type, expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
+    if (parse_filters(json_text(container, "filters"), &visual->filters, &visual->filter_count,
+            &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a visual's filters");
+            goto done;
+        }
+        /* A filter that cannot be translated must not be dropped quietly: without it the
+         * synthesized query is BROADER than the question the visual actually asks, which is the one
+         * failure mode that would make a confirmed example wrong. Refusing the visual is honest. */
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) has a filter using an unsupported expression (%s); the "
+                "visual was skipped, because recording it without the filter would widen the "
+                "question it asks.",
+                page_label, ordinal, visual_type, expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
     /* Each projection bucket is a ROLE, and its name is kept verbatim: Category/Y for a chart,
      * Rows/Values for a matrix, Size for a map. The role is the author's own statement of the
      * question's shape. */
@@ -332,11 +1199,25 @@ static int read_visual(
             if (!json_is_object(selection)) {
                 /* The projection names a field the query does not select, so it cannot be
                  * resolved to a table; skipping it beats recording a field with no identity. */
+                if (add_warning(layout,
+                        "page '%s' visual #%d (%s) projects '%s' in role '%s', which its query does "
+                        "not select; that field was skipped.",
+                        page_label, ordinal, visual_type, query_ref, role_name) != 0) {
+                    set_error(error, error_size, "out of memory recording a warning");
+                    goto done;
+                }
                 continue;
             }
 
             if (resolve_field(selection, sources_by_alias, &table, &name, &is_measure) != 0
                 || table == NULL || name == NULL) {
+                if (add_warning(layout,
+                        "page '%s' visual #%d (%s) projects '%s' in role '%s', which resolves to no "
+                        "column or measure; that field was skipped.",
+                        page_label, ordinal, visual_type, query_ref, role_name) != 0) {
+                    set_error(error, error_size, "out of memory recording a warning");
+                    goto done;
+                }
                 continue;
             }
 
@@ -358,11 +1239,42 @@ static int read_visual(
     /* Having resolved nothing, the visual states no question after all. Drop it rather than
      * emit a visual with an empty field list. */
     if (visual->field_count == 0) {
-        free(visual->visual_type);
-        free(visual->title);
-        page->visual_count--;
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) projects fields but none resolved to a column or "
+                "measure; it was skipped.",
+                page_label, ordinal, visual_type) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
     }
 
+    /* The page's own filters narrow every visual on it, so they are folded in here rather than
+     * left for a consumer to remember to apply. */
+    render_result = sql_render_visual(
+        visual, page->filters, page->filter_count, &visual->sql, refusal, sizeof(refusal));
+    if (render_result < 0) {
+        set_error(error, error_size, "out of memory rendering a visual's query");
+        goto done;
+    }
+    if (render_result > 0) {
+        if (add_warning(layout,
+                "page '%s' visual #%d (%s) has a filter using an unsupported expression (%s); the "
+                "visual was skipped, because recording it without the filter would widen the "
+                "question it asks.",
+                page_label, ordinal, visual_type, refusal) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            goto done;
+        }
+        goto drop_visual;
+    }
+
+    status = 0;
+    goto done;
+
+drop_visual:
+    free_visual(visual);
+    page->visual_count--;
     status = 0;
 
 done:
@@ -379,6 +1291,7 @@ static int read_page(json_t *section, int ordinal, ReportLayout *layout,
     json_t *containers;
     size_t index;
     json_t *container;
+    ExprStatus expr_status;
     int visual_ordinal = 0;
 
     page = (ReportPage *)push_row(
@@ -395,6 +1308,28 @@ static int read_page(json_t *section, int ordinal, ReportLayout *layout,
         page->display_name = strdup(page->name);
     }
 
+    /* A page-level filter (a slicer, say) narrows every visual on the page, so it is read once here
+     * and folded into each visual's rendered query. A page filter that cannot be represented is
+     * refused for the page rather than silently ignored, since ignoring it would widen every
+     * question on the page at once. */
+    memset(&expr_status, 0, sizeof(expr_status));
+    if (parse_filters(json_text(section, "filters"), &page->filters, &page->filter_count,
+            &expr_status) != 0) {
+        if (expr_status.out_of_memory) {
+            set_error(error, error_size, "out of memory reading a page's filters");
+            return -1;
+        }
+        if (add_warning(layout,
+                "page '%s' has a filter using an unsupported expression (%s); every visual on it "
+                "was skipped, because recording them without the filter would widen the questions "
+                "they ask.",
+                page->display_name != NULL ? page->display_name : "", expr_status.reason) != 0) {
+            set_error(error, error_size, "out of memory recording a warning");
+            return -1;
+        }
+        return 0;
+    }
+
     containers = json_object_get(section, "visualContainers");
     if (!json_is_array(containers)) {
         return 0;
@@ -402,7 +1337,7 @@ static int read_page(json_t *section, int ordinal, ReportLayout *layout,
 
     json_array_foreach(containers, index, container) {
         visual_ordinal++;
-        if (read_visual(container, visual_ordinal, page, error, error_size) != 0) {
+        if (read_visual(container, visual_ordinal, page, layout, error, error_size) != 0) {
             return -1;
         }
     }
@@ -476,29 +1411,26 @@ done:
 void report_layout_free(ReportLayout *layout)
 {
     size_t page_index;
+    size_t warning_index;
 
     for (page_index = 0; page_index < layout->page_count; page_index++) {
         ReportPage *page = &layout->pages[page_index];
         size_t visual_index;
 
         for (visual_index = 0; visual_index < page->visual_count; visual_index++) {
-            ReportVisual *visual = &page->visuals[visual_index];
-            size_t field_index;
-
-            for (field_index = 0; field_index < visual->field_count; field_index++) {
-                free(visual->fields[field_index].role);
-                free(visual->fields[field_index].query_ref);
-                free(visual->fields[field_index].table);
-                free(visual->fields[field_index].column_or_measure);
-            }
-            free(visual->fields);
-            free(visual->visual_type);
-            free(visual->title);
+            free_visual(&page->visuals[visual_index]);
         }
         free(page->visuals);
         free(page->name);
         free(page->display_name);
+        report_filters_free(page->filters, page->filter_count);
     }
     free(layout->pages);
+
+    for (warning_index = 0; warning_index < layout->warning_count; warning_index++) {
+        free(layout->warnings[warning_index]);
+    }
+    free(layout->warnings);
+
     memset(layout, 0, sizeof(*layout));
 }

@@ -27,15 +27,19 @@
 static void print_usage(FILE *stream, const char *program)
 {
     fprintf(stream,
-        "Usage: %s <report.pbix> [--name NAME] [--out FILE]\n"
+        "Usage: %s <report.pbix> [--name NAME] [--report-file PATH] [--out FILE]\n"
         "\n"
         "Reads a Power BI report's semantic model and writes a SQLFlow YAML specification:\n"
         "tables, columns, measures (with their DAX), calculated columns, relationships, and\n"
         "each table's Power Query source.\n"
         "\n"
-        "  --name NAME  subscriber name for the YAML entry (default: the file's base name)\n"
-        "  --out FILE   write to FILE instead of standard output\n"
-        "  --help       show this message\n",
+        "  --name NAME         subscriber name for the YAML entry (default: the file's base name)\n"
+        "  --report-file PATH  label each page with this report file (default: the file name).\n"
+        "                      Pass the path relative to the subscriber's declared directory when\n"
+        "                      several reports are extracted under one subscriber, so two pages\n"
+        "                      sharing a title stay distinguishable.\n"
+        "  --out FILE          write to FILE instead of standard output\n"
+        "  --help              show this message\n",
         program);
 }
 
@@ -89,25 +93,55 @@ static int emit_field(Buffer *out, int indent, const char *key, const char *valu
  * title is the question in the author's own words, and each field's role says whether it is the
  * axis the answer is broken down by or the value being measured.
  */
-static int emit_report(Buffer *out, const ReportLayout *layout)
+static int emit_report(Buffer *out, const ReportLayout *layout, const char *report_file)
 {
     size_t page_index;
+    size_t warning_index;
 
-    if (layout->page_count == 0) {
+    if (layout->page_count == 0 && layout->warning_count == 0) {
         return 0;
     }
 
-    if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "report:\n") != 0) {
+    if (layout->page_count > 0
+        && (yaml_indent(out, 4) != 0 || buffer_append_str(out, "report:\n") != 0)) {
         return -1;
     }
 
     for (page_index = 0; page_index < layout->page_count; page_index++) {
         const ReportPage *page = &layout->pages[page_index];
         size_t visual_index;
+        char number[32];
 
         if (yaml_indent(out, 6) != 0
             || buffer_append_str(out, "- page: ") != 0
             || yaml_quoted(out, page->display_name != NULL ? page->display_name : "") != 0
+            || buffer_append_str(out, "\n") != 0) {
+            return -1;
+        }
+
+        /* The page's internal name and its position identify it independently of its title, which
+         * two pages can share. Together with the report file they are what a catalog row is keyed
+         * by, so a workspace of reports built from one template does not collide. */
+        if (page->name != NULL) {
+            if (yaml_indent(out, 8) != 0
+                || buffer_append_str(out, "name: ") != 0
+                || yaml_quoted(out, page->name) != 0
+                || buffer_append_str(out, "\n") != 0) {
+                return -1;
+            }
+        }
+
+        snprintf(number, sizeof(number), "%d", page->ordinal);
+        if (yaml_indent(out, 8) != 0
+            || buffer_append_str(out, "ordinal: ") != 0
+            || buffer_append_str(out, number) != 0
+            || buffer_append_str(out, "\n") != 0) {
+            return -1;
+        }
+
+        if (yaml_indent(out, 8) != 0
+            || buffer_append_str(out, "reportFile: ") != 0
+            || yaml_quoted(out, report_file) != 0
             || buffer_append_str(out, "\n") != 0) {
             return -1;
         }
@@ -131,10 +165,31 @@ static int emit_report(Buffer *out, const ReportLayout *layout)
                 return -1;
             }
 
+            snprintf(number, sizeof(number), "%d", visual->ordinal);
+            if (yaml_indent(out, 12) != 0
+                || buffer_append_str(out, "ordinal: ") != 0
+                || buffer_append_str(out, number) != 0
+                || buffer_append_str(out, "\n") != 0) {
+                return -1;
+            }
+
             if (visual->title != NULL) {
                 if (yaml_indent(out, 12) != 0
                     || buffer_append_str(out, "title: ") != 0
                     || yaml_quoted(out, visual->title) != 0
+                    || buffer_append_str(out, "\n") != 0) {
+                    return -1;
+                }
+            }
+
+            /* The visual's question as one SELECT, with every filter that applies to it folded into
+             * the WHERE clause. This is what turns a chart into a real consumption edge: it names
+             * the entities read, in a form the estate's existing T-SQL lineage parser already
+             * understands. */
+            if (visual->sql != NULL) {
+                if (yaml_indent(out, 12) != 0
+                    || buffer_append_str(out, "sql: ") != 0
+                    || yaml_quoted(out, visual->sql) != 0
                     || buffer_append_str(out, "\n") != 0) {
                     return -1;
                 }
@@ -179,12 +234,28 @@ static int emit_report(Buffer *out, const ReportLayout *layout)
         }
     }
 
+    /* What was dropped and why. A skipped visual is a question this extraction does NOT carry, so
+     * it is stated rather than left as a silent gap between the report and the spec. */
+    if (layout->warning_count > 0) {
+        if (yaml_indent(out, 4) != 0 || buffer_append_str(out, "reportWarnings:\n") != 0) {
+            return -1;
+        }
+        for (warning_index = 0; warning_index < layout->warning_count; warning_index++) {
+            if (yaml_indent(out, 6) != 0
+                || buffer_append_str(out, "- ") != 0
+                || yaml_quoted(out, layout->warnings[warning_index]) != 0
+                || buffer_append_str(out, "\n") != 0) {
+                return -1;
+            }
+        }
+    }
+
     return 0;
 }
 
 static int emit_spec(
     Buffer *out, const ModelSpec *spec, const ReportLayout *layout,
-    const char *name, const char *source_file)
+    const char *name, const char *source_file, const char *report_file)
 {
     size_t i;
 
@@ -352,7 +423,7 @@ static int emit_spec(
         }
     }
 
-    return emit_report(out, layout);
+    return emit_report(out, layout, report_file);
 }
 
 int main(int argc, char **argv)
@@ -360,6 +431,7 @@ int main(int argc, char **argv)
     const char *pbix_path = NULL;
     const char *out_path = NULL;
     const char *explicit_name = NULL;
+    const char *report_file = NULL;
     char *report_name = NULL;
     char error[ERROR_SIZE];
     DataModel model;
@@ -386,6 +458,12 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             out_path = argv[i];
+        } else if (strcmp(argv[i], "--report-file") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "error: --report-file needs a value\n");
+                goto done;
+            }
+            report_file = argv[i];
         } else if (strcmp(argv[i], "--name") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "error: --name needs a value\n");
@@ -439,7 +517,13 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    if (emit_spec(&out, &spec, &layout, report_name, pbix_path) != 0) {
+    if (report_file == NULL) {
+        const char *slash = strrchr(pbix_path, '/');
+
+        report_file = slash != NULL ? slash + 1 : pbix_path;
+    }
+
+    if (emit_spec(&out, &spec, &layout, report_name, pbix_path, report_file) != 0) {
         fprintf(stderr, "error: out of memory writing the specification\n");
         goto done;
     }
