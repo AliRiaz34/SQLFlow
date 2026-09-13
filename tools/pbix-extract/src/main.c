@@ -400,6 +400,82 @@ done:
  * is not a recognized shape gets no such properties and one line appended to `warnings`, since a
  * silently missing mapping would make lineage look complete when it is not.
  */
+/*
+ * Writes one table's Power Query source as properties of the node just emitted, and its warning
+ * when the expression names no warehouse object.
+ *
+ * This MUST be called immediately after that table's node line, because the emitted YAML is a
+ * stream: a property line attaches to whichever node was written last, not to whichever node id a
+ * caller happens to hold. Writing these in a later pass over the sources silently hung every
+ * table's source on the final column node instead, which is invisible in the text unless a reader
+ * checks WHICH node the block sits under, and left the resolution unusable downstream because a
+ * consumer looks for these fields on a `table` node.
+ *
+ * Returns 0 when the table has no recorded source too, which is not an error: a table can exist
+ * with no Power Query of its own.
+ */
+static int emit_table_source(
+    Buffer *nodes, Buffer *warnings, const ModelSpec *spec, const char *table)
+{
+    const TableSource *source = NULL;
+    MSourceResolution resolution;
+    size_t i;
+
+    for (i = 0; i < spec->source_count; i++) {
+        if (spec->sources[i].table != NULL && strcmp(spec->sources[i].table, table) == 0) {
+            source = &spec->sources[i];
+            break;
+        }
+    }
+
+    if (source == NULL) {
+        return 0;
+    }
+
+    if (emit_id_field(nodes, 6, "powerQuery",
+            source->expression != NULL ? source->expression : "") != 0) {
+        return -1;
+    }
+
+    /* The physical object behind this model table, when the M expression names one in a shape the
+     * resolver recognizes. The server is the M literal verbatim and is a CANDIDATE identity:
+     * mapping it onto the estate's own connection reference is the consumer's decision, not this
+     * tool's, so nothing is normalized here. */
+    if (msource_resolve(source->expression, &resolution) != 0) {
+        return -1;
+    }
+
+    if (resolution.resolved) {
+        if (emit_id_field(nodes, 6, "sourceServer", resolution.server) != 0
+            || emit_id_field(nodes, 6, "sourceDatabase", resolution.database) != 0
+            || emit_id_field(nodes, 6, "sourceSchema", resolution.schema) != 0
+            || emit_id_field(nodes, 6, "sourceName", resolution.item) != 0) {
+            msource_free(&resolution);
+            return -1;
+        }
+    } else if (source->expression != NULL && *source->expression != '\0') {
+        char message[512];
+
+        snprintf(message, sizeof(message),
+            "model table '%s' is sourced via %s, which names no warehouse object; "
+            "its lineage stays on the model entity name.",
+            source->table,
+            resolution.unresolved_shape != NULL
+                ? resolution.unresolved_shape : "an unrecognized Power Query source");
+
+        if (yaml_indent(warnings, 6) != 0
+            || buffer_append_str(warnings, "- ") != 0
+            || yaml_quoted(warnings, message) != 0
+            || buffer_append_str(warnings, "\n") != 0) {
+            msource_free(&resolution);
+            return -1;
+        }
+    }
+
+    msource_free(&resolution);
+    return 0;
+}
+
 static int emit_model(
     Buffer *nodes, Buffer *edges, Buffer *warnings, const ModelSpec *spec, const char *name,
     const char *report_file)
@@ -434,7 +510,10 @@ static int emit_model(
          * common case, but this check is correctness rather than an optimization. */
         if (i == 0 || spec->columns[i - 1].table == NULL
             || strcmp(spec->columns[i - 1].table, column->table) != 0) {
-            if (emit_node(nodes, table_node, "table") != 0) {
+            /* The source's properties belong to this node and are written while it is the last one
+             * emitted; see emit_table_source. */
+            if (emit_node(nodes, table_node, "table") != 0
+                || emit_table_source(nodes, warnings, spec, column->table) != 0) {
                 free(table_node);
                 return -1;
             }
@@ -474,15 +553,14 @@ static int emit_model(
         free(table_node);
     }
 
-    /* A table's Power Query source rides as a property on its table node. When a table has no
-     * columns (so no node was emitted above), the source still needs the table to exist, so this
-     * loop emits the table node itself in that case; otherwise it only adds the property, to avoid
-     * emitting the same node id twice, which a consumer would then have to dedupe by id. */
+    /* A table with no columns of its own got no node above, so it is emitted here along with its
+     * source. A table that DOES have columns already carries its source, written next to its node
+     * where the properties actually attach, so it is skipped rather than emitted a second time. */
     for (i = 0; i < spec->source_count; i++) {
         const TableSource *source = &spec->sources[i];
         char *table_rest = NULL;
         char *table_node = NULL;
-        int already_emitted = 0;
+        int has_columns = 0;
         size_t j;
 
         if (source->table == NULL) {
@@ -491,9 +569,13 @@ static int emit_model(
 
         for (j = 0; j < spec->column_count; j++) {
             if (spec->columns[j].table != NULL && strcmp(spec->columns[j].table, source->table) == 0) {
-                already_emitted = 1;
+                has_columns = 1;
                 break;
             }
+        }
+
+        if (has_columns) {
+            continue;
         }
 
         table_rest = tagged("table", source->table);
@@ -506,63 +588,14 @@ static int emit_model(
             return -1;
         }
 
-        if (!already_emitted && emit_node(nodes, table_node, "table") != 0) {
+        if (emit_node(nodes, table_node, "table") != 0
+            || emit_table_source(nodes, warnings, spec, source->table) != 0) {
             free(table_node);
             return -1;
-        }
-        if (emit_id_field(nodes, 6, "powerQuery",
-                source->expression != NULL ? source->expression : "") != 0) {
-            free(table_node);
-            return -1;
-        }
-
-        /* The physical object behind this model table, when the M expression names one in a shape
-         * the resolver recognizes. The server is the M literal verbatim and is a CANDIDATE
-         * identity: mapping it onto the estate's own connection reference is the consumer's
-         * decision, not this tool's, so nothing is normalized here. */
-        {
-            MSourceResolution resolution;
-
-            if (msource_resolve(source->expression, &resolution) != 0) {
-                free(table_node);
-                return -1;
-            }
-
-            if (resolution.resolved) {
-                if (emit_id_field(nodes, 6, "sourceServer", resolution.server) != 0
-                    || emit_id_field(nodes, 6, "sourceDatabase", resolution.database) != 0
-                    || emit_id_field(nodes, 6, "sourceSchema", resolution.schema) != 0
-                    || emit_id_field(nodes, 6, "sourceName", resolution.item) != 0) {
-                    msource_free(&resolution);
-                    free(table_node);
-                    return -1;
-                }
-            } else if (source->expression != NULL && *source->expression != '\0') {
-                char message[512];
-
-                snprintf(message, sizeof(message),
-                    "model table '%s' is sourced via %s, which names no warehouse object; "
-                    "its lineage stays on the model entity name.",
-                    source->table,
-                    resolution.unresolved_shape != NULL
-                        ? resolution.unresolved_shape : "an unrecognized Power Query source");
-
-                if (yaml_indent(warnings, 6) != 0
-                    || buffer_append_str(warnings, "- ") != 0
-                    || yaml_quoted(warnings, message) != 0
-                    || buffer_append_str(warnings, "\n") != 0) {
-                    msource_free(&resolution);
-                    free(table_node);
-                    return -1;
-                }
-            }
-
-            msource_free(&resolution);
         }
 
         free(table_node);
     }
-
     /* Measures: a node per measure, carrying its DAX and description as properties, plus a
      * `definedOn` edge to the table it belongs to. */
     for (i = 0; i < spec->measure_count; i++) {

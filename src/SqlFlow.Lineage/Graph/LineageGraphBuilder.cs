@@ -46,6 +46,28 @@ public static class LineageGraphBuilder
             s => (s.ServerRef, Database: s.TargetDatabase, Schema: s.TargetSchema, Name: s.TargetName),
             StringComparer.Ordinal);
 
+        // A synonym registered with NO database is a one-part name: a PowerBI model entity, which is what a
+        // visual's synthesized `FROM [Sales]` lands on. The default-database pass below fills a database into
+        // exactly those facts before resolution runs, so the identity that reaches ResolveSynonyms is
+        // `server|thatdatabase||Sales` and never matches the `server|||Sales` the collector registered. Key
+        // such a synonym under the server's default database as well, so it matches either way.
+        //
+        // Filling the database is right for an ordinary two-part reference and wrong for a model entity
+        // (`Sales` is a name in the model, not an object in the connection's catalog), so this cannot be fixed
+        // by reordering the two passes without breaking the reference case the ordering exists for.
+        foreach (var synonym in collected.Synonyms)
+        {
+            if (!string.IsNullOrEmpty(synonym.Database)
+                || !collected.ServerDefaultDatabases.TryGetValue(synonym.ServerRef, out var defaultDatabase))
+            {
+                continue;
+            }
+
+            synonymTargets.TryAdd(
+                NodeKey.For(synonym.ServerRef, defaultDatabase, synonym.Schema, synonym.Name),
+                (synonym.ServerRef, synonym.TargetDatabase, synonym.TargetSchema, synonym.TargetName));
+        }
+
         (string ServerRef, string? Database, string? Schema, string Name) ResolveSynonyms(
             string serverRef, string? database, string? schema, string name)
         {
