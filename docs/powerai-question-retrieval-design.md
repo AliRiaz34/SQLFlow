@@ -199,8 +199,18 @@ public class CatalogQuestionExample
    existing vector alongside its text (`PriorQuestion`), so an unchanged visual costs neither an LLM call
    nor an embeddings call. An embeddings failure degrades to a returned warning, never an exception, so an
    outage cannot cost the rows the sync already wrote.
-4. `FindSimilarAsync` (in-process cosine ranking) + a small integration test seeding a handful of known
-   questions and asserting the ranking order matches expectation for an obvious paraphrase.
+4. ~~`FindSimilarAsync` (in-process cosine ranking) + a small integration test seeding a handful of known
+   questions and asserting the ranking order matches expectation for an obvious paraphrase.~~ **Done**:
+   `QuestionSearch.FindSimilarAsync` (`src/SqlFlow.ControlPlane/Background/QuestionSearch.cs`), returning
+   `QuestionMatch` (question, the SQL that answers it, its object keys, provenance, similarity, subscriber,
+   visual title). It ranks first and resolves second, so only the winning handful cost a lookup of their SQL
+   and objects rather than joining across every stored question. Rows embedded by a different model than the
+   caller's are skipped rather than compared, since two models share no coordinate space and ranking across
+   them would produce confident nonsense; the next sync re-embeds them. A search against an estate with
+   nothing embedded returns empty without embedding the question at all. Tested (`QuestionSearchTests`)
+   against a real SQL Server with a deterministic offline embedder, including the paraphrase case that
+   motivates embeddings over keyword matching: "what was our turnover per territory" finds "What is our
+   revenue by region?" despite sharing no content words.
 5. MCP tool surface (`find_similar_questions` or equivalent) so an assistant surface can call it.
 6. Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject UI flow
    (POWERAI.md Section 6) that writes into it — this is "the learning loop" itself and is the largest
@@ -209,8 +219,10 @@ public class CatalogQuestionExample
 
 ## 9. Open questions to settle before implementation starts
 
-- **Estate-wide vs repo-scoped search.** Recommended default is estate-wide (Section 5), but this needs
-  confirming against how multi-repo deployments actually want scoping to behave.
+- **Estate-wide vs repo-scoped search.** Implemented as the caller's choice: `FindSimilarAsync` takes a
+  nullable `repoId`, searching one repo when given and the whole estate when null. Which of the two a
+  SURFACE should pass is still open and lands with step 5 (the MCP tool), since that is the first caller
+  that has to decide; estate-wide remains the recommended default per Section 5.
 - ~~**Which embedding provider is the default when neither OpenAI nor Foundry is otherwise configured.**~~
   **Settled** in step 1: retrieval is off by default, and enabling it without the credential its chosen
   provider needs is a startup error naming the exact configuration key (`RetrievalOptions.Validate`),
