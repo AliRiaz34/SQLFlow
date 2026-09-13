@@ -192,6 +192,11 @@ The tool's output is a YAML specification of the report: its semantic model (tab
 nodes:
   - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#table:Trips"
     kind: "table"
+    powerQuery: "let\n    Source = Sql.Database(\"dwh\", \"OdsDb\"),\n    ..."
+    sourceServer: "dwh"
+    sourceDatabase: "OdsDb"
+    sourceSchema: "arc"
+    sourceName: "Trips"
   - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#col:Trips.StationName"
     kind: "column"
     dataType: "string"
@@ -212,7 +217,25 @@ edges:
 
 Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
 
-Only the report layer (pages, visuals, projected fields, and each visual's rendered SQL) is read back into the catalog today, the same as before this graph shape existed: the model layer (tables, columns, measures, relationships) travels in the YAML for a person or an LLM to read directly, but has no dedicated catalog tables yet. `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection), since a warning is a diagnostic rather than a graph-shaped fact.
+Only the report layer (pages, visuals, projected fields, and each visual's rendered SQL) is read back into dedicated catalog tables: the model layer (columns, measures, relationships) travels in the YAML for a person or an LLM to read directly, and has no catalog tables of its own. `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
+
+### Resolving a model table to a warehouse object
+
+A visual names the report's MODEL entity (`Trips`), never the physical table behind it, so a consumption edge built from that visual would land on a name-only node that never unifies with the fully-qualified node an ingestion flow writes (`[OdsDb].[arc].[Trips]`). The `sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName` properties above close that gap: the tool pattern-matches each table's Power Query (M) expression, and when it names a database object, the collector turns the pairing into the same kind of synonym fact a `sys.synonyms` read produces. The estate's existing synonym-resolution pass then rewrites the bare model name onto the physical object, so a report's reads and a flow's writes meet on one node.
+
+Only a `Sql.Database`-shaped source resolves, and only when server, database, schema, and table are all present:
+
+```
+let
+    Source = Sql.Database("dwh", "OdsDb"),
+    Nav = Source{[Schema="arc", Item="Trips"]}[Data]
+in
+    Nav
+```
+
+Intervening transform steps and formatting variation are tolerated (the navigation step is matched wherever it appears in the `let` chain), but everything else is left UNRESOLVED and reported rather than guessed at: an Excel, CSV, JSON, web, or SharePoint source; a native `[Query="..."]` source, whose objects are inside SQL text rather than a schema/item pair; `Sql.Databases` (plural, which selects its database downstream); a server argument computed by another call; and any connector the matcher does not recognize. Each of those adds a `reportWarnings` line naming the table and the shape that defeated resolution, so lineage that is incomplete says so instead of looking finished. This is deliberate: a wrongly resolved table points a report's whole consumption lineage at an object it never read, which is worse than no lineage at all because nothing looks wrong.
+
+The server string in `sourceServer` is reported for a reader but is **not** used as an estate identity. How a connection string inside a report maps onto a declared `connections:` reference is a question only the estate's own configuration can answer, so the resolved object keeps the subscriber's own `server:` identity and takes only the database, schema, and table name from the M expression.
 
 ## What lands in the catalog
 

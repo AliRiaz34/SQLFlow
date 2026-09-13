@@ -3533,6 +3533,34 @@
       "sourceRefs": []
     },
     {
+      "id": "wiki-powerbi-model-entity-resolution",
+      "corpus": "wiki",
+      "path": "decisions/powerbi-model-entity-resolution.md",
+      "title": "A report's model entity becomes a warehouse object through the synonym pass",
+      "type": "decision",
+      "summary": "Why a PowerBI table's Power Query source is pattern-matched not parsed, emitted as an ordinary synonym, and refused rather than guessed when unrecognized.",
+      "keywords": [
+        "powerbi",
+        "pbix",
+        "model entity",
+        "power query",
+        "m expression",
+        "synonym",
+        "consumption lineage",
+        "node identity",
+        "Sql.Database"
+      ],
+      "related": [],
+      "sourceRefs": [
+        "tools/pbix-extract/src/msource.c",
+        "tools/pbix-extract/src/msource.h",
+        "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
+        "src/SqlFlow.Lineage/Collection/PbixExtractTool.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
+        "src/SqlFlow.Lineage/Collection/LineageFacts.cs"
+      ]
+    },
+    {
       "id": "wiki-recipe-api-source",
       "corpus": "wiki",
       "path": "narratives/recipe-api-source.md",
@@ -3704,6 +3732,7 @@
         "adf"
       ],
       "related": [
+        "wiki-powerbi-model-entity-resolution",
         "wiki-recipe-database-source",
         "wiki-orchestration-and-scheduling",
         "wiki-recipe-quality-and-monitoring",

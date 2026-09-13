@@ -112,3 +112,28 @@ fan-in to one target starves every writer but the furthest ahead unless each sco
 counts reveal it.
 
 The lint's `sourceRefs` tripwire caught two invented paths in this pass before they shipped.
+
+## [2026-09-13] ingest | PowerBI model-entity resolution
+
+Ingested the model-entity resolution work landed in `tools/pbix-extract` and `SqlFlow.Lineage`,
+alongside its design document (`docs/powerai-model-entity-resolution-design.md`) and the roadmap in
+`POWERAI.md`.
+
+One new decision page: why the Power Query expression is pattern-matched in the C tool rather than
+parsed, why the resulting mapping is emitted as an ordinary `SynonymLink` instead of a new graph
+mechanism, and why the M-literal server is reported but never used as an estate identity.
+
+The page records two departures from its own design document, since both are the kind of thing that
+looks like an oversight later: the proposed `modelSourceServer` subscriber key was not built (the
+implementation removed the need for it by never comparing the two server identities), and native
+`[Query="..."]` sources are refused rather than re-parsed, because resolving them would mean a second
+T-SQL parser inside the C tool.
+
+Also recorded, because it is the honest state rather than the intended one: only the refusal path has
+run end to end. Every table in the one sample report is Excel- or JSON-backed, and the C# test fixture
+cannot synthesize a model source, so the resolved path is proven by the tool's own unit checks and by
+the existing synonym mechanism, not by a test spanning the seam between them.
+
+`docs/reference/flow/subscribers.md` gained the table node's new `source*` properties and a section on
+what resolves and what does not; that is reference material (what the surface does), so it lives there
+rather than here.

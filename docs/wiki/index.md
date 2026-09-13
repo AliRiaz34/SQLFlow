@@ -80,6 +80,9 @@ to narrow a search to one kind of page.
 
 - [Landing is string-first](decisions/string-first-landing.md) - why every non-Parquet source lands
   as strings and typing is deferred, and what the alternative would have cost.
+- [A report's model entity becomes a warehouse object](decisions/powerbi-model-entity-resolution.md) -
+  pattern-matching Power Query instead of parsing it, reusing the synonym pass instead of adding a
+  mechanism, and why an unresolvable source is reported rather than guessed.
 
 ### Incidents
 
