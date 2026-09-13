@@ -148,11 +148,37 @@ calculated column and two visuals' field bindings; the `Sales Amount by Due Date
 restored by hand because its `USERELATIONSHIP` over the deliberately inactive `DueDateKey`
 relationship is exactly the knowledge this extraction exists to carry.
 
+## The seam only two bugs deep
+
+Running the chain end to end, rather than trusting each side's own tests, is what showed that it had
+never worked. A `sqlflow db sync . --connect` now lands the report's read edges on
+`AdventureWorks.dbo.DimDate`, `DimProduct`, `DimReseller` and `FactResellerSales`, each a
+`Kind = Table` row in `catalog.Object` harvested from the live database rather than a name-only node.
+Before the fixes it landed on nothing at all.
+
+**The extractor wrote the resolution onto the wrong node.** The YAML is emitted as a stream, so a
+property line attaches to whichever node was written last. Sources were written in a pass that ran
+after the node loop finished, so every table's `powerQuery` and `source*` properties piled onto the
+final COLUMN node as duplicate keys in one mapping. The values were right, and grepping the output
+for `sourceName` showed exactly the expected seven objects, which is why it went unnoticed: the check
+anyone would run does not look at WHICH node the block sits under. Only a table with no columns
+landed correctly, because there the node was emitted immediately before its properties, and that is
+precisely the shape a small fixture has and a real report never does.
+
+**The graph builder could not have matched it either.** A model entity is a one-part name, so the
+collector registers its synonym with no database. The default-database pass fills the connection's
+catalog into exactly those facts BEFORE synonym resolution runs, so the identity reaching the
+resolver was `server|thatdatabase||Sales` while the synonym was registered as `server|||Sales`. Any
+real connection string names a database, so this was the ordinary case rather than an edge one. The
+fix keys such a synonym under the server's default database as well; reordering the two passes would
+have been wrong, because filling the database is correct for an ordinary two-part reference and wrong
+only for a model entity, which is a name in the model rather than an object in the catalog.
+
+What generalizes: both halves were individually tested and individually correct-looking, and the
+defect lived in the agreement between them. A seam between two languages is exactly where nobody's
+unit test reaches, and "the values are right" is not the same claim as "the consumer can read them".
+
 ## What is still unproven
 
-Only the extractor half. No `db sync` has been run against the repointed report, so `FlowSetCollector`
-turning those four source fields into a `SynonymLink`, and `LineageGraphBuilder` rewriting the bare
-model name onto the node an ingestion flow writes, are still exercised by their own tests rather than
-against a real resolved report. The rendered SQL in the spec is accordingly still in model terms
-(`FROM [Sales] AS [Sales]`), which is correct at that layer: the rewrite belongs to the graph builder,
-downstream of anything the C tool emits.
+One report, one source shape. `Sql.Database` is the only recognized shape, and the whole proof rests
+on a single file whose model reads a single SQL Server database.

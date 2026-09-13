@@ -352,7 +352,7 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
 
 ### Known limitations (real, not hidden)
 
-- **Model-entity resolution: proven out of the extractor, not yet through the graph builder.** A
+- **Model-entity resolution: proven end to end, against one report.** A
   visual names the MODEL entity (`Sales`), not the warehouse object. `tools/pbix-extract`
   pattern-matches a table's Power Query expression (`src/msource.c`) and, for a `Sql.Database`-shaped
   source, emits the physical `sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName` on the table
@@ -363,25 +363,32 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
   native query, an unknown connector) stays unresolved and says so in `reportWarnings`, naming the
   shape, rather than being guessed at.
 
-  **What is now proven.** The sample report's model was repointed in Power BI Desktop from its
-  original Excel workbook to the restored AdventureWorksDW2022 database
-  (`deploy/docker/adventureworks-restore.sh`), and extraction of that report resolves all seven of
-  its SQL-backed tables to real warehouse objects: `Customer` to `dbo.DimCustomer`, `Date` to
-  `dbo.DimDate`, `Product` to `dbo.DimProduct`, `Reseller` to `dbo.DimReseller`, `Sales` and
-  `Sales Order` to `dbo.FactResellerSales`, `Sales Territory` to `dbo.DimSalesTerritory`, each
-  carrying all four source fields. The refusal path still behaves alongside it in the same report:
-  the `Table` helper is report-local sort metadata sourced via `Json.Document` and is correctly
-  reported unresolved. The committed evidence is
-  `samples/powerbi/AdventureWorks_Sales.spec.yaml` (the `.pbix` itself is gitignored as a large
-  binary).
+  **What is proven.** The sample report's model was repointed in Power BI Desktop from its original
+  Excel workbook to the restored AdventureWorksDW2022 database
+  (`deploy/docker/adventureworks-restore.sh`), and `sqlflow db sync . --connect` against it lands
+  the report's read edges on the very objects the live harvest inventoried: `catalog.LineageEdge`
+  rows reading `AdventureWorks.dbo.DimDate`, `DimProduct`, `DimReseller` and `FactResellerSales`,
+  each a `Kind = Table` row in `catalog.Object` rather than a name-only node. All seven SQL-backed
+  tables resolve (`Customer` to `dbo.DimCustomer`, `Sales` and `Sales Order` to
+  `dbo.FactResellerSales`, and so on). The refusal path still behaves in the same report: the
+  `Table` helper is report-local sort metadata sourced via `Json.Document` and is correctly reported
+  unresolved. The committed evidence is `samples/powerbi/AdventureWorks_Sales.spec.yaml` (the
+  `.pbix` itself is gitignored as a large binary).
 
-  **The gap that remains** is now the second half of the chain, not the first: no `db sync` has been
-  run against this report, so `FlowSetCollector` building `SynonymLink`s from those source fields,
-  and `LineageGraphBuilder` rewriting the model names onto flow-written nodes, are still exercised
-  only by their own tests rather than against a real resolved report. The rendered SQL in the spec
-  is accordingly still in model terms (`FROM [Sales] AS [Sales]`), which is correct at that layer:
-  the rewrite happens in the graph builder, downstream of the extractor. See
+  **Running it end to end is what found the two bugs that had kept it from ever working.** Neither
+  was visible to a unit test, because each sat on one side of the seam between the C tool and the
+  graph builder. The extractor wrote every table's `source*` properties onto the last COLUMN node
+  instead of the table's own, since the YAML is emitted as a stream and the sources were written in
+  a later pass; grepping the output for `sourceName` looked entirely correct, which is how it
+  survived. And the graph builder would not have matched them anyway: a model entity's synonym is
+  registered as a one-part name with no database, while the default-database pass fills the
+  connection's catalog into exactly those facts first, so the two identities never met for any
+  connection string that names a database, which is all of them. Both are fixed and covered by
+  tests. See
   [docs/powerai-model-entity-resolution-design.md](powerai-model-entity-resolution-design.md).
+
+  **What that leaves**: one report, one source shape. `Sql.Database` is the only recognized shape,
+  and the proof rests on a single file whose model reads a single SQL Server database.
 - **Verified against one report.** PowerBI's embedded SQLite schema has shifted across versions
   before (column renames observed directly: `FromColumnID` vs `FromEndColumnID`). The C tool probes
   the schema at runtime and fails loudly naming what is missing, rather than assuming a shape, but

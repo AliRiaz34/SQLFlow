@@ -169,3 +169,27 @@ be unchanged, so the fix was a translation of structure rather than a second imp
 Both report shapes must stay supported, and the sample having been re-saved means the real file now
 exercises the new reader while synthetic fixtures hold the old one, exactly reversing which path had
 real coverage the day before.
+
+## [2026-09-13] ingest | Two bugs found by running model-entity resolution end to end
+
+Source: a `db sync --connect` against the repointed sample report, and the two fixes it forced.
+
+The decision page's "What is still unproven" section had just been narrowed to "only the extractor
+half". Running the other half showed the claim was too generous in the other direction: the chain had
+never worked at all, and the extractor half only looked proven because the check that seemed to prove
+it (grepping the emitted YAML for `sourceName`) cannot see the defect.
+
+Two bugs, one on each side of the seam. The C tool wrote every table's `source*` properties onto the
+last column node instead of its own table node, because the YAML is a stream and the sources were
+written in a later pass. The graph builder registered a model entity's synonym as a one-part name with
+no database, while the default-database pass filled the connection's catalog into exactly those facts
+first, so the two identities never met for any connection string that names a database.
+
+The page now records both, and what generalizes from them: each half was individually tested and
+individually correct-looking, the defect lived in the agreement between them, and a seam between two
+languages is where no unit test reaches. "The values are right" turned out to be a different claim
+from "the consumer can read them".
+
+Both POWERAI.md Section 10 and this page previously said the extractor half was proven; both are
+corrected rather than quietly amended, since the earlier claim is exactly the kind a later reader
+would otherwise rely on.
