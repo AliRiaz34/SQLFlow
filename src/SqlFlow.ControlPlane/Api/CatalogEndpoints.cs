@@ -146,6 +146,16 @@ public static class CatalogEndpoints
                     .ConfigureAwait(false);
             }
 
+            // PowerAI retrieval: embed any stored question still lacking a current vector. Independent of the
+            // generation switch above, so turning retrieval on later fills in existing rows with no LLM pass.
+            if (options.Value.PowerAI.Retrieval.Enabled)
+            {
+                var embedder = services.GetRequiredService<SqlFlow.Assistant.IEmbeddingProvider>();
+                await Background.SubscriberQuestionEnrichment
+                    .EmbedQuestionsAsync(db, repoId, embedder, clock, ct)
+                    .ConfigureAwait(false);
+            }
+
             return TypedResults.Ok(new RepoSyncResultDto(
                 result.PipelinesAdded, result.PipelinesUpdated, result.PipelinesUnchanged, result.PipelinesDeactivated, result.PipelinesDeleted,
                 result.ObjectsUpserted, result.ObjectColumns, result.LineageEdges, result.Waves, result.FlowDependencies,

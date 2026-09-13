@@ -186,9 +186,19 @@ public class CatalogQuestionExample
    Batching is the unit of `EmbedAsync` (a sync embeds many questions at once and both backends charge
    and rate-limit per request), responses are re-sorted by each entry's `index` rather than array
    position, and throttle retries reuse the chat gateway's Retry-After policy.
-2. Migration: `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc` on `CatalogSubscriberReportVisualQuestion`.
-3. Extend `SubscriberQuestionEnrichment` to embed newly-generated/carried-forward questions lacking a
-   current embedding.
+2. ~~Migration: `Embedding`/`EmbeddingModel`/`EmbeddedAtUtc` on `CatalogSubscriberReportVisualQuestion`.~~
+   **Done**: migration `AddQuestionEmbeddings`, the vector as `varbinary(max)`.
+3. ~~Extend `SubscriberQuestionEnrichment` to embed newly-generated/carried-forward questions lacking a
+   current embedding.~~ **Done**: `SubscriberQuestionEnrichment.EmbedQuestionsAsync`, wired into both sync
+   paths (`RepoSyncService` and the manual sync endpoint) beside the generation step. It is deliberately
+   its OWN step behind its OWN switch rather than folded into `EnrichAsync`, because retrieval and question
+   generation are independently toggleable: a deployment that generated questions earlier and only now
+   turns retrieval on has a table of un-embedded rows, and this fills them in with no second LLM pass. A
+   row is selected when it has no vector or its `EmbeddingModel` is not the configured one, so a model
+   change re-embeds exactly the affected rows. The pre-sync snapshot was widened to carry each question's
+   existing vector alongside its text (`PriorQuestion`), so an unchanged visual costs neither an LLM call
+   nor an embeddings call. An embeddings failure degrades to a returned warning, never an exception, so an
+   outage cannot cost the rows the sync already wrote.
 4. `FindSimilarAsync` (in-process cosine ranking) + a small integration test seeding a handful of known
    questions and asserting the ranking order matches expectation for an obvious paraphrase.
 5. MCP tool surface (`find_similar_questions` or equivalent) so an assistant surface can call it.

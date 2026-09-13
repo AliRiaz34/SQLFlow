@@ -24,7 +24,12 @@ public static class SubscriberQuestionEnrichment
 {
     /// <summary>One visual's prior state, read before a sync deletes and reinserts it: its content hash (to
     /// detect whether the fresh row is the same visual, unchanged) and the questions to carry forward when it is.</summary>
-    public sealed record VisualSnapshot(string ContentHash, IReadOnlyList<string> Questions);
+    public sealed record VisualSnapshot(string ContentHash, IReadOnlyList<PriorQuestion> Questions);
+
+    /// <summary>One carried-forward question and the embedding it already had. The vector travels with the text
+    /// so an unchanged visual costs neither an LLM call nor an embeddings call: re-embedding identical text
+    /// would produce the identical vector at a price.</summary>
+    public sealed record PriorQuestion(string Question, byte[]? Embedding, string? EmbeddingModel, DateTime? EmbeddedAtUtc);
 
     /// <summary>Reads this repo's current subscriber-visual questions, keyed by <c>VisualKey</c>, so they can be
     /// carried forward after the sync that is about to delete and reinsert every visual row. Call this
@@ -52,7 +57,9 @@ public static class SubscriberQuestionEnrichment
             v => v.VisualKey,
             v => new VisualSnapshot(
                 v.ContentHash,
-                questionsByVisual[v.VisualKey].Select(q => q.Question).ToArray()));
+                questionsByVisual[v.VisualKey]
+                    .Select(q => new PriorQuestion(q.Question, q.Embedding, q.EmbeddingModel, q.EmbeddedAtUtc))
+                    .ToArray()));
     }
 
     /// <summary>
@@ -89,11 +96,12 @@ public static class SubscriberQuestionEnrichment
 
         foreach (var visual in visuals)
         {
-            IReadOnlyList<string> questions;
+            IReadOnlyList<PriorQuestion> questions;
 
             if (before.TryGetValue(visual.VisualKey, out var prior) && prior.ContentHash == visual.ContentHash)
             {
-                // Unchanged since the last sync: carry the old questions forward with no LLM call.
+                // Unchanged since the last sync: carry the old questions forward, embeddings included, with no
+                // LLM call and nothing left for the embedding step below to recompute.
                 questions = prior.Questions;
             }
             else
@@ -104,7 +112,10 @@ public static class SubscriberQuestionEnrichment
                     fieldsByVisual[visual.VisualKey]
                         .Select(f => new VisualQuestionField(f.Role, f.TableName, f.ColumnOrMeasure, f.IsMeasure))
                         .ToArray());
-                questions = await generator.GenerateQuestionsAsync(context, ct).ConfigureAwait(false);
+                // Freshly generated text has no embedding yet; the embedding step picks these up.
+                questions = (await generator.GenerateQuestionsAsync(context, ct).ConfigureAwait(false))
+                    .Select(q => new PriorQuestion(q, null, null, null))
+                    .ToArray();
 
                 if (questions.Count == 0)
                 {
@@ -131,12 +142,79 @@ public static class SubscriberQuestionEnrichment
                     RepoId = repoId,
                     VisualKey = visual.VisualKey,
                     Ordinal = ordinal,
-                    Question = question,
+                    Question = question.Question,
+                    Embedding = question.Embedding,
+                    EmbeddingModel = question.EmbeddingModel,
+                    EmbeddedAtUtc = question.EmbeddedAtUtc,
                 });
             }
         }
 
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
         return warnings;
+    }
+
+    /// <summary>
+    /// Embeds every one of this repo's stored questions that lacks a current vector, so a newly typed question
+    /// can be ranked against them by cosine similarity (POWERAI.md Section 6). A row needs embedding when it has
+    /// none at all (freshly generated text) or when its <c>EmbeddingModel</c> is not
+    /// <paramref name="embedder"/>'s: vectors from two models are not comparable, so a model change re-embeds
+    /// exactly the affected rows rather than the whole table.
+    /// <para>
+    /// Deliberately separate from <see cref="EnrichAsync"/> and gated by its own switch, because retrieval and
+    /// question generation are independently toggleable: a deployment that generated questions earlier and only
+    /// now turns retrieval on has a table full of un-embedded rows, and this step is what fills them in without
+    /// a second LLM pass. Like generation, it runs after the sync's own transaction has committed, and a
+    /// failure degrades to a returned warning rather than an exception, so an embeddings outage never costs the
+    /// structural rows the sync already wrote.
+    /// </para>
+    /// </summary>
+    public static async Task<IReadOnlyList<string>> EmbedQuestionsAsync(
+        CatalogDbContext db, Guid repoId, IEmbeddingProvider embedder, TimeProvider clock, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentNullException.ThrowIfNull(embedder);
+        ArgumentNullException.ThrowIfNull(clock);
+
+        var model = embedder.Model;
+        var stale = await db.SubscriberReportVisualQuestions
+            .Where(q => q.RepoId == repoId && (q.Embedding == null || q.EmbeddingModel != model))
+            .Select(q => new { q.Id, q.Question })
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (stale.Count == 0)
+        {
+            return [];
+        }
+
+        IReadOnlyList<float[]> vectors;
+        try
+        {
+            vectors = await embedder.EmbedAsync(stale.Select(q => q.Question).ToArray(), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return
+            [
+                $"{stale.Count} stored question(s) could not be embedded ({ex.Message}); "
+                + "they keep whatever vector they had and are retried on the next sync.",
+            ];
+        }
+
+        var embeddedAt = clock.GetUtcNow().UtcDateTime;
+        for (var i = 0; i < stale.Count; i++)
+        {
+            var bytes = EmbeddingMath.ToBytes(vectors[i]);
+            await db.SubscriberReportVisualQuestions
+                .Where(q => q.Id == stale[i].Id)
+                .ExecuteUpdateAsync(
+                    set => set
+                        .SetProperty(q => q.Embedding, bytes)
+                        .SetProperty(q => q.EmbeddingModel, model)
+                        .SetProperty(q => q.EmbeddedAtUtc, embeddedAt),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        return [];
     }
 }

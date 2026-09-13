@@ -66,6 +66,9 @@ public sealed class SubscriberQuestionEnrichmentTests
             db.SubscriberReportVisualQuestions.Add(new CatalogSubscriberReportVisualQuestion
             {
                 RepoId = repoId, VisualKey = visualKey, Ordinal = 1, Question = "What are sales by region?",
+                Embedding = EmbeddingMath.ToBytes([0.5f, 0.25f]),
+                EmbeddingModel = "text-embedding-3-small",
+                EmbeddedAtUtc = new DateTime(2026, 9, 13, 10, 0, 0, DateTimeKind.Utc),
             });
             await db.SaveChangesAsync();
 
@@ -74,7 +77,7 @@ public sealed class SubscriberQuestionEnrichmentTests
             var snapshot = await SubscriberQuestionEnrichment.SnapshotAsync(db, repoId, CancellationToken.None);
             Assert.True(snapshot.ContainsKey(visualKey));
             Assert.Equal(hash, snapshot[visualKey].ContentHash);
-            Assert.Equal(["What are sales by region?"], snapshot[visualKey].Questions);
+            Assert.Equal(["What are sales by region?"], snapshot[visualKey].Questions.Select(q => q.Question));
 
             // Simulate the sync's wholesale delete+reinsert writing back the SAME content (same hash).
             await db.SubscriberReportVisualQuestions.Where(q => q.RepoId == repoId).ExecuteDeleteAsync();
@@ -88,6 +91,11 @@ public sealed class SubscriberQuestionEnrichmentTests
                 .Where(q => q.VisualKey == visualKey).OrderBy(q => q.Ordinal).ToListAsync();
             var question = Assert.Single(carried);
             Assert.Equal("What are sales by region?", question.Question);
+
+            // The embedding carries forward with the text it belongs to: identical text re-embeds to the
+            // identical vector, so paying for that call again would be waste.
+            Assert.Equal("text-embedding-3-small", question.EmbeddingModel);
+            Assert.Equal([0.5f, 0.25f], EmbeddingMath.FromBytes(question.Embedding!));
         }
         finally
         {
@@ -162,6 +170,136 @@ public sealed class SubscriberQuestionEnrichmentTests
             await db.SubscriberReportVisuals.Where(v => v.RepoId == repoId).ExecuteDeleteAsync();
             await db.SubscriberReportPages.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();
             await db.Subscribers.Where(s => s.RepoId == repoId).ExecuteDeleteAsync();
+        }
+    }
+
+    /// <summary>A provider that embeds without a network call, counting what it was asked to embed so a test
+    /// can prove a row was skipped rather than merely re-embedded to the same value.</summary>
+    private sealed class FakeEmbeddingProvider(string model) : IEmbeddingProvider
+    {
+        public string Model => model;
+
+        public int Dimensions => 2;
+
+        public List<string> Embedded { get; } = [];
+
+        public Task<IReadOnlyList<float[]>> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct)
+        {
+            Embedded.AddRange(texts);
+            // Deterministic and text-dependent, so a vector identifies the text it came from.
+            IReadOnlyList<float[]> vectors = [.. texts.Select(t => new[] { t.Length / 100f, 0.5f })];
+            return Task.FromResult(vectors);
+        }
+    }
+
+    [SkippableFact]
+    public async Task EmbedQuestions_FillsMissingVectors_AndReEmbedsOnlyOnAModelChange()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var visualKey = $"subscriber|embed_{suffix}#report.pbix#1#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            db.SubscriberReportVisualQuestions.AddRange(
+                new CatalogSubscriberReportVisualQuestion
+                {
+                    RepoId = repoId, VisualKey = visualKey, Ordinal = 1, Question = "What are sales by region?",
+                },
+                new CatalogSubscriberReportVisualQuestion
+                {
+                    RepoId = repoId, VisualKey = visualKey, Ordinal = 2, Question = "Which region sells most?",
+                });
+            await db.SaveChangesAsync();
+
+            // First pass: neither row has a vector, so both are embedded.
+            var first = new FakeEmbeddingProvider("model-a");
+            var warnings = await SubscriberQuestionEnrichment.EmbedQuestionsAsync(
+                db, repoId, first, TimeProvider.System, CancellationToken.None);
+
+            Assert.Empty(warnings);
+            Assert.Equal(2, first.Embedded.Count);
+            var stored = await db.SubscriberReportVisualQuestions.AsNoTracking()
+                .Where(q => q.RepoId == repoId).OrderBy(q => q.Ordinal).ToListAsync();
+            Assert.All(stored, q =>
+            {
+                Assert.Equal("model-a", q.EmbeddingModel);
+                Assert.NotNull(q.EmbeddedAtUtc);
+                Assert.Equal(2, EmbeddingMath.FromBytes(q.Embedding!).Length);
+            });
+
+            // Second pass, same model: every row already carries a current vector, so nothing is re-embedded.
+            var second = new FakeEmbeddingProvider("model-a");
+            await SubscriberQuestionEnrichment.EmbedQuestionsAsync(
+                db, repoId, second, TimeProvider.System, CancellationToken.None);
+            Assert.Empty(second.Embedded);
+
+            // Third pass, different model: vectors from two models are not comparable, so both rows are redone.
+            var upgraded = new FakeEmbeddingProvider("model-b");
+            await SubscriberQuestionEnrichment.EmbedQuestionsAsync(
+                db, repoId, upgraded, TimeProvider.System, CancellationToken.None);
+
+            Assert.Equal(2, upgraded.Embedded.Count);
+            var reEmbedded = await db.SubscriberReportVisualQuestions.AsNoTracking()
+                .Where(q => q.RepoId == repoId).ToListAsync();
+            Assert.All(reEmbedded, q => Assert.Equal("model-b", q.EmbeddingModel));
+        }
+        finally
+        {
+            await db.SubscriberReportVisualQuestions.Where(q => q.RepoId == repoId).ExecuteDeleteAsync();
+        }
+    }
+
+    /// <summary>A provider whose every call fails, standing in for an embeddings outage or a bad credential.</summary>
+    private sealed class FailingEmbeddingProvider : IEmbeddingProvider
+    {
+        public string Model => "model-down";
+
+        public int Dimensions => 2;
+
+        public Task<IReadOnlyList<float[]>> EmbedAsync(IReadOnlyList<string> texts, CancellationToken ct)
+            => throw new HttpRequestException("embeddings endpoint unreachable");
+    }
+
+    [SkippableFact]
+    public async Task EmbedQuestions_WhenTheProviderFails_WarnsAndLeavesTheQuestionIntact()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var visualKey = $"subscriber|embedfail_{suffix}#report.pbix#1#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            db.SubscriberReportVisualQuestions.Add(new CatalogSubscriberReportVisualQuestion
+            {
+                RepoId = repoId, VisualKey = visualKey, Ordinal = 1, Question = "What are sales by region?",
+            });
+            await db.SaveChangesAsync();
+
+            var warnings = await SubscriberQuestionEnrichment.EmbedQuestionsAsync(
+                db, repoId, new FailingEmbeddingProvider(), TimeProvider.System, CancellationToken.None);
+
+            // An embeddings outage is a warning, never a thrown exception: the question rows a sync already
+            // wrote must survive it, and the row is simply retried on the next sync.
+            var warning = Assert.Single(warnings);
+            Assert.Contains("could not be embedded", warning);
+
+            var question = Assert.Single(await db.SubscriberReportVisualQuestions.AsNoTracking()
+                .Where(q => q.RepoId == repoId).ToListAsync());
+            Assert.Equal("What are sales by region?", question.Question);
+            Assert.Null(question.Embedding);
+        }
+        finally
+        {
+            await db.SubscriberReportVisualQuestions.Where(q => q.RepoId == repoId).ExecuteDeleteAsync();
         }
     }
 }
