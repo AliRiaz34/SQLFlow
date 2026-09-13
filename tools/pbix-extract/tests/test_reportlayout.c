@@ -22,6 +22,7 @@
 #include <zip.h>
 
 #include "reportlayout.h"
+#include "test_msource.h"
 
 static int failures;
 static int checks;
@@ -524,6 +525,13 @@ int main(void)
     test_a_report_with_no_sections_is_not_an_error();
 
     remove("build/test-fixture.pbix");
+
+    /* The M-source resolver's own checks, folded into this suite's totals so one run covers both. */
+    {
+        int msource_checks = 0;
+        failures += run_msource_tests(&msource_checks);
+        checks += msource_checks;
+    }
 
     if (failures > 0) {
         fprintf(stderr, "\n%d of %d checks FAILED\n", failures, checks);

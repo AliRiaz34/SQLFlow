@@ -171,11 +171,13 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         var read = Assert.Single(report.Edges, e =>
             e.Flow is null && e.ViaModule == subscriberKey && e.Relation == LineageRelation.Reads);
 
-        // IMPORTANT, and a real limit of visual-layer-only extraction: a visual names the MODEL entity
-        // ('Sales'), not the warehouse object, so the edge lands on a name-only node with NO database or
-        // schema. It therefore does NOT unify with the [OdsDb].[arc].[Sales] node the ingestion writes.
-        // Resolving a model entity to its physical table needs the Power Query / M source expressions, which
-        // live in the .pbix's DataModel part and are out of this extraction's scope.
+        // A visual names the MODEL entity ('Sales'), not the warehouse object, so the edge lands on a
+        // name-only node with NO database or schema unless the model's Power Query source resolved to a
+        // physical table. This fixture carries only a Report/Layout part and no DataModel (building a real
+        // one means XPress9-compressing an Analysis Services image, which a test cannot reasonably do), so
+        // there is no M expression to resolve and the unresolved outcome is what is asserted here.
+        // The resolution path itself is covered by the tool's own suite (tests/test_msource.c), which drives
+        // every recognized and refused M shape directly.
         Assert.Equal(NodeKey.For(Ods, null, null, "Sales"), read.ObjectKey);
         Assert.NotEqual(NodeKey.For(Ods, "OdsDb", "arc", "Sales"), read.ObjectKey);
 

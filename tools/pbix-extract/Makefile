@@ -39,6 +39,7 @@ OWN_SOURCES := $(SRC_DIR)/main.c \
                $(SRC_DIR)/reportlayout.c \
                $(SRC_DIR)/sqlrender.c \
                $(SRC_DIR)/redact.c \
+               $(SRC_DIR)/msource.c \
                $(SRC_DIR)/yamlout.c \
                $(SRC_DIR)/xpress9_decode.c
 
@@ -54,13 +55,15 @@ TARGET := $(BUILD_DIR)/pbix-extract
 # The test binary links the reader and renderer directly, without main.o, so the parsers can be
 # driven over synthetic .pbix fixtures built in-process.
 TEST_DIR := tests
-TEST_SOURCES := $(TEST_DIR)/test_reportlayout.c
+TEST_SOURCES := $(TEST_DIR)/test_reportlayout.c \
+                $(TEST_DIR)/test_msource.c
 TESTED_SOURCES := $(SRC_DIR)/reportlayout.c \
                   $(SRC_DIR)/sqlrender.c \
                   $(SRC_DIR)/buffer.c \
                   $(SRC_DIR)/datamodel.c \
                   $(SRC_DIR)/metadata.c \
                   $(SRC_DIR)/redact.c \
+                  $(SRC_DIR)/msource.c \
                   $(SRC_DIR)/xpress9_decode.c
 TEST_TARGET := $(BUILD_DIR)/pbix-extract-tests
 

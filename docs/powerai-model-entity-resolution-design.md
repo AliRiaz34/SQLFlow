@@ -1,6 +1,11 @@
 # PowerAI Model-Entity-to-Warehouse-Object Resolution: Design
 
-Status: design only, not implemented. This closes the known limitation described in POWERAI.md
+Status: steps 1 and 3 are implemented (the M pattern-matcher in the C tool, and the synonym emission
+that feeds its output into the existing resolution pass). Step 2 (`modelSourceServer`) was NOT built,
+deliberately: see Section 5's note. Step 4's integration test is limited by fixture reality, and
+step 5 still needs a genuinely SQL-backed sample report; both are explained in Section 8.
+
+This closes the known limitation described in POWERAI.md
 Sections 5, 8, and 10 ("Model-entity resolution"): an extracted PowerBI visual's synthesized SQL, and
 the query/lineage facts built from it, name the report's MODEL entity (e.g. `Sales`), not the physical
 warehouse object it actually reads (e.g. server `dwh`, database `OdsDb`, schema `arc`, table `Sales`).
@@ -109,7 +114,15 @@ key or a flow's `connection:` reference uses (`ServerIdentity.From`,
 `${env:...}`/`@alias` reference verbatim). Two servers named differently in M text versus in
 `connections:` must not silently become two different nodes for the same physical server.
 
-Recommendation: **do not try to auto-derive `serverRef` from the M literal.** Instead, extraction
+**What was actually built differs from the recommendation below, and is simpler.** The synonym's
+target keeps the SUBSCRIBER's own resolved server identity, taking only database/schema/name from the
+M expression. The M-literal server is emitted on the table node for a human to read but is never used
+as an estate identity, so the two are never compared and cannot disagree. That removes the need for
+`modelSourceServer` entirely (Section 8, step 2). The reasoning below is kept because it explains why
+the M literal must NOT become a server identity, which is exactly the constraint the implementation
+honors by a different route.
+
+Original recommendation: **do not try to auto-derive `serverRef` from the M literal.** Instead, extraction
 emits the *M-literal* server/database/schema/table verbatim as `resolvedServer`/etc. (a "candidate"
 identity, not yet an estate identity), and a human maps it once per subscriber via a small, explicit
 declaration on the subscriber, e.g.:
@@ -183,29 +196,40 @@ tested pipeline.
 
 ## 8. Sequencing (each step landable and testable independently, no time estimates)
 
-1. Extend `tools/pbix-extract`'s `TableSource` handling with the M pattern-matcher for the
-   `Sql.Database`/`Odbc.DataSource` + schema/item-navigation shapes (Section 3), plus the native-query
-   (`[Query="..."]`) variant that re-parses its query text through the SAME logic used for a module
-   body. Emit `resolvedDatabase`/`resolvedSchema`/`resolvedName` (and the raw M-literal server string)
-   on the table node when matched; emit a `reportWarnings` line naming the shape when not. New C tests
-   under the tool's own `make test`/`make test-asan` suite, one fixture per recognized/unrecognized
-   shape.
-2. Add `modelSourceServer` as an optional subscriber YAML key (Section 5), documented in
-   `docs/reference/flow/subscribers.md` and the subscriber key model
-   (`docs/reference/flow/keys.subscribers.json`), for the rare case the M-literal server string needs
-   remapping onto the subscriber's own `server:` identity.
-3. `PbixExtractTool.cs`'s `SpecNode` gains the new table-node properties; `FlowSetCollector`'s
-   PowerBI extraction path emits one `SynonymLink` per resolved table (Section 6). No changes to
+1. ~~Extend `tools/pbix-extract`'s `TableSource` handling with the M pattern-matcher.~~ **Done**:
+   `tools/pbix-extract/src/msource.{c,h}`, emitting `sourceServer`/`sourceDatabase`/`sourceSchema`/
+   `sourceName` on the table node when matched and a `reportWarnings` line naming the shape when not.
+   Scope is `Sql.Database` only, per Section 9's own recommendation; `Odbc.DataSource` is recognized
+   well enough to NAME in a warning but never resolved. The native-query (`[Query="..."]`) variant is
+   likewise recognized and left unresolved rather than half-resolved: re-parsing its SQL was dropped
+   from this pass because it would mean a second T-SQL parser inside the C tool, which is a far larger
+   commitment than the name-to-name mapping this feature needs. 27 new checks in the tool's own suite,
+   clean under `make test` and `make test-asan`.
+2. ~~Add `modelSourceServer` as an optional subscriber YAML key.~~ **NOT built, deliberately.** The
+   implementation made it unnecessary: the synonym's target keeps the SUBSCRIBER's own server identity
+   and takes only database/schema/name from the M expression (Section 6), so the M-literal server
+   string is never used as an estate identity and never needs remapping onto one. Adding a YAML key to
+   reconcile two identities that are no longer compared would be configuration for a problem that does
+   not arise. The M server string is still emitted on the node for a reader, just not used for
+   identity.
+3. ~~`PbixExtractTool.cs`'s `SpecNode` gains the new table-node properties; `FlowSetCollector` emits
+   one `SynonymLink` per resolved table.~~ **Done**, exactly as designed and with no change to
    `LineageGraphBuilder`, `TSqlLineageExtractor`, or `sqlrender.c`.
-4. Integration test (extending `LineagePowerBiSubscriberTests`, the existing real-tool CI suite):
-   extract a report whose sample `.pbix` is rebuilt (or a fixture is hand-authored) with a
-   `Sql.Database`-shaped M expression, and assert the resulting `CatalogLineageEdge` lands on the same
-   node key an ingestion flow targeting that table would produce.
-5. Once the sample corpus (POWERAI.md's "broader version coverage" item) includes at least one
-   genuinely SQL-backed report, verify end to end against it — the current `AdventureWorks_Sales.spec.yaml`
-   sample is Excel-sourced and will only ever exercise the "unresolved, reported" path, not the
-   resolved path, so a second sample file is needed to prove step 1-3 actually work, not just that
-   they compile.
+4. Integration test asserting a resolved edge unifies with an ingestion's node: **not built, and here
+   is why.** `LineagePowerBiSubscriberTests` builds its `.pbix` fixture as a zip carrying only a
+   `Report/Layout` part. A model source lives in the `DataModel` part, which is an XPress9-compressed
+   Analysis Services backup image wrapping a SQLite database; synthesizing one in a test is not
+   reasonable, and the tool is decode-only by design (it vendors a decompressor, not a compressor).
+   The resolution logic is therefore tested where it can be tested honestly, in the C tool's own suite
+   against the M text directly, and the existing C# test now states that its fixture exercises the
+   unresolved path only. Closing this properly needs step 5, not more test scaffolding.
+5. **Still open, and the one real gap**: no SQL-backed sample report exists. The current
+   `AdventureWorks_Sales.pbix` is Excel-backed (verified: all 8 of its tables now emit an
+   "Excel.Workbook / Json.Document names no warehouse object" warning), so it exercises only the
+   refusal path. Proving the resolved path end to end, from `.pbix` through to a unified
+   `CatalogLineageEdge`, needs a real report whose model reads a SQL database. Until then the C
+   tests prove the matcher is correct and the synonym mechanism is proven by its existing use, but
+   the seam between them is argued rather than demonstrated.
 
 ## 9. Open questions to settle before implementation starts
 

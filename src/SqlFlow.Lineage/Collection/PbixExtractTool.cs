@@ -162,7 +162,7 @@ internal static class PbixExtractTool
 
         var spec = document.Subscribers.Values.First();
         var pages = SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], executable);
-        return new PbixExtractResult(pages, spec.ReportWarnings ?? []);
+        return new PbixExtractResult(pages, spec.ReportWarnings ?? [], SpecGraph.ModelSources(spec.Nodes ?? []));
     }
 
     private static void TryKill(Process process)
@@ -241,6 +241,19 @@ internal static class PbixExtractTool
         public string? Title { get; set; }
 
         public string? Sql { get; set; }
+
+        /// <summary>On a <c>table</c> node whose Power Query source named a warehouse object: the server as
+        /// the M expression spelled it. A CANDIDATE identity, not an estate one, since how a connection
+        /// string maps onto a declared connection reference is the estate's question, not the parser's.</summary>
+        public string? SourceServer { get; set; }
+
+        public string? SourceDatabase { get; set; }
+
+        public string? SourceSchema { get; set; }
+
+        /// <summary>The physical table the model entity was loaded from. Present only alongside the other
+        /// three: a partial resolution is reported as unresolved rather than half-applied.</summary>
+        public string? SourceName { get; set; }
     }
 
     /// <summary>One YAML graph edge. <c>Role</c> is read only off a <c>projects</c> edge.</summary>
@@ -381,6 +394,45 @@ file static class SpecGraph
         => byId.TryGetValue(nodeId, out var node) ? node.Ordinal : int.MaxValue;
 
     /// <summary>
+    /// The model tables whose Power Query source resolved to a physical warehouse object. A table is included
+    /// only when all four parts are present: the tool emits them together or not at all, and a partial tuple
+    /// would point a report's lineage at an object it may never have read, which is worse than leaving it on
+    /// the model entity name where a reader can see it is unresolved.
+    /// </summary>
+    public static List<PbixModelSource> ModelSources(IReadOnlyList<PbixExtractTool.SpecNode> nodes)
+    {
+        var sources = new List<PbixModelSource>();
+
+        foreach (var node in nodes)
+        {
+            if (node.Kind != "table"
+                || string.IsNullOrWhiteSpace(node.SourceServer)
+                || string.IsNullOrWhiteSpace(node.SourceDatabase)
+                || string.IsNullOrWhiteSpace(node.SourceSchema)
+                || string.IsNullOrWhiteSpace(node.SourceName))
+            {
+                continue;
+            }
+
+            // A table node's id is "<subscriber>#<reportFile>#table:<name>"; the model entity name is the
+            // qualifier, which is what a visual's synthesized SQL names.
+            var hash = node.Id.LastIndexOf('#');
+            var tag = hash >= 0 ? node.Id[(hash + 1)..] : node.Id;
+            var colon = tag.IndexOf(':');
+            var modelTable = colon >= 0 ? tag[(colon + 1)..] : tag;
+            if (modelTable.Length == 0)
+            {
+                continue;
+            }
+
+            sources.Add(new PbixModelSource(
+                modelTable, node.SourceServer, node.SourceDatabase, node.SourceSchema, node.SourceName));
+        }
+
+        return sources;
+    }
+
+    /// <summary>
     /// Resolves a <c>projects</c> edge's target into (table, field, isMeasure). Table and field always come
     /// from the target id itself: the C tool derives every column/measure id as
     /// <c>&lt;subscriber&gt;#&lt;reportFile&gt;#(col|measure):&lt;table&gt;.&lt;field&gt;</c> regardless of
@@ -408,7 +460,23 @@ file static class SpecGraph
 }
 
 /// <summary>What extracting one report produced: its pages, and what the tool declined to extract.</summary>
-internal sealed record PbixExtractResult(IReadOnlyList<PbixPage> Pages, IReadOnlyList<string> Warnings);
+internal sealed record PbixExtractResult(
+    IReadOnlyList<PbixPage> Pages,
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<PbixModelSource> ModelSources);
+
+/// <summary>
+/// One model table resolved to the physical warehouse object its Power Query expression loads from. This is
+/// what lets a consumption edge extracted from a report land on the same node an ingestion flow writes: the
+/// visual names the MODEL entity (<c>Sales</c>), and this says which real table that entity IS.
+/// </summary>
+/// <param name="ModelTable">The model entity name, as a visual's SQL refers to it.</param>
+/// <param name="Server">The server as the M expression spelled it. A candidate identity, not an estate one.</param>
+/// <param name="Database">The physical database.</param>
+/// <param name="Schema">The physical schema.</param>
+/// <param name="Name">The physical table.</param>
+internal sealed record PbixModelSource(
+    string ModelTable, string Server, string Database, string Schema, string Name);
 
 /// <summary>One page of a report, as the extractor emits it.</summary>
 internal sealed class PbixPage

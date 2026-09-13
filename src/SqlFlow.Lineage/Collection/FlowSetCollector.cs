@@ -356,11 +356,63 @@ public sealed class FlowSetCollector
         foreach (var (reportFile, path) in reportFiles)
         {
             ExtractOneReport(
-                result, subscriber, file, server, executable, reportFile, path, qualifyWithReportFile,
-                queries, pages);
+                result, subscriber, file, server, connections, executable, reportFile, path,
+                qualifyWithReportFile, queries, pages);
         }
 
         return new ExtractedReport(queries, pages);
+    }
+
+    /// <summary>
+    /// Turns each model table the tool resolved to a physical warehouse object into one
+    /// <see cref="SynonymLink"/>, which is what makes a report's consumption edge land on the same node an
+    /// ingestion flow writes rather than on a name-only one.
+    /// <para>
+    /// A visual's synthesized SQL names the MODEL entity (<c>FROM [Sales]</c>), which the extractor resolves
+    /// as a bare one-part name under the subscriber's own server. The synonym pass in
+    /// <c>LineageGraphBuilder</c> then rewrites exactly that identity onto the physical object. Reusing the
+    /// synonym mechanism rather than adding one is the point: a PowerBI-derived synonym and one read from
+    /// <c>sys.synonyms</c> are indistinguishable to the resolution pass, so the graph builder needed no
+    /// change at all.
+    /// </para>
+    /// <para>
+    /// The server the M expression named is deliberately NOT used as the synonym's target server. A
+    /// connection string in a report is not the same identity as the estate's declared connection reference,
+    /// and treating them as equal would split one physical server into two nodes. The target keeps the
+    /// subscriber's own server (which is what its queries already resolve against) and only the
+    /// database/schema/name are taken from the model source, since those are what the bare model name lacks.
+    /// </para>
+    /// </summary>
+    private static void EmitModelSourceSynonyms(
+        CollectionResult result,
+        string server,
+        IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
+        PbixExtractResult extracted)
+    {
+        if (extracted.ModelSources.Count == 0 || !connections.TryGetValue(server, out var connection))
+        {
+            return;
+        }
+
+        var serverRef = ServerIdentity.From(connection.ConnectionRef);
+
+        foreach (var source in extracted.ModelSources)
+        {
+            // The "from" side is the identity a visual's bare model-entity reference actually lands on:
+            // the subscriber's server with no database or schema (FlowSetCollector extracts subscriber
+            // queries with defaultDatabase: null and minimumParts: 1). Empty strings key the same way a
+            // null does through NodeKey.For, which is what lets this match.
+            result.Synonyms.Add(new SynonymLink
+            {
+                ServerRef = serverRef,
+                Database = string.Empty,
+                Schema = string.Empty,
+                Name = source.ModelTable,
+                TargetDatabase = source.Database,
+                TargetSchema = source.Schema,
+                TargetName = source.Name,
+            });
+        }
     }
 
     /// <summary>Extracts one <c>.pbix</c> file's pages/visuals into <paramref name="pages"/> and its visuals'
@@ -371,6 +423,7 @@ public sealed class FlowSetCollector
         Core.Subscribers.DataSubscriber subscriber,
         string file,
         string server,
+        IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
         string executable,
         string reportFile,
         string path,
@@ -398,6 +451,8 @@ public sealed class FlowSetCollector
         {
             result.Warnings.Add($"{file}: subscriber '{subscriber.Name}' report '{reportFile}': {warning}");
         }
+
+        EmitModelSourceSynonyms(result, server, connections, extracted);
 
         foreach (var page in extracted.Pages)
         {

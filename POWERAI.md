@@ -97,10 +97,13 @@ reflects what Section 10 details:
    field's role (`Category`/`Y`/`Rows`/`Values`/`Size`, etc.), plus filters (including page-level
    slicers) folded into the visual's synthesized SQL `WHERE` clause rather than stored separately.
 
-The compatibility-view complication flagged in the original design is not yet addressed: a report in
-Import mode names MODEL entities (`Sales`), not warehouse objects, so an extracted consumption edge
-currently lands on a name-only node that does not unify with a fully-qualified ingestion target like
-`[OdsDb].[arc].[Sales]`. See Section 10's known limitations.
+The compatibility-view complication flagged in the original design is now addressed for the shape
+that matters: a report in Import mode names MODEL entities (`Sales`), not warehouse objects, and the
+table's Power Query expression is pattern-matched to recover the physical object it loads from, which
+then unifies with a fully-qualified ingestion target like `[OdsDb].[arc].[Sales]` through the
+existing synonym pass. Only `Sql.Database`-shaped sources resolve; an Excel-, JSON-, or
+native-query-backed table stays on its model name and says so in `reportWarnings`. See Section 10's
+known limitations for what remains unproven.
 
 ## 6. The learning loop (question -> guess -> confirm -> remember)
 
@@ -347,12 +350,20 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
 
 ### Known limitations (real, not hidden)
 
-- **Model-entity resolution.** A visual names the MODEL entity (`Sales`), not the warehouse object,
-  so an extracted consumption edge lands on a name-only node (no database, no schema) and does not
-  unify with the fully-qualified node an ingestion flow writes (`[OdsDb].[arc].[Sales]`). Closing
-  this needs the Power Query / M source expressions (which extraction already captures) mapped to
-  physical tables; that mapping does not exist yet. Tests assert this limitation explicitly rather
-  than papering over it.
+- **Model-entity resolution: built, but unproven against a real SQL-backed report.** A visual names
+  the MODEL entity (`Sales`), not the warehouse object. `tools/pbix-extract` now pattern-matches a
+  table's Power Query expression (`src/msource.c`) and, for a `Sql.Database`-shaped source, emits the
+  physical `sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName` on the table node;
+  `FlowSetCollector` turns each of those into a `SynonymLink`, so the EXISTING synonym-resolution pass
+  in `LineageGraphBuilder` rewrites the bare model name onto the fully-qualified node an ingestion
+  flow writes. No change was needed to the graph builder, the T-SQL extractor, or the SQL renderer.
+  A table whose source is not a recognized shape (Excel, JSON, a native query, an unknown connector)
+  stays unresolved and says so in `reportWarnings`, naming the shape, rather than being guessed at.
+  **The gap that remains**: the only sample report on file is Excel-backed, so only the refusal path
+  has been exercised end to end. The matcher itself is covered by 27 checks in the C tool's suite
+  (clean under ASan/UBSan), but proving the resolved path all the way to a unified `CatalogLineageEdge`
+  needs a real report whose model reads a SQL database. See
+  [docs/powerai-model-entity-resolution-design.md](powerai-model-entity-resolution-design.md).
 - **Verified against one report.** PowerBI's embedded SQLite schema has shifted across versions
   before (column renames observed directly: `FromColumnID` vs `FromEndColumnID`). The C tool probes
   the schema at runtime and fails loudly naming what is missing, rather than assuming a shape, but
@@ -426,9 +437,12 @@ In roughly the order it would need to land, since each depends on groundwork the
    a control-plane-only post-sync step and regenerated only when the visual's content changed. This
    is what retrieval-by-similarity (step 5 below) will match against; the confirmed-example store
    itself is still not started.
-4. **Model-entity-to-warehouse-object resolution** (known limitation, above), using the M source
-   expressions already extracted. Needed before consumption lineage from a report is trustworthy
-   for impact analysis ("what breaks if I change this table") rather than only descriptive.
+4. ~~**Model-entity-to-warehouse-object resolution**~~ **Built** (known limitations, above): the M
+   source expressions are pattern-matched in `tools/pbix-extract` and fed into the existing synonym
+   pass as `SynonymLink` facts, so a resolved model table's consumption edge lands on the same node
+   an ingestion flow writes. Only `Sql.Database`-shaped sources resolve; everything else is reported
+   unresolved rather than guessed. Still needs a SQL-backed sample report to prove the resolved path
+   end to end, which is why this is not marked done outright.
 5. **The confirmed-example store and retrieval** (Sections 6 and 8). Retrieval is **done**:
    `QuestionExpander` turns a typed question into related business vocabulary using the Anthropic account
    question generation already uses, `QuestionSearch.FindSimilarAsync` ranks the stored questions by how
