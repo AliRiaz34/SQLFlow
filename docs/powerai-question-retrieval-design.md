@@ -211,7 +211,19 @@ public class CatalogQuestionExample
    against a real SQL Server with a deterministic offline embedder, including the paraphrase case that
    motivates embeddings over keyword matching: "what was our turnover per territory" finds "What is our
    revenue by region?" despite sharing no content words.
-5. MCP tool surface (`find_similar_questions` or equivalent) so an assistant surface can call it.
+5. ~~MCP tool surface (`find_similar_questions` or equivalent) so an assistant surface can call it.~~
+   **Done**: `find_similar_questions` (`tools/sqlflow-mcp/src/server.rs`) over
+   `GET /api/v1/lineage/subscribers/similar-questions` (`FindSimilarQuestionsAsync`,
+   `src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs`), added to the SHARED read surface so both the GUI and
+   Slack get it: it reaches no datasource, returning only SQL text the catalog already stores and that
+   `describe_subscriber` already exposes on both surfaces. Each match carries `similarity` plus a `trusted`
+   flag saying whether it cleared the deployment's threshold, and the response repeats the threshold itself,
+   so a caller reports confidence from retrieval rather than inventing one. A deployment without retrieval
+   configured answers **501, not an empty match list**: "nothing is close to your question" and "this
+   deployment never looked" demand opposite follow-ups, and conflating them would have an assistant claim an
+   estate has no matching dashboard when it never searched. The tool description states that the similarity
+   is the only trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and
+   that execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
 6. Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject UI flow
    (POWERAI.md Section 6) that writes into it — this is "the learning loop" itself and is the largest
    remaining piece; everything above this line is useful (retrieval over PowerBI-derived questions
@@ -219,10 +231,10 @@ public class CatalogQuestionExample
 
 ## 9. Open questions to settle before implementation starts
 
-- **Estate-wide vs repo-scoped search.** Implemented as the caller's choice: `FindSimilarAsync` takes a
-  nullable `repoId`, searching one repo when given and the whole estate when null. Which of the two a
-  SURFACE should pass is still open and lands with step 5 (the MCP tool), since that is the first caller
-  that has to decide; estate-wide remains the recommended default per Section 5.
+- ~~**Estate-wide vs repo-scoped search.**~~ **Settled**: the caller chooses. `FindSimilarAsync` and the
+  endpoint both take a nullable `repoId`, and `find_similar_questions` exposes it as an optional argument
+  documented as "omit to search the whole estate", so estate-wide is the default a model gets by doing
+  nothing while a caller that knows it wants one repo can say so.
 - ~~**Which embedding provider is the default when neither OpenAI nor Foundry is otherwise configured.**~~
   **Settled** in step 1: retrieval is off by default, and enabling it without the credential its chosen
   provider needs is a startup error naming the exact configuration key (`RetrievalOptions.Validate`),

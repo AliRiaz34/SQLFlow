@@ -220,8 +220,13 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
    tables (Section 8).
 5. ~~Extract declared model relationships and cardinality.~~ **Done** (Section 5), tagged `active`;
    kept out of `CatalogObjectRelationship` per Section 7, not (yet) in dedicated catalog tables.
-6. **Build the confirmed-example store and the retrieval step.** Not started.
-7. **Wire the learning loop.** Not started; depends on step 6.
+6. **Build the confirmed-example store and the retrieval step.** Retrieval is **done**; the confirmed-example
+   store is not started. Questions are embedded at sync time and ranked by cosine similarity, reachable as the
+   `find_similar_questions` MCP tool. See
+   [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) for the design and what
+   each step landed. What remains of this item is the `user-confirmed` half: the table, and the flow that
+   writes into it.
+7. **Wire the learning loop.** Not started; depends on the confirmed-example store above.
 8. ~~Visuals/field-co-occurrence and default filters.~~ **Done**, and delivered earlier than
    originally sequenced (visual-layer data turned out to be the load-bearing signal: it is the only
    place a field's ROLE is recorded, and SQL-derived lineage cannot recover that fact). Every page,
@@ -423,8 +428,14 @@ In roughly the order it would need to land, since each depends on groundwork the
 4. **Model-entity-to-warehouse-object resolution** (known limitation, above), using the M source
    expressions already extracted. Needed before consumption lineage from a report is trustworthy
    for impact analysis ("what breaks if I change this table") rather than only descriptive.
-5. **The confirmed-example store and retrieval** (Sections 6 and 8): the flat table for
-   question/query/provenance/confidence, and similarity search over it. Not started.
+5. **The confirmed-example store and retrieval** (Sections 6 and 8). Retrieval is **done**: an
+   `IEmbeddingProvider` (OpenAI or Azure) embeds each stored question at sync time, re-embedding only rows
+   whose text is new or whose model changed; `QuestionSearch.FindSimilarAsync` ranks them by cosine
+   similarity in the application tier (no SQL Server 2025 `VECTOR` dependency, so no split estate); and
+   `find_similar_questions` exposes it to every assistant surface, returning each match with the SQL that
+   already answers it and a similarity-derived confidence rather than an LLM's self-rating. All of it is off
+   by default behind `ControlPlane:PowerAI:Retrieval`. The flat table for user-confirmed
+   question/query/provenance/confidence is still not started.
 6. **The learning loop** (Section 6): wiring retrieval into an actual guess-confirm-remember flow
    through the existing DataOps confirmation gate. Depends on step 5.
 7. **Broader version coverage**: extraction is proven against one report from one PowerBI version.

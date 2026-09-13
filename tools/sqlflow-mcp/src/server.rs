@@ -290,6 +290,18 @@ pub struct KeyInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SimilarQuestionsInput {
+    /// The business question, in the user's own words. Pass it as they typed it: the match is on meaning,
+    /// so rewording it into schema terms first throws away the signal this searches on.
+    pub question: String,
+    /// How many matches to return (default 3, max 20).
+    pub top_k: Option<u32>,
+    /// Restrict to one repo by id. Omit to search the whole estate, which is usually right: a question
+    /// about revenue is worth answering from whichever repo's report first asked it.
+    pub repo_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ObjectLineageInput {
     /// The object key (from search_all, describe_object, or lineage_objects).
     pub key: String,
@@ -1860,6 +1872,33 @@ and fix every finding first."
     )]
     async fn describe_subscriber_report(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/subscribers/report", &[("key", i.key)]).await
+    }
+
+    #[tool(
+        description = "Find the business questions this estate's dashboards ALREADY answer that mean the \
+            same thing as a question someone just typed, ranked by meaning rather than by shared words \
+            (\"what drives our turnover\" finds \"revenue by product category\"). Each match carries the SQL \
+            that already answers it, the warehouse objects that SQL reads, and a `similarity` in [0,1]. START \
+            HERE before writing new SQL for a business question: a close match is a query a real report \
+            already runs in production, so adapting it beats composing one from the schema. \
+            `similarity` is the ONLY trustworthy confidence signal here, and `trusted` reports whether it \
+            cleared this deployment's threshold. Do not substitute your own confidence for it: a query you \
+            wrote from a 0.42 match can read exactly as convincingly as one from a 0.95 match and still be \
+            wrong. Say plainly which match you built on and how close it was, and treat an untrusted match \
+            as a lead to verify rather than an answer. Running anything you compose still goes through \
+            prepare_query/run_query and their human confirmation, unchanged. An empty `matches` means \
+            nothing stored is close (or nothing is embedded yet), not that the question is unanswerable: \
+            fall back to describe_object/get_table_joins and say that is what you did."
+    )]
+    async fn find_similar_questions(&self, Parameters(i): Parameters<SimilarQuestionsInput>) -> String {
+        let mut q: Vec<(&str, String)> = vec![("question", i.question)];
+        if let Some(top_k) = i.top_k {
+            q.push(("topK", top_k.to_string()));
+        }
+        if let Some(repo_id) = i.repo_id {
+            q.push(("repoId", repo_id));
+        }
+        self.get("/api/v1/lineage/subscribers/similar-questions", &q).await
     }
 
     // ---- Schedules, nodes, sources, summary (read) -----------------------

@@ -168,7 +168,7 @@ public sealed class McpOptions
         "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
         "describe_object", "describe_object_refresh", "object_lineage", "list_file_sources", "file_provenance",
         "lineage_edges", "lineage_waves", "lineage_dependencies",
-        "list_subscribers", "describe_subscriber", "describe_subscriber_report",
+        "list_subscribers", "describe_subscriber", "describe_subscriber_report", "find_similar_questions",
         "search_all", "search_objects", "search_columns", "search_definitions", "search_flows",
         "search_flow_columns", "search_files", "search_statements",
         "list_schedules", "get_schedule", "get_schedule_plan", "list_nodes", "list_repo_sources", "summary",
