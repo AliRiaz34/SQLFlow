@@ -244,8 +244,10 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
 - **One `.pbix` reader**: `tools/pbix-extract`, a standalone C binary with no .NET/Python dependency.
   Decompresses the `DataModel` (vendored MIT-licensed XPress9 decoder, decode-only), parses the ABF
   container and its embedded `metadata.sqlitedb` (via `sqlite3_deserialize`, no temp files), and
-  reads `Report/Layout` for the visual layer, keeping each visual's query and filters as an
-  expression tree rather than flattening them. Renders each visual's question as one T-SQL
+  reads the visual layer in either shape Power BI Desktop writes it (the older single
+  `Report/Layout` part, or the newer split `Report/definition/...` tree of one document per page and
+  per visual), keeping each visual's query and filters as an expression tree rather than flattening
+  them. Renders each visual's question as one T-SQL
   `SELECT ... WHERE ...` (`sqlrender.c`, ported from the former `VisualQueryTranslator` so the output
   matches character for character), folding page-level filters into every visual on that page.
   Emits one YAML spec per report as a flat graph, `nodes:` and `edges:`, rather than a name-keyed
@@ -350,24 +352,44 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
 
 ### Known limitations (real, not hidden)
 
-- **Model-entity resolution: built, but unproven against a real SQL-backed report.** A visual names
-  the MODEL entity (`Sales`), not the warehouse object. `tools/pbix-extract` now pattern-matches a
-  table's Power Query expression (`src/msource.c`) and, for a `Sql.Database`-shaped source, emits the
-  physical `sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName` on the table node;
-  `FlowSetCollector` turns each of those into a `SynonymLink`, so the EXISTING synonym-resolution pass
-  in `LineageGraphBuilder` rewrites the bare model name onto the fully-qualified node an ingestion
-  flow writes. No change was needed to the graph builder, the T-SQL extractor, or the SQL renderer.
-  A table whose source is not a recognized shape (Excel, JSON, a native query, an unknown connector)
-  stays unresolved and says so in `reportWarnings`, naming the shape, rather than being guessed at.
-  **The gap that remains**: the only sample report on file is Excel-backed, so only the refusal path
-  has been exercised end to end. The matcher itself is covered by 27 checks in the C tool's suite
-  (clean under ASan/UBSan), but proving the resolved path all the way to a unified `CatalogLineageEdge`
-  needs a real report whose model reads a SQL database. See
+- **Model-entity resolution: proven out of the extractor, not yet through the graph builder.** A
+  visual names the MODEL entity (`Sales`), not the warehouse object. `tools/pbix-extract`
+  pattern-matches a table's Power Query expression (`src/msource.c`) and, for a `Sql.Database`-shaped
+  source, emits the physical `sourceServer`/`sourceDatabase`/`sourceSchema`/`sourceName` on the table
+  node; `FlowSetCollector` turns each of those into a `SynonymLink`, so the EXISTING
+  synonym-resolution pass in `LineageGraphBuilder` rewrites the bare model name onto the
+  fully-qualified node an ingestion flow writes. No change was needed to the graph builder, the T-SQL
+  extractor, or the SQL renderer. A table whose source is not a recognized shape (Excel, JSON, a
+  native query, an unknown connector) stays unresolved and says so in `reportWarnings`, naming the
+  shape, rather than being guessed at.
+
+  **What is now proven.** The sample report's model was repointed in Power BI Desktop from its
+  original Excel workbook to the restored AdventureWorksDW2022 database
+  (`deploy/docker/adventureworks-restore.sh`), and extraction of that report resolves all seven of
+  its SQL-backed tables to real warehouse objects: `Customer` to `dbo.DimCustomer`, `Date` to
+  `dbo.DimDate`, `Product` to `dbo.DimProduct`, `Reseller` to `dbo.DimReseller`, `Sales` and
+  `Sales Order` to `dbo.FactResellerSales`, `Sales Territory` to `dbo.DimSalesTerritory`, each
+  carrying all four source fields. The refusal path still behaves alongside it in the same report:
+  the `Table` helper is report-local sort metadata sourced via `Json.Document` and is correctly
+  reported unresolved. The committed evidence is
+  `samples/powerbi/AdventureWorks_Sales.spec.yaml` (the `.pbix` itself is gitignored as a large
+  binary).
+
+  **The gap that remains** is now the second half of the chain, not the first: no `db sync` has been
+  run against this report, so `FlowSetCollector` building `SynonymLink`s from those source fields,
+  and `LineageGraphBuilder` rewriting the model names onto flow-written nodes, are still exercised
+  only by their own tests rather than against a real resolved report. The rendered SQL in the spec
+  is accordingly still in model terms (`FROM [Sales] AS [Sales]`), which is correct at that layer:
+  the rewrite happens in the graph builder, downstream of the extractor. See
   [docs/powerai-model-entity-resolution-design.md](powerai-model-entity-resolution-design.md).
 - **Verified against one report.** PowerBI's embedded SQLite schema has shifted across versions
   before (column renames observed directly: `FromColumnID` vs `FromEndColumnID`). The C tool probes
   the schema at runtime and fails loudly naming what is missing, rather than assuming a shape, but
-  that is a safety net, not proof every version is covered.
+  that is a safety net, not proof every version is covered. The same caveat now applies to the visual
+  layer from the other direction: the sample report was re-saved by a current Power BI Desktop, which
+  writes the split `Report/definition` form, so it is the split reader that a real file exercises and
+  the older `Report/Layout` reader that only synthetic fixtures do. Both are covered by the C tool's
+  suite (73 checks, clean under ASan/UBSan).
 - **The model spec (measures, relationships, calculated columns) lives only in YAML text**,
   generated by `tools/pbix-extract` as graph nodes/edges (Section 8), not in dedicated catalog
   tables the way the report structure is. An LLM given the YAML file directly can already load it
