@@ -40,7 +40,7 @@ public sealed class ConfirmQuestionApiTests
     }
 
     [SkippableFact]
-    public async Task ARejection_StoresNothing_AndSaysSo()
+    public async Task ARejection_IsStoredAsKnownBad_NeverAsAReadOnlyPrecedent()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
@@ -50,21 +50,54 @@ public sealed class ConfirmQuestionApiTests
         using var client = factory.CreateClient();
         var token = await IssueOperateTokenAsync(client);
 
-        // Deliberately a statement that would NOT survive the read-only guard: a rejection is answered before
-        // the SQL is validated, because the caller is telling us the query was wrong and refusing their report
-        // for also being malformed would throw away the only signal the exchange carried.
+        // Deliberately a statement that would NOT survive the read-only guard: a rejected row is never run,
+        // so it is stored as given rather than parsed, and this proves that path does not quietly demand a
+        // valid SELECT before it will remember a wrong answer.
         using var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
-            question, "DELETE FROM Depots", QuestionConfirmationOutcome.Rejected));
+            question, "DELETE FROM Depots", QuestionConfirmationOutcome.Rejected, Reason: "Wrong table entirely"));
 
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<ConfirmedQuestionDto>();
         Assert.NotNull(body);
-        Assert.False(body.Stored);
-        Assert.Null(body.ExampleId);
-        Assert.Null(body.Provenance);
+        Assert.True(body.Stored);
+        Assert.False(body.Confirmed);
+        Assert.NotNull(body.ExampleId);
 
         await using var db = CatalogDatabase.Create(cs);
-        Assert.False(await db.QuestionExamples.AnyAsync(e => e.Question == question));
+        var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question == question);
+        Assert.False(stored.Confirmed);
+        Assert.Equal("DELETE FROM Depots", stored.Sql);
+        Assert.Equal("Wrong table entirely", stored.RejectionNote);
+        Assert.Equal(QuestionExampleProvenance.UserConfirmed, stored.Provenance);
+
+        await db.QuestionExamples.Where(e => e.Id == stored.Id).ExecuteDeleteAsync();
+    }
+
+    [SkippableFact]
+    public async Task ARejectionWithNoReason_IsStillStored()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var question = $"Is depot volume normal on {Guid.NewGuid():N}?";
+        await using var factory = Enabled(cs);
+        using var client = factory.CreateClient();
+        var token = await IssueOperateTokenAsync(client);
+
+        using var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
+            question, "SELECT 1", QuestionConfirmationOutcome.Rejected));
+
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<ConfirmedQuestionDto>();
+        Assert.NotNull(body);
+        Assert.True(body.Stored);
+        Assert.False(body.Confirmed);
+
+        await using var db = CatalogDatabase.Create(cs);
+        var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question == question);
+        Assert.Null(stored.RejectionNote);
+
+        await db.QuestionExamples.Where(e => e.Id == stored.Id).ExecuteDeleteAsync();
     }
 
     [SkippableFact]
@@ -160,11 +193,15 @@ public sealed class ConfirmQuestionApiTests
         Assert.Contains(QuestionConfirmationOutcome.Rejected, body, StringComparison.Ordinal);
     }
 
-    /// <summary>A host with retrieval turned on, which is what makes the example store writable at all.</summary>
+    /// <summary>A host with retrieval turned on, which is what makes the example store writable at all. Synonym
+    /// expansion is switched off: this file tests the write path and its storage semantics, not the LLM
+    /// expansion (covered by <see cref="QuestionSearchTests"/>), and turning it on would require an Anthropic
+    /// key that need not exist in a test environment for this file's assertions to hold.</summary>
     private static ControlPlaneAppFactory Enabled(string catalogConnection)
         => new ControlPlaneAppFactory()
             .WithCatalog(catalogConnection)
-            .WithSetting("ControlPlane:PowerAI:Retrieval:Enabled", "true");
+            .WithSetting("ControlPlane:PowerAI:Retrieval:Enabled", "true")
+            .WithSetting("ControlPlane:PowerAI:Retrieval:ExpandSynonyms", "false");
 
     private static async Task<string> IssueOperateTokenAsync(HttpClient client)
     {

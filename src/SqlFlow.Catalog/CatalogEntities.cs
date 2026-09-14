@@ -867,10 +867,13 @@ public class CatalogSubscriberReportVisualQuestion
 /// estate-wide when it is not.
 /// </para>
 /// <para>
-/// Rejections are deliberately NOT stored. POWERAI.md Section 6 is explicit that on rejection nothing is
-/// learned as fact, and a table of "confirmed examples" that also held refuted ones would need every reader to
-/// remember to filter them out; the one that forgot would ground an answer in a query a person already said
-/// was wrong.
+/// A rejection IS stored, as a row with <see cref="Confirmed"/> false: POWERAI.md Section 6's learning loop
+/// needs to remember a wrong answer as surely as a right one, so the next time someone asks a similar question
+/// the same broken query is not proposed again. This is why every reader that ranks or reuses examples must
+/// filter on <see cref="Confirmed"/>: a rejected row is real knowledge, but the opposite kind from a confirmed
+/// one, and the two must never be presented as interchangeable "matches". The control plane's question search
+/// keeps them in two separate result lists for exactly this reason, rather than one list a caller has to
+/// remember to filter.
 /// </para>
 /// </summary>
 public class CatalogQuestionExample
@@ -917,6 +920,21 @@ public class CatalogQuestionExample
     /// row is refreshed instead of the store filling with duplicates that would each score identically and crowd
     /// out every other match.</summary>
     public string ContentHash { get; set; } = string.Empty;
+
+    /// <summary>Whether this pair is a CONFIRMED-GOOD precedent (true, the default) or a KNOWN-BAD one a
+    /// person rejected (false). Orthogonal to <see cref="Provenance"/>: a rejection still came from a person
+    /// confirming something, just confirming that the answer was wrong, so provenance stays
+    /// <see cref="QuestionExampleProvenance.UserConfirmed"/> either way. A search must never rank or return a
+    /// <c>Confirmed = false</c> row as if it were an answer to adapt; it is a warning that this exact query was
+    /// already tried and found wrong for this exact question.</summary>
+    public bool Confirmed { get; set; } = true;
+
+    /// <summary>Why <see cref="Sql"/> is wrong, in the rejecting person's own words, when they gave one. Null
+    /// when a person rejected an answer without explaining why, which is expected and common: POWERAI.md
+    /// Section 6 treats "wrong, no reason given" as still worth remembering (the query is not proposed again
+    /// for this question) even though it cannot guide a correction the way an explained rejection can.
+    /// Meaningless when <see cref="Confirmed"/> is true and always null there.</summary>
+    public string? RejectionNote { get; set; }
 }
 
 /// <summary>The provenances a <see cref="CatalogQuestionExample"/> can carry, named once so the writer, the

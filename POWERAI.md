@@ -124,10 +124,20 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
   the similarity score used to decide how much a caller should trust a result already flagged for
   review, not whether review happens at all.
 - On confirmation (accept, correct, or reject), the question/query pair is written back into the
-  example store with its provenance (`powerbi` vs `user-confirmed`) and an updated confidence. On
-  rejection, nothing is learned as fact.
-- This makes the system self-improving under real usage without ever executing an unverified query
-  automatically.
+  example store with its provenance (`powerbi` vs `user-confirmed`) and an updated confidence. A
+  rejection IS learned as fact too, as a KNOWN-BAD row (`CatalogQuestionExample.Confirmed = false`,
+  with an optional `RejectionNote` in the rejecting person's own words when they gave one): the next
+  time a similar question comes in, that exact wrong query is not proposed again, and the reason (when
+  given) steers a fresh attempt away from the same mistake. A rejection with no reason is still stored;
+  not every user will explain why an answer was wrong, and "do not propose this again" is worth
+  remembering even without one. A known-bad row is never returned as a match a caller can adapt or run;
+  `find_similar_questions` carries it in a separate `knownBad` list precisely so it cannot be mistaken
+  for one.
+- This makes the system self-improving under real usage. Auto-running a TRUSTED match directly
+  (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
+  confirmation gate when it would not finish in that budget) is the next planned step, not yet built;
+  an UNTRUSTED or absent match is always composed as a stated best guess and always goes through
+  the existing DataOps human confirmation before anything runs, unchanged.
 
 ## 7. Storage: flat confirmed examples, not a separate AST/graph store
 
@@ -213,9 +223,13 @@ Landed since that:
     question and SQL) carries a UNIQUE index, so reaffirming an answer refreshes the one row instead
     of storing a duplicate that would score identically to its twin and crowd every other match out
     of the same search.
-  - Rejections are deliberately not stored, per Section 6: a table of "confirmed examples" that also
-    held refuted ones would need every reader to remember to filter them out, and the one that
-    forgot would ground an answer in a query a person already said was wrong.
+  - `Confirmed` (bit, default true) and `RejectionNote` (nullable, migration
+    `AddQuestionExampleConfirmedFlag`) hold the known-bad half: a rejected question/query pair is
+    stored with `Confirmed = false` and the rejecting person's own explanation when they gave one,
+    per Section 6. Orthogonal to `Provenance`, which still says a person confirmed *something*; a
+    rejection is a person confirming that the answer was WRONG. The search layer filters on
+    `Confirmed` at the query level (never in application code after the fact), returning known-bad
+    rows only in a separate `knownBad` list a caller cannot mistake for an answer.
 
 Still needed, not started:
 
