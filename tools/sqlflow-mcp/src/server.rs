@@ -1918,8 +1918,13 @@ and fix every finding first."
             your own confidence for it: a query you wrote from a 1-term match can read exactly as \
             convincingly as one from a 4-term match and still be wrong. `searchedTerms` shows what was \
             actually looked for (the question expanded into business vocabulary) and `matchedTerms` which of \
-            those each hit, so say plainly which match you built on and why it matched, and treat an \
-            untrusted match as a lead to verify rather than an answer. Running anything you compose still \
+            those each hit, so say plainly which match you built on and why it matched. A TRUSTED match \
+            needs NO further checking against the schema: do not call describe_object, search_all, or any \
+            other lookup to confirm the table it reads is real before offering it. That verification is what \
+            being trusted already means, and re-deriving it defeats the reason this store exists, which is \
+            to reuse a checked answer instead of re-checking one. Only an UNTRUSTED match (or none at all) is \
+            a lead rather than an answer: say so plainly, and only then fall back to describe_object/search_all \
+            to compose or verify something yourself. Running anything, matched or composed, still \
             goes through prepare_query/run_query and their human confirmation, unchanged. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
             a person accepted or corrected this exact answer before (and `confirmedBy` names them), which is \
