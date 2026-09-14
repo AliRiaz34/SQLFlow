@@ -325,6 +325,22 @@ pub struct ConfirmQuestionInput {
     /// On outcome="rejected", why the sql is wrong, in the rejecting person's own words. Omit when they gave
     /// no reason; a rejection with none is still worth recording. Ignored for every other outcome.
     pub reason: Option<String>,
+    /// The datasource this sql runs against: a whole ${env:...} / ${keyvault:...} reference or an @alias,
+    /// matching a datasource the catalog already declares (the same reference prepare_query takes). Pass it
+    /// when the person told you, or picked, which datasource this answer is for; omit it when none was
+    /// established. Without it a later trusted match to this example still stands as precedent but cannot be
+    /// auto-run, since nothing would tell prepare_query which connection to use. Ignored for outcome="rejected".
+    #[serde(rename = "sourceRef")]
+    pub source_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AutoRunQuestionInput {
+    /// The `exampleId` a TRUSTED find_similar_questions match carried. Only present on a user-confirmed match
+    /// that also carries a `sourceRef`; a match with no exampleId (a PowerBI-derived question) or no sourceRef
+    /// cannot be auto-run, and must go through prepare_query/run_query instead.
+    #[serde(rename = "exampleId")]
+    pub example_id: i64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1931,7 +1947,14 @@ and fix every finding first."
             goes through prepare_query/run_query and their human confirmation, unchanged. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
             a person accepted or corrected this exact answer before (and `confirmedBy` names them), which is \
-            the stronger precedent of the two at the same score. When a person tells you your answer was \
+            the stronger precedent of the two at the same score. `sourceRef` names the datasource that match's \
+            sql was confirmed against (the reference prepare_query needs); it is null on many rows today, \
+            since not every confirmed example has one yet - when it is present, prefer it over asking the \
+            person which datasource to use. A match that is `trusted` AND carries both `exampleId` and \
+            `sourceRef` can be run immediately with auto_run_trusted_match, skipping the prepare_query/ \
+            run_query approval round trip entirely, because this exact SQL was already confirmed by a person \
+            when it was stored; a trusted match missing either field still needs prepare_query/run_query. \
+            When a person tells you your answer was \
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
             finds it. An empty `matches` \
             means nothing stored matched those terms (or no questions are stored yet), not that the question \
@@ -1988,9 +2011,42 @@ and fix every finding first."
         if let Some(reason) = i.reason {
             body["reason"] = json!(reason);
         }
+        if let Some(source_ref) = i.source_ref {
+            body["sourceRef"] = json!(source_ref);
+        }
         done(
             self.cp
                 .post("/api/v1/powerai/questions/confirm", body)
+                .await
+                .map(|v| json_str(&v)),
+        )
+    }
+
+    #[tool(
+        description = "Run a TRUSTED find_similar_questions match's SQL immediately, capped small, with NO \
+            separate approval step - the whole point being that this exact SQL was already shown to and \
+            confirmed by a person when it was stored, so re-asking for the same confirmation on every later \
+            match adds friction without adding safety. Use it ONLY on a match whose `trusted` is true AND that \
+            carries both an `exampleId` and a `sourceRef`; a match missing either (no exampleId means it came \
+            from a dashboard, not a confirmed example; no sourceRef means nobody attached a datasource to it \
+            yet) cannot be auto-run - fall back to prepare_query/run_query for those, unchanged. The row cap \
+            and timeout are fixed by the deployment, not by you: read `maxRows`/`timeoutSeconds` back from the \
+            response rather than assuming defaults. Read `ran` first: true means `result` holds the answer and \
+            you can present it, prefixed as a confirmed answer (since it is one) rather than a guess. False \
+            means the query did not finish inside the budget (or failed against the live source): do NOT retry \
+            auto-run again for the same example, and do NOT tell the user it ran - instead call prepare_query \
+            with the `sql` and `sourceRef` this response still carries, so a person approves it the normal way. \
+            This surface needs the same 'operate' scope and ControlPlane:DataOps:Enabled switch prepare_query \
+            does, plus its own ControlPlane:PowerAI:Retrieval:AutoRun:Enabled switch, off by default; a 501 \
+            here means it is not turned on in this deployment."
+    )]
+    async fn auto_run_trusted_match(&self, Parameters(i): Parameters<AutoRunQuestionInput>) -> String {
+        done(
+            self.cp
+                .post(
+                    &format!("/api/v1/powerai/questions/{}/auto-run", i.example_id),
+                    json!({}),
+                )
                 .await
                 .map(|v| json_str(&v)),
         )
@@ -3111,7 +3167,9 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   matches the question against ones this estate's dashboards and confirmed answers already answer,
   expanding the wording so a paraphrase still finds them, and returns the SQL that already answers it
   plus a trustworthy score (`trusted`) rather than an LLM's own confidence. Adapting a close match beats
-  composing new SQL from scratch. Only fall through to search_all/describe_object when
+  composing new SQL from scratch. A `trusted` match carrying both `exampleId` and `sourceRef` can be run
+  right away with auto_run_trusted_match, no prepare_query/run_query approval needed for it. Only fall
+  through to search_all/describe_object when
   nothing matches, or every match is untrusted and you need to understand the schema to write a fresh
   query. describe_subscriber_report then shows which report VISUAL a matched question came from, with the
   field ROLE (axis vs. value) a flattened column list cannot express. Once a person has judged an answer

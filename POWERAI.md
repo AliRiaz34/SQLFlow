@@ -137,7 +137,10 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
   (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
   confirmation gate when it would not finish in that budget) is the next planned step, not yet built;
   an UNTRUSTED or absent match is always composed as a stated best guess and always goes through
-  the existing DataOps human confirmation before anything runs, unchanged.
+  the existing DataOps human confirmation before anything runs, unchanged. Auto-run needs to know
+  which datasource to run a trusted match's SQL against, which `CatalogQuestionExample` had no way
+  to record until `SourceRef` landed (Section 8); the auto-run step itself, and the GUI datasource
+  picker that is meant to set `SourceRef` at confirmation time, are both still open.
 
 ## 7. Storage: flat confirmed examples, not a separate AST/graph store
 
@@ -231,10 +234,26 @@ Landed since that:
     `Confirmed` at the query level (never in application code after the fact), returning known-bad
     rows only in a separate `knownBad` list a caller cannot mistake for an answer.
 
+Landed since that:
+
+- `CatalogQuestionExample.SourceRef` (nullable, migration `AddQuestionExampleSourceRef`): the
+  datasource a confirmed example's SQL runs against, in the same whole-reference shape
+  (`${env:...}`/`${keyvault:...}`/`@alias`) the DataOps query surface already requires, and gated by
+  the same known-reference check `PrepareQueryRequest.Reference` enforces (a caller cannot set it to
+  a connection the catalog has not already declared on some pipeline). `confirm_question` accepts it
+  optionally and `find_similar_questions` returns it on every match, so this is the piece Section 6's
+  auto-run step was missing: today a stored example carries no fact about which connection its SQL
+  runs against, so auto-running a trusted match had nothing to prepare the query with. Null on a
+  confirmed example stored before a datasource was chosen for it, and always null for a PowerBI-derived
+  question (which names a model entity, not a live connection). Populating it today means passing
+  `sourceRef` to `confirm_question` by hand; the intended source is a datasource-selection control in
+  the GUI's confirm/correct/reject affordance (Section 10), not built yet.
+
 Still needed, not started:
 
-- Nothing in this section's original list. The remaining work is the confirm/correct/reject FLOW
-  that calls into the store (Section 10), not further storage.
+- Nothing else in this section's original list. The remaining work is the confirm/correct/reject FLOW
+  that calls into the store (Section 10), including the GUI control that sets `SourceRef`, plus the
+  auto-run step itself, which is what actually reads it back out.
 
 ## 9. Roadmap
 

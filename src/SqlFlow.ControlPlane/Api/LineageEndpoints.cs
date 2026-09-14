@@ -237,11 +237,25 @@ public sealed record SubscriberReportPageDto(
 /// report a team runs, <c>user-confirmed</c> for one a person accepted or corrected, in which case
 /// <c>ConfirmedBy</c> names who. A confirmed match is the stronger precedent at the same score, and
 /// <c>SubscriberKey</c>/<c>VisualTitle</c> are empty/null for one, since no report stands behind it.
+/// </para>
+/// <para>
+/// <c>SourceRef</c> is the datasource <c>Sql</c> runs against, in the same reference shape
+/// <c>prepare_query</c> takes: a whole <c>${env:...}</c>/<c>${keyvault:...}</c> token or an <c>@alias</c>.
+/// Null when the confirmed example was stored without one (including every PowerBI-derived question, which
+/// names a model entity rather than a live connection). A caller auto-running a trusted match reads this to
+/// know which connection to prepare the query against; without it, the match is still precedent but nothing
+/// says where to run it.
+/// </para>
+/// <para>
+/// <c>ExampleId</c> is the <c>CatalogQuestionExample.Id</c> behind this match, present only for a
+/// user-confirmed one: pass it to <c>POST /api/v1/powerai/questions/{id}/auto-run</c> (the
+/// <c>auto_run_trusted_match</c> MCP tool) to run a TRUSTED match's SQL immediately, capped small, without a
+/// person confirming it again. Null for a PowerBI-derived question, which has no such row.
 /// </para></summary>
 public sealed record SimilarQuestionDto(
     string Question, int Score, bool Trusted, IReadOnlyList<string> MatchedTerms, string Provenance,
     string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle,
-    string? ConfirmedBy);
+    string? ConfirmedBy, string? SourceRef = null, long? ExampleId = null);
 
 /// <summary>One previously REJECTED question/query pair relevant to a typed question: real knowledge, the
 /// opposite kind from a <see cref="SimilarQuestionDto"/>. Never an answer to adapt or run; it says "this exact
@@ -1571,7 +1585,8 @@ public static class LineageEndpoints
             retrieval.RankThreshold,
             result.Matches.Select(m => new SimilarQuestionDto(
                 m.Question, m.Score, m.Score >= retrieval.RankThreshold, m.MatchedTerms, m.Provenance,
-                m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy)).ToList(),
+                m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy, m.SourceRef, m.ExampleId))
+                .ToList(),
             result.KnownBad.Select(k => new KnownBadQuestionDto(
                 k.Question, k.Sql, k.Reason, k.Score, k.MatchedTerms, k.RejectedBy, k.RejectedUtc)).ToList()));
     }

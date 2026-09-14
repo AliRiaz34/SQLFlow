@@ -69,6 +69,13 @@ services:
       ControlPlane__Cors__AllowedOrigins__0: http://localhost:8081
       # Compute belongs to the worker service; this replica is API + scheduler + sync only.
       ControlPlane__Worker__Enabled: "false"
+      # PowerAI auto-run testing: DataOps (ad-hoc queries), question retrieval, and its auto-run step.
+      # ExpandSynonyms is off because this stack has no Anthropic key configured; retrieval still runs on the
+      # typed words and their inflections without it.
+      ControlPlane__DataOps__Enabled: "true"
+      ControlPlane__PowerAI__Retrieval__Enabled: "true"
+      ControlPlane__PowerAI__Retrieval__ExpandSynonyms: "false"
+      ControlPlane__PowerAI__Retrieval__AutoRun__Enabled: "true"
       # Flows in the demo estate reference this sink.
       SQLFlowSinkConStr: "Server=mssql;Database=SqlFlowDemo;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
     ports:
@@ -91,6 +98,9 @@ services:
     environment:
       SQLFLOW_CATALOG_DB: "Server=mssql;Database=SqlFlowCatalog;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
       SQLFlowSinkConStr: "Server=mssql;Database=SqlFlowDemo;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      # Resolves ${env:SQLFLOW_DEMO_DB}, the reference samples/lineage-demo's flows declare, so a compute
+      # task (prepare_query/run_query, PowerAI auto-run) can actually reach the estate synced from it.
+      SQLFLOW_DEMO_DB: "Server=mssql;Database=SqlFlowCatalogTests;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
       # Serve a pool by listing it here; empty drains untargeted runs only.
       SQLFLOW_WORKER_POOL: ${SQLFLOW_WORKER_POOL:-}
       SQLFLOW_GIT_TOKEN: ${SQLFLOW_GIT_TOKEN:-}

@@ -935,6 +935,16 @@ public class CatalogQuestionExample
     /// for this question) even though it cannot guide a correction the way an explained rejection can.
     /// Meaningless when <see cref="Confirmed"/> is true and always null there.</summary>
     public string? RejectionNote { get; set; }
+
+    /// <summary>The datasource this example's <see cref="Sql"/> runs against, in the same whole-reference shape
+    /// the DataOps query surface requires (a <c>${env:...}</c>/<c>${keyvault:...}</c> token or an <c>@alias</c>,
+    /// never an inline connection string): see <c>ComputeTaskPayload.IsWholeReference</c> and
+    /// <c>PrepareQueryRequest.Reference</c>. Null for an example confirmed before a datasource was chosen for it
+    /// (including every row extracted from a PowerBI visual, which names a model entity rather than a live
+    /// connection). Auto-running a trusted match needs this: it is what tells the DataOps prepare step which
+    /// connection to run <see cref="Sql"/> against, the same way a person picks a datasource from the GUI before
+    /// asking a question.</summary>
+    public string? SourceRef { get; set; }
 }
 
 /// <summary>The provenances a <see cref="CatalogQuestionExample"/> can carry, named once so the writer, the

@@ -1,12 +1,15 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SqlFlow.Catalog;
+using SqlFlow.ControlPlane.Background;
 using SqlFlow.ControlPlane.Configuration;
 using SqlFlow.Core;
+using SqlFlow.Core.Compute;
 using SqlFlow.SqlServer.Query;
 
 namespace SqlFlow.ControlPlane.Api;
@@ -55,9 +58,15 @@ public static class QuestionConfirmationOutcome
 /// rejecting person's own words, when they gave one. Optional: many users will not have or give a reason, and
 /// a rejection with none is still worth storing so the same wrong query is not proposed again. Ignored for
 /// every other outcome.</param>
+/// <param name="SourceRef">The datasource <paramref name="Sql"/> runs against: a whole <c>${env:...}</c>/
+/// <c>${keyvault:...}</c> reference or an <c>@alias</c>, matching a datasource the catalog already declares
+/// (the same shape and the same known-reference gate <c>PrepareQueryRequest.Reference</c> enforces). Optional:
+/// an example is still worth keeping without one, but auto-run cannot pick a connection for it until a person
+/// (today, via the GUI's datasource picker) supplies it. Ignored on <see cref="QuestionConfirmationOutcome.Rejected"/>,
+/// which is never run against anything.</param>
 public sealed record ConfirmQuestionRequest(
     string? Question, string? Sql, string? Outcome, IReadOnlyList<string>? ObjectKeys = null,
-    int? Confidence = null, Guid? RepoId = null, string? Reason = null);
+    int? Confidence = null, Guid? RepoId = null, string? Reason = null, string? SourceRef = null);
 
 /// <summary>
 /// What the confirmation did. <see cref="Stored"/> is the fact that matters: every outcome now stores a row
@@ -73,6 +82,32 @@ public sealed record ConfirmQuestionRequest(
 /// <param name="Message">What happened, in a sentence a caller can show a person verbatim.</param>
 public sealed record ConfirmedQuestionDto(
     bool Stored, long? ExampleId, string Outcome, string? Provenance, bool Confirmed, string Message);
+
+/// <summary>
+/// What auto-running a trusted match did. <see cref="Ran"/> is the fact that matters: true means
+/// <see cref="Result"/> holds the capped rows the confirmed example's SQL actually returned; false means the
+/// budget was exceeded (or the query failed on the live source) and nothing was returned, so the caller must
+/// fall back to <c>prepare_query</c>/<c>run_query</c> and a person's confirmation, exactly as before this
+/// endpoint existed. <see cref="Sql"/> and <see cref="SourceRef"/> travel on every response, ran or not, so a
+/// caller falling back has everything <c>prepare_query</c> needs without a second lookup.
+/// </summary>
+/// <param name="Ran">Whether the query actually completed within the auto-run budget.</param>
+/// <param name="ExampleId">The confirmed example that was run.</param>
+/// <param name="Question">The question this example answers.</param>
+/// <param name="Sql">The SQL that was (or would have been) run.</param>
+/// <param name="SourceRef">The datasource it ran (or would run) against.</param>
+/// <param name="MaxRows">The row cap this run was enqueued with, always the deployment's auto-run cap.</param>
+/// <param name="TimeoutSeconds">The command timeout this run was enqueued with, always the deployment's
+/// auto-run cap.</param>
+/// <param name="TaskId">The compute task this run's result is recorded on, for the task-history view.</param>
+/// <param name="Status">The task's terminal status when it reached one within the budget; the status it was
+/// left in (and then cancelled from) when the budget was exceeded.</param>
+/// <param name="Result">The query's own result document (columns/rows/truncated), present only when
+/// <see cref="Ran"/> is true.</param>
+/// <param name="Message">What happened, in a sentence a caller can show a person verbatim.</param>
+public sealed record AutoRunResultDto(
+    bool Ran, long ExampleId, string Question, string Sql, string SourceRef, int MaxRows, int TimeoutSeconds,
+    Guid? TaskId, string? Status, JsonElement? Result, string Message);
 
 /// <summary>
 /// The write half of PowerAI retrieval: the confirmed-example store POWERAI.md Sections 6 and 8 specify, and
@@ -99,6 +134,8 @@ public static class QuestionExampleEndpoints
 
         group.MapPost("/powerai/questions/confirm", ConfirmAsync)
             .WithTags("PowerAI").WithName("ConfirmQuestionExample");
+        group.MapPost("/powerai/questions/{exampleId:long}/auto-run", AutoRunAsync)
+            .WithTags("PowerAI").WithName("AutoRunQuestionExample");
 
         return group;
     }
@@ -199,11 +236,49 @@ public static class QuestionExampleEndpoints
             }
         }
 
+        // A rejected pair is never run, so no datasource applies to it; a good example carries one only when
+        // the caller supplied it, since a confirmation made before a datasource was chosen (or one confirmed
+        // from a PowerBI-derived question, which names a model entity rather than a connection) is still worth
+        // storing without it.
+        string? sourceRef = null;
+        if (!rejected && !string.IsNullOrWhiteSpace(request.SourceRef))
+        {
+            sourceRef = request.SourceRef.Trim();
+            if (!ComputeTaskPayload.IsWholeReference(sourceRef))
+            {
+                return Problem(
+                    "The datasource must be a whole ${env:...} / ${keyvault:...} reference or an @alias. "
+                    + "Inline connection strings are not accepted here.",
+                    StatusCodes.Status400BadRequest);
+            }
+
+            // The same known-reference gate the DataOps prepare step enforces: an auto-run path must never be
+            // able to point a stored example at a connection the reviewed git estate never declared.
+            if (!sourceRef.StartsWith('@'))
+            {
+                var known = await db.Pipelines.AsNoTracking()
+                    .AnyAsync(p => p.SourceServer == sourceRef || p.TargetServer == sourceRef, ct)
+                    .ConfigureAwait(false);
+                if (!known)
+                {
+                    return Problem(
+                        $"No pipeline in the catalog declares the datasource reference '{sourceRef}'.",
+                        StatusCodes.Status404NotFound);
+                }
+            }
+        }
+
         var now = clock.GetUtcNow().UtcDateTime;
         var confirmedBy = user.FindFirst("sub")?.Value ?? user.Identity?.Name;
         var hash = QuestionExampleHash.Compute(question, sql);
 
+        // Tracked explicitly: the context defaults every query to QueryTrackingBehavior.NoTracking
+        // (Program.cs), so without this the row below comes back Detached and every mutation made to it in
+        // this branch (ConfirmedUtc, the Confirmed flip, Confidence, ObjectKeys, RepoId, SourceRef) would be
+        // silently discarded by SaveChangesAsync, with no error, no exception, and a 200 response that lied
+        // about having refreshed anything.
         var existing = await db.QuestionExamples
+            .AsTracking()
             .FirstOrDefaultAsync(e => e.ContentHash == hash, ct).ConfigureAwait(false);
         if (existing is not null)
         {
@@ -223,6 +298,11 @@ public static class QuestionExampleEndpoints
                 if (request.ObjectKeys is { Count: > 0 })
                 {
                     existing.ObjectKeys = JoinObjectKeys(request.ObjectKeys);
+                }
+
+                if (sourceRef is not null)
+                {
+                    existing.SourceRef = sourceRef;
                 }
             }
 
@@ -251,6 +331,7 @@ public static class QuestionExampleEndpoints
             ContentHash = hash,
             Confirmed = !rejected,
             RejectionNote = reason,
+            SourceRef = sourceRef,
         };
 
         db.QuestionExamples.Add(example);
@@ -285,6 +366,157 @@ public static class QuestionExampleEndpoints
         return TypedResults.Ok(new ConfirmedQuestionDto(
             Stored: true, example.Id, outcome, example.Provenance, example.Confirmed, message));
     }
+
+    /// <summary>
+    /// Runs a TRUSTED confirmed example's SQL directly, capped small (POWERAI.md Section 6): no prepare/approve
+    /// round trip, because the SQL was already shown to and confirmed by a person once, when it was stored. The
+    /// row cap and command timeout are always the deployment's own auto-run limits, never a caller's, since the
+    /// whole safety argument for skipping a fresh confirmation is that nobody watching THIS call chose those
+    /// numbers. The endpoint then waits, capped at that same timeout plus a small fixed claim-latency allowance,
+    /// for the task to finish: inside the budget, the capped rows come back inline; past it, the task is
+    /// cancelled and the caller is told to fall back to prepare_query/run_query, exactly as if auto-run did not
+    /// exist. This is the only DataOps entry point that runs a statement with no token a person approved in the
+    /// moment; everything else it touches (the read-only parse, the enqueue, the executor) is the same shared
+    /// path prepare/run uses, so it can never reach a connection or a statement shape those do not already allow.
+    /// </summary>
+    private static async Task<Results<Ok<AutoRunResultDto>, ProblemHttpResult>> AutoRunAsync(
+        long exampleId, CatalogDbContext db, IRunDispatcher dispatcher, IOptions<ControlPlaneOptions> options,
+        TimeProvider clock, ClaimsPrincipal user, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!options.Value.DataOps.Enabled)
+        {
+            return Problem(
+                "Auto-run executes a query, which is part of the data-operations surface, not enabled in this "
+                + "deployment. Set ControlPlane__DataOps__Enabled=true to turn it on.",
+                StatusCodes.Status403Forbidden, "Not enabled");
+        }
+
+        var retrieval = options.Value.PowerAI.Retrieval;
+        if (!retrieval.Enabled || !retrieval.AutoRun.Enabled)
+        {
+            return Problem(
+                "Auto-run is not enabled on this deployment "
+                + "(ControlPlane:PowerAI:Retrieval:AutoRun:Enabled). Use prepare_query/run_query instead.",
+                StatusCodes.Status501NotImplemented, "Not enabled");
+        }
+
+        var example = await db.QuestionExamples.AsNoTracking()
+            .FirstOrDefaultAsync(e => e.Id == exampleId, ct).ConfigureAwait(false);
+        if (example is null)
+        {
+            return Problem($"No confirmed example '{exampleId}' exists.", StatusCodes.Status404NotFound);
+        }
+
+        if (!example.Confirmed)
+        {
+            return Problem(
+                "That example is a known-bad row, not a confirmed answer: it was recorded so this exact query "
+                + "is never proposed again, and auto-run must never run it.",
+                StatusCodes.Status409Conflict, "Known-bad example");
+        }
+
+        if (string.IsNullOrWhiteSpace(example.SourceRef))
+        {
+            return Problem(
+                "This confirmed example has no datasource attached (SourceRef is empty), so there is nothing "
+                + "to run its SQL against. Confirm it again with a sourceRef, or use prepare_query/run_query "
+                + "with the datasource named by hand.",
+                StatusCodes.Status409Conflict, "No datasource");
+        }
+
+        string sql;
+        try
+        {
+            // Re-parsed rather than trusted from storage: a defence-in-depth re-check of the same guard
+            // confirm_question already ran, so a row edited directly in the database (never through the
+            // confirm endpoint) still cannot reach the executor as anything but a proven single SELECT.
+            sql = ReadOnlyQueryGuard.Validate(example.Sql);
+        }
+        catch (SqlFlowException ex)
+        {
+            return Problem(ex.Message, StatusCodes.Status400BadRequest, "Query refused");
+        }
+
+        var autoRun = retrieval.AutoRun;
+        var payload = new ComputeTaskPayload
+        {
+            Operation = ComputeOperations.RunQuery,
+            SourceRef = example.SourceRef,
+            Sql = sql,
+            MaxRows = autoRun.MaxRows,
+            TimeoutSeconds = autoRun.TimeoutSeconds,
+        };
+
+        try
+        {
+            payload.Validate();
+        }
+        catch (SqlFlowException ex)
+        {
+            return Problem(ex.Message, StatusCodes.Status400BadRequest, "Invalid compute task");
+        }
+
+        var taskId = await dispatcher.EnqueueComputeTaskAsync(
+            db,
+            new ComputeTaskEnqueueRequest(
+                payload.Operation, payload.SourceRef, payload.ProviderKind?.ToString(), payload.ToJson(),
+                TargetPool: null, RequestedBy: user.FindFirst("sub")?.Value ?? user.Identity?.Name),
+            ct).ConfigureAwait(false);
+
+        var budget = TimeSpan.FromSeconds(autoRun.TimeoutSeconds) + AutoRunOptions.ClaimLatencyAllowance;
+        var deadline = clock.GetUtcNow() + budget;
+
+        CatalogComputeTask? task;
+        while (true)
+        {
+            task = await db.ComputeTasks.AsNoTracking()
+                .FirstOrDefaultAsync(t => t.TaskId == taskId, ct).ConfigureAwait(false);
+            if (task is null || RunStatuses.IsTerminal(task.Status) || clock.GetUtcNow() >= deadline)
+            {
+                break;
+            }
+
+            await Task.Delay(AutoRunPollInterval, ct).ConfigureAwait(false);
+        }
+
+        if (task is not null && RunStatuses.IsTerminal(task.Status))
+        {
+            if (task.Status == RunStatuses.Succeeded)
+            {
+                var result = task.ResultJson is null ? (JsonElement?)null : JsonSerializer.Deserialize<JsonElement>(task.ResultJson);
+                return TypedResults.Ok(new AutoRunResultDto(
+                    Ran: true, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+                    autoRun.TimeoutSeconds, taskId, task.Status, result,
+                    "Ran the trusted match directly, capped to "
+                    + $"{autoRun.MaxRows} rows and a {autoRun.TimeoutSeconds}s timeout, with no separate "
+                    + "confirmation: this SQL was already confirmed by a person when it was stored."));
+            }
+
+            return TypedResults.Ok(new AutoRunResultDto(
+                Ran: false, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+                autoRun.TimeoutSeconds, taskId, task.Status, Result: null,
+                $"Auto-run did not produce a result: the task ended '{task.Status}'"
+                + (string.IsNullOrWhiteSpace(task.Error) ? "." : $" ({task.Error}).")
+                + " Fall back to prepare_query/run_query so a person can see and decide on this query, since " +
+                "the source may no longer match what was confirmed."));
+        }
+
+        // Still queued or running past the budget: cancelled rather than left to finish unattended, since a
+        // query this slow is no longer the "trivial, already-proven lookup" auto-run exists for, and getting a
+        // human decision on it (via prepare_query/run_query) is the right outcome, not a longer wait here.
+        await dispatcher.CancelComputeTaskAsync(db, taskId, ct).ConfigureAwait(false);
+        return TypedResults.Ok(new AutoRunResultDto(
+            Ran: false, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+            autoRun.TimeoutSeconds, taskId, "cancelled", Result: null,
+            $"Auto-run did not finish within its {budget.TotalSeconds:0}s budget and was cancelled. Fall back "
+            + "to prepare_query/run_query, which has no such budget, so a person can approve this query "
+            + "running for as long as it needs."));
+    }
+
+    /// <summary>How often auto-run polls the compute task it just enqueued, matching the task-status endpoint's
+    /// own poll interval.</summary>
+    private static readonly TimeSpan AutoRunPollInterval = TimeSpan.FromMilliseconds(250);
 
     /// <summary>The longest rejection reason stored, matching the column's own length.</summary>
     private const int MaxReasonLength = 2000;

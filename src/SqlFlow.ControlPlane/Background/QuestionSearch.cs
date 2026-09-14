@@ -27,6 +27,15 @@ namespace SqlFlow.ControlPlane.Background;
 /// example, which has no visual behind it.</param>
 /// <param name="ConfirmedBy">Who confirmed the example, for a match out of the confirmed-example store. Null
 /// for a question derived from a report visual, which no person has individually stood behind.</param>
+/// <param name="SourceRef">The datasource <paramref name="Sql"/> runs against, in the whole-reference shape
+/// the DataOps query surface requires (a <c>${env:...}</c>/<c>${keyvault:...}</c> token or an <c>@alias</c>).
+/// Null when the confirmed example was stored without one, and always null for a PowerBI-derived question,
+/// which names a model entity rather than a live connection. This is what an auto-run caller reads to know
+/// which connection to prepare <paramref name="Sql"/> against; without it the match still stands as precedent
+/// but cannot be run without a person choosing a datasource first.</param>
+/// <param name="ExampleId">The <c>CatalogQuestionExample.Id</c> behind this match, for an auto-run caller to
+/// name (<c>POST /api/v1/powerai/questions/{id}/auto-run</c>). Null for a PowerBI-derived question, which has
+/// no confirmed-example row and so nothing an auto-run endpoint could address.</param>
 public sealed record QuestionMatch(
     string Question,
     string Sql,
@@ -36,7 +45,9 @@ public sealed record QuestionMatch(
     IReadOnlyList<string> MatchedTerms,
     string SubscriberKey,
     string? VisualTitle,
-    string? ConfirmedBy = null);
+    string? ConfirmedBy = null,
+    string? SourceRef = null,
+    long? ExampleId = null);
 
 /// <summary>
 /// One previously REJECTED question/query pair relevant to a newly typed question: real knowledge, the
@@ -258,10 +269,11 @@ public static class QuestionSearch
 
         var examples = await db.QuestionExamples.AsNoTracking()
             .Where(e => ids.Contains(e.Id))
-            .Select(e => new { e.Id, e.Sql, e.ObjectKeys, e.ConfirmedBy })
+            .Select(e => new { e.Id, e.Sql, e.ObjectKeys, e.ConfirmedBy, e.SourceRef })
             .ToListAsync(ct).ConfigureAwait(false);
 
-        return examples.ToDictionary(e => e.Id, e => new ResolvedExample(e.Sql, e.ObjectKeys, e.ConfirmedBy));
+        return examples.ToDictionary(
+            e => e.Id, e => new ResolvedExample(e.Sql, e.ObjectKeys, e.ConfirmedBy, e.SourceRef));
     }
 
     /// <summary>Builds the match for a report-derived question, from the visual and the query behind it.</summary>
@@ -301,7 +313,9 @@ public static class QuestionSearch
             matched,
             string.Empty,
             null,
-            example?.ConfirmedBy);
+            example?.ConfirmedBy,
+            example?.SourceRef,
+            row.ExampleId);
     }
 
     /// <summary>
@@ -531,7 +545,7 @@ public static class QuestionSearch
 
     private sealed record ResolvedQuery(string Sql, string ObjectKeys, string SubscriberKey);
 
-    private sealed record ResolvedExample(string Sql, string ObjectKeys, string? ConfirmedBy);
+    private sealed record ResolvedExample(string Sql, string ObjectKeys, string? ConfirmedBy, string? SourceRef);
 
     /// <summary>The two lookups a report-derived match is built from, carried together so the resolution pass
     /// returns one value rather than a tuple of dictionaries.</summary>
