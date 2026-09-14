@@ -86,3 +86,6 @@ samples/powerbi/*.pbix
 
 ## Manual PowerAI test estate (throwaway, not part of the product)
 .powerai-manual-test/
+
+## Local MCP client registration: points at a developer's own control plane and can carry a live bearer token
+.mcp.json

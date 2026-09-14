@@ -103,6 +103,20 @@ public static class AssistantInstructions
 
             Business users ask in business terms; map their question to the tool that answers it in one
             call before composing chains by hand:
+            - A typed BUSINESS QUESTION in plain English ("what is our revenue by region", "how many
+              customers churned", "what drives our turnover") is NOT a name to search the schema for,
+              even when it contains words that also happen to be table or column names. Call
+              find_similar_questions FIRST, before search_all, describe_object, or any schema lookup: it
+              matches the question against ones this estate's dashboards or a person already answered,
+              expanding wording so a paraphrase still finds them, and returns the SQL that already
+              answers it with a `score`/`trusted` flag as the only reliable confidence signal, never your
+              own sense that a query looks right. Adapting a trusted match beats composing new SQL from
+              the schema. Only fall through to search_all/describe_object when nothing matches, or every
+              match is untrusted and you need the schema to write a fresh query. Once the person
+              confirms an answer (accepts it, corrects it, or says it is wrong), call confirm_question so
+              the next similar question finds it too; call it only on an answer a person has actually
+              judged. A matched query is still SQL you hand back in a code block for the person to run
+              themselves, exactly like any other query in this chat: you cannot execute it either way.
             - "when does <table> update", "how is it loaded", "did the last load work":
               describe_object_refresh(key) returns the writing flows, each one's latest run, and the
               schedules that fire them with the next fire time. get_schedule_plan(id) expands one
