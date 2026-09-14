@@ -231,10 +231,17 @@ public sealed record SubscriberReportPageDto(
 /// many searched terms it matched (unbounded, relative to the other matches in the same search) and is the
 /// trustworthy confidence signal; <c>Trusted</c> reports whether it cleared the deployment's configured
 /// threshold, so a caller does not have to know what that threshold is to act on it. <c>MatchedTerms</c> says
-/// WHICH terms hit, so an answer can explain why this question was considered relevant.</summary>
+/// WHICH terms hit, so an answer can explain why this question was considered relevant.
+/// <para>
+/// <c>Provenance</c> says which half of the store it came from: <c>powerbi</c> for a question derived from a
+/// report a team runs, <c>user-confirmed</c> for one a person accepted or corrected, in which case
+/// <c>ConfirmedBy</c> names who. A confirmed match is the stronger precedent at the same score, and
+/// <c>SubscriberKey</c>/<c>VisualTitle</c> are empty/null for one, since no report stands behind it.
+/// </para></summary>
 public sealed record SimilarQuestionDto(
     string Question, int Score, bool Trusted, IReadOnlyList<string> MatchedTerms, string Provenance,
-    string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle);
+    string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle,
+    string? ConfirmedBy);
 
 /// <summary>The matches for a question, with the terms actually searched for (the LLM's expansion of the typed
 /// question, or its own words when expansion is off or unavailable) and the score threshold they were judged
@@ -1553,7 +1560,7 @@ public static class LineageEndpoints
             retrieval.RankThreshold,
             result.Matches.Select(m => new SimilarQuestionDto(
                 m.Question, m.Score, m.Score >= retrieval.RankThreshold, m.MatchedTerms, m.Provenance,
-                m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle)).ToList()));
+                m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy)).ToList()));
     }
 
     /// <summary>The most matches one search will return however many a caller asks for. Past a handful, extra

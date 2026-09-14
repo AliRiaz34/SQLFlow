@@ -13,15 +13,20 @@ namespace SqlFlow.ControlPlane.Background;
 /// <param name="Question">The stored question text.</param>
 /// <param name="Sql">The query that answers it, empty when the visual's query could not be resolved.</param>
 /// <param name="ObjectKeys">The warehouse objects <paramref name="Sql"/> reads.</param>
-/// <param name="Provenance">Where the example came from: <c>powerbi</c> for a question derived from an
-/// extracted report visual. The user-confirmed half of the store does not exist yet, so this is how a caller
-/// tells them apart once it does, without the shape changing underneath it.</param>
+/// <param name="Provenance">Where the example came from: <see cref="QuestionExampleProvenance.PowerBi"/> for a
+/// question derived from an extracted report visual, <see cref="QuestionExampleProvenance.UserConfirmed"/> for
+/// one a person accepted or corrected. The difference is what lets a caller weigh "a dashboard asks this"
+/// against "a person checked this" rather than treating every match as equally settled.</param>
 /// <param name="Score">How many of the searched terms this question matched. Unbounded and relative to the
 /// other matches in the same search rather than a 0-1 similarity.</param>
 /// <param name="MatchedTerms">The searched terms this question actually contains, so a caller can show WHY it
 /// matched rather than only how strongly.</param>
-/// <param name="SubscriberKey">The report (subscriber) this question came from.</param>
-/// <param name="VisualTitle">The title of the visual that answers it, when it has one.</param>
+/// <param name="SubscriberKey">The report (subscriber) this question came from, empty for a confirmed example
+/// that came from a person rather than from a report.</param>
+/// <param name="VisualTitle">The title of the visual that answers it, when it has one. Null for a confirmed
+/// example, which has no visual behind it.</param>
+/// <param name="ConfirmedBy">Who confirmed the example, for a match out of the confirmed-example store. Null
+/// for a question derived from a report visual, which no person has individually stood behind.</param>
 public sealed record QuestionMatch(
     string Question,
     string Sql,
@@ -30,7 +35,8 @@ public sealed record QuestionMatch(
     int Score,
     IReadOnlyList<string> MatchedTerms,
     string SubscriberKey,
-    string? VisualTitle);
+    string? VisualTitle,
+    string? ConfirmedBy = null);
 
 /// <summary>The outcome of one search: the terms actually searched for (the expansion, or the question's own
 /// words when expansion is off or unavailable) and the matches they found. The terms travel with the result so
@@ -49,6 +55,14 @@ public sealed record QuestionSearchResult(
 /// half (inflections such as "sell"/"selling"/"sold"), and the expansion supplies the business-vocabulary half
 /// it cannot know.
 /// <para>
+/// TWO stores are searched as one: the questions derived from extracted PowerBI visuals
+/// (<see cref="CatalogSubscriberReportVisualQuestion"/>) and the confirmed examples a person accepted or
+/// corrected (<see cref="CatalogQuestionExample"/>). They are ranked together by the same scoring, so the
+/// learning loop's output competes with the dashboards' on equal terms and a caller gets one ordered list
+/// rather than having to merge two. Which store a match came from survives as its
+/// <see cref="QuestionMatch.Provenance"/>.
+/// </para>
+/// <para>
 /// The terms reach SQL Server through <see cref="EF.Functions"/>, which parameterizes them, rather than being
 /// pasted into a predicate string: a model-authored fragment interpolated into <c>CONTAINS</c> syntax would be
 /// both a correctness hazard (an apostrophe in "customer's" breaks the predicate) and injection-shaped.
@@ -56,8 +70,10 @@ public sealed record QuestionSearchResult(
 /// </summary>
 public static class QuestionSearch
 {
-    /// <summary>The provenance of a question derived from an extracted PowerBI report visual.</summary>
-    public const string PowerBiProvenance = "powerbi";
+    /// <summary>The provenance of a question derived from an extracted PowerBI report visual. An alias for
+    /// <see cref="QuestionExampleProvenance.PowerBi"/> so the catalog and the search cannot spell it
+    /// differently.</summary>
+    public const string PowerBiProvenance = QuestionExampleProvenance.PowerBi;
 
     /// <summary>
     /// Returns the <paramref name="topK"/> stored questions best matching <paramref name="question"/>, best
@@ -123,12 +139,17 @@ public static class QuestionSearch
         // from "sell", a literal-only check would score that row 0 and discard the very row the index just
         // found. Rows that still score nothing are dropped, which only happens on the LIKE path, where a
         // substring match can fall inside a longer word ("sale" within "wholesale").
+        //
+        // A confirmed example outranks a report-derived question on an equal score: both are real precedent,
+        // but one of them a person actually checked. Shorter questions break the remaining ties, as the more
+        // specific phrasing at the same score.
         var ranked = candidates
-            .Select(c => (c.Question, c.VisualKey, Matched: terms.Where(t => MatchesTerm(c.Question, t)).ToList()))
-            .Select(c => (c.Question, c.VisualKey, c.Matched, Score: c.Matched.Count))
+            .Select(c => (Row: c, Matched: terms.Where(t => MatchesTerm(c.Question, t)).ToList()))
+            .Select(c => (c.Row, c.Matched, Score: c.Matched.Count))
             .Where(c => c.Score > 0)
             .OrderByDescending(c => c.Score)
-            .ThenBy(c => c.Question.Length)
+            .ThenByDescending(c => c.Row.ExampleId > 0)
+            .ThenBy(c => c.Row.Question.Length)
             .Take(topK)
             .ToList();
         if (ranked.Count == 0)
@@ -136,130 +157,257 @@ public static class QuestionSearch
             return new QuestionSearchResult(terms, []);
         }
 
-        var visualKeys = ranked.Select(r => r.VisualKey).Distinct().ToList();
-        var visuals = await db.SubscriberReportVisuals.AsNoTracking()
-            .Where(v => visualKeys.Contains(v.VisualKey))
-            .Select(v => new { v.VisualKey, v.QueryName, v.Title })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var visualByKey = visuals.ToDictionary(v => v.VisualKey, StringComparer.Ordinal);
-
-        // A visual's QueryName names the CatalogSubscriberQuery it was synthesized as, which is where the
-        // rendered SQL and the objects it reads actually live.
-        var queryNames = visuals.Select(v => v.QueryName).Distinct().ToList();
-        var queries = await db.SubscriberQueries.AsNoTracking()
-            .Where(q => queryNames.Contains(q.Name))
-            .Select(q => new { q.Name, q.Sql, q.ObjectKeys, q.SubscriberKey })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var queryByName = queries
-            .GroupBy(q => q.Name, StringComparer.Ordinal)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        var visuals = await ResolveVisualsAsync(db, ranked.Select(r => r.Row), ct).ConfigureAwait(false);
+        var examples = await ResolveExamplesAsync(db, ranked.Select(r => r.Row), ct).ConfigureAwait(false);
 
         var matches = new List<QuestionMatch>(ranked.Count);
-        foreach (var (text, visualKey, matched, score) in ranked)
+        foreach (var (row, matched, score) in ranked)
         {
-            visualByKey.TryGetValue(visualKey, out var visual);
-            var query = visual is not null && queryByName.TryGetValue(visual.QueryName, out var q) ? q : null;
-
-            matches.Add(new QuestionMatch(
-                text,
-                query?.Sql ?? string.Empty,
-                SplitObjectKeys(query?.ObjectKeys),
-                PowerBiProvenance,
-                score,
-                matched,
-                query?.SubscriberKey ?? SubscriberKeyFromVisualKey(visualKey),
-                visual?.Title));
+            matches.Add(row.ExampleId > 0
+                ? ExampleMatch(row, matched, score, examples)
+                : VisualMatch(row, matched, score, visuals));
         }
 
         return new QuestionSearchResult(terms, matches);
     }
 
     /// <summary>
-    /// Loads the stored questions containing any of <paramref name="terms"/>, using the full-text index when
-    /// the instance has one and falling back to a plain <c>LIKE</c> scan when it does not. The fallback exists
-    /// because full-text is an installable SQL Server feature the catalog cannot assume (its own migration
-    /// skips the index where it is absent), and a deployment without it should get weaker matching rather than
-    /// an error naming a feature its DBA may not be willing to install.
+    /// Resolves the winning report-derived rows to the SQL that answers them. A visual's <c>QueryName</c> names
+    /// the <see cref="CatalogSubscriberQuery"/> it was synthesized as, which is where the rendered SQL and the
+    /// objects it reads actually live. Run only over the winners, so the ranking pass stays a text scan and
+    /// only a handful of rows cost a lookup.
+    /// </summary>
+    private static async Task<VisualLookup> ResolveVisualsAsync(
+        CatalogDbContext db, IEnumerable<QuestionRow> rows, CancellationToken ct)
+    {
+        var visualKeys = rows
+            .Where(r => r.ExampleId == 0 && r.VisualKey is not null)
+            .Select(r => r.VisualKey!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (visualKeys.Count == 0)
+        {
+            return new VisualLookup(
+                new Dictionary<string, ResolvedVisual>(StringComparer.Ordinal),
+                new Dictionary<string, ResolvedQuery>(StringComparer.Ordinal));
+        }
+
+        var visuals = await db.SubscriberReportVisuals.AsNoTracking()
+            .Where(v => visualKeys.Contains(v.VisualKey))
+            .Select(v => new { v.VisualKey, v.QueryName, v.Title })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        var queryNames = visuals.Select(v => v.QueryName).Distinct().ToList();
+        var queries = await db.SubscriberQueries.AsNoTracking()
+            .Where(q => queryNames.Contains(q.Name))
+            .Select(q => new { q.Name, q.Sql, q.ObjectKeys, q.SubscriberKey })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        return new VisualLookup(
+            visuals.ToDictionary(
+                v => v.VisualKey,
+                v => new ResolvedVisual(v.QueryName, v.Title),
+                StringComparer.Ordinal),
+            queries
+                .GroupBy(q => q.Name, StringComparer.Ordinal)
+                .ToDictionary(
+                    g => g.Key,
+                    g => new ResolvedQuery(g.First().Sql, g.First().ObjectKeys, g.First().SubscriberKey),
+                    StringComparer.Ordinal));
+    }
+
+    /// <summary>Loads the winning confirmed examples' own SQL, objects, and confirming user. An example carries
+    /// everything that answers it on its own row, so this is one lookup by id with nothing to join.</summary>
+    private static async Task<Dictionary<long, ResolvedExample>> ResolveExamplesAsync(
+        CatalogDbContext db, IEnumerable<QuestionRow> rows, CancellationToken ct)
+    {
+        var ids = rows.Where(r => r.ExampleId > 0).Select(r => r.ExampleId).Distinct().ToList();
+        if (ids.Count == 0)
+        {
+            return new Dictionary<long, ResolvedExample>();
+        }
+
+        var examples = await db.QuestionExamples.AsNoTracking()
+            .Where(e => ids.Contains(e.Id))
+            .Select(e => new { e.Id, e.Sql, e.ObjectKeys, e.ConfirmedBy })
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        return examples.ToDictionary(e => e.Id, e => new ResolvedExample(e.Sql, e.ObjectKeys, e.ConfirmedBy));
+    }
+
+    /// <summary>Builds the match for a report-derived question, from the visual and the query behind it.</summary>
+    private static QuestionMatch VisualMatch(
+        QuestionRow row, IReadOnlyList<string> matched, int score, VisualLookup lookup)
+    {
+        var visualKey = row.VisualKey ?? string.Empty;
+        lookup.Visuals.TryGetValue(visualKey, out var visual);
+        var query = visual is not null && lookup.Queries.TryGetValue(visual.QueryName, out var found)
+            ? found
+            : null;
+
+        return new QuestionMatch(
+            row.Question,
+            query?.Sql ?? string.Empty,
+            SplitObjectKeys(query?.ObjectKeys),
+            row.Provenance,
+            score,
+            matched,
+            query?.SubscriberKey ?? SubscriberKeyFromVisualKey(visualKey),
+            visual?.Title);
+    }
+
+    /// <summary>Builds the match for a confirmed example, whose answer lives on its own row.</summary>
+    private static QuestionMatch ExampleMatch(
+        QuestionRow row, IReadOnlyList<string> matched, int score,
+        IReadOnlyDictionary<long, ResolvedExample> lookup)
+    {
+        lookup.TryGetValue(row.ExampleId, out var example);
+
+        return new QuestionMatch(
+            row.Question,
+            example?.Sql ?? string.Empty,
+            SplitObjectKeys(example?.ObjectKeys),
+            row.Provenance,
+            score,
+            matched,
+            string.Empty,
+            null,
+            example?.ConfirmedBy);
+    }
+
+    /// <summary>
+    /// Loads the stored questions containing any of <paramref name="terms"/> from BOTH stores, using each
+    /// table's full-text index when the instance has one and falling back to a plain <c>LIKE</c> scan when it
+    /// does not. The fallback exists because full-text is an installable SQL Server feature the catalog cannot
+    /// assume (its own migrations skip the indexes where it is absent), and a deployment without it should get
+    /// weaker matching rather than an error naming a feature its DBA may not be willing to install.
     /// </summary>
     private static async Task<List<QuestionRow>> MatchingQuestionsAsync(
         CatalogDbContext db, IReadOnlyList<string> terms, Guid? repoId, CancellationToken ct)
     {
-        var scoped = db.SubscriberReportVisualQuestions.AsNoTracking()
+        var visualQuestions = db.SubscriberReportVisualQuestions.AsNoTracking()
             .Where(q => repoId == null || q.RepoId == repoId);
 
-        if (await HasFullTextIndexAsync(db, ct).ConfigureAwait(false))
+        // A confirmed example attributed to NO repo stays in a repo-scoped search on purpose: a person's
+        // confirmation is a fact about the estate rather than about one repository's contents, so scoping the
+        // search to a repo must not hide the answers this estate has already checked.
+        var examples = db.QuestionExamples.AsNoTracking()
+            .Where(e => repoId == null || e.RepoId == repoId || e.RepoId == null);
+
+        var rows = new List<QuestionRow>();
+
+        if (await HasFullTextIndexAsync(db, VisualQuestionTable, ct).ConfigureAwait(false))
         {
             // FORMSOF(INFLECTIONAL, ...) is what actually buys stemming: a plain CONTAINS matches the word
             // literally, so it would find neither "sells" from "sell" nor "category" from "categories". The
             // whole condition is still passed as a PARAMETER by EF.Functions.Contains, so a term carrying an
             // apostrophe or a full-text operator is matched as text rather than changing the predicate.
-            var predicate = terms.Aggregate(
-                (System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>>?)null,
-                (acc, term) =>
+            rows.AddRange(await visualQuestions
+                .Where(AnyTerm<CatalogSubscriberReportVisualQuestion>(terms, term =>
                 {
                     var condition = InflectionalCondition(term);
-                    System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>> one =
-                        q => EF.Functions.Contains(q.Question, condition);
-                    return acc is null ? one : Or(acc, one);
-                })!;
-
-            return await scoped.Where(predicate)
-                .Select(q => new QuestionRow(q.Question, q.VisualKey))
+                    return q => EF.Functions.Contains(q.Question, condition);
+                }))
+                .Select(q => new QuestionRow(q.Question, PowerBiProvenance, q.VisualKey, 0L))
                 .Take(MaxCandidates)
-                .ToListAsync(ct).ConfigureAwait(false);
+                .ToListAsync(ct).ConfigureAwait(false));
+        }
+        else
+        {
+            rows.AddRange(await visualQuestions
+                .Where(AnyTerm<CatalogSubscriberReportVisualQuestion>(
+                    terms, term => q => q.Question.Contains(term)))
+                .Select(q => new QuestionRow(q.Question, PowerBiProvenance, q.VisualKey, 0L))
+                .Take(MaxCandidates)
+                .ToListAsync(ct).ConfigureAwait(false));
         }
 
-        var like = terms.Aggregate(
-            (System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>>?)null,
-            (acc, term) =>
-            {
-                System.Linq.Expressions.Expression<Func<CatalogSubscriberReportVisualQuestion, bool>> one =
-                    q => q.Question.Contains(term);
-                return acc is null ? one : Or(acc, one);
-            })!;
+        // Probed per TABLE rather than once for the deployment: the two full-text indexes ship in separate
+        // migrations, so an estate migrated while the Full-Text feature was absent and upgraded afterwards can
+        // genuinely carry one index and not the other. A single probe for both would then either skip every
+        // confirmed example or aim CONTAINS at a table that has no index to serve it.
+        if (await HasFullTextIndexAsync(db, QuestionExampleTable, ct).ConfigureAwait(false))
+        {
+            rows.AddRange(await examples
+                .Where(AnyTerm<CatalogQuestionExample>(terms, term =>
+                {
+                    var condition = InflectionalCondition(term);
+                    return e => EF.Functions.Contains(e.Question, condition);
+                }))
+                .Select(e => new QuestionRow(e.Question, e.Provenance, null, e.Id))
+                .Take(MaxCandidates)
+                .ToListAsync(ct).ConfigureAwait(false));
+        }
+        else
+        {
+            rows.AddRange(await examples
+                .Where(AnyTerm<CatalogQuestionExample>(terms, term => e => e.Question.Contains(term)))
+                .Select(e => new QuestionRow(e.Question, e.Provenance, null, e.Id))
+                .Take(MaxCandidates)
+                .ToListAsync(ct).ConfigureAwait(false));
+        }
 
-        return await scoped.Where(like)
-            .Select(q => new QuestionRow(q.Question, q.VisualKey))
-            .Take(MaxCandidates)
-            .ToListAsync(ct).ConfigureAwait(false);
+        return rows;
     }
 
-    /// <summary>Whether the stored questions carry a full-text index on this instance. Cached per process: it
-    /// is a deployment property that changes only when the catalog is migrated or the feature is installed,
-    /// both of which restart or redeploy the control plane.</summary>
-    private static async Task<bool> HasFullTextIndexAsync(CatalogDbContext db, CancellationToken ct)
+    /// <summary>Folds one predicate per term into a single OR-ed predicate, so a row matching any term is a
+    /// candidate and a per-term factory is all each store has to supply.</summary>
+    private static System.Linq.Expressions.Expression<Func<T, bool>> AnyTerm<T>(
+        IReadOnlyList<string> terms,
+        Func<string, System.Linq.Expressions.Expression<Func<T, bool>>> forTerm)
+        => terms.Aggregate(
+            (System.Linq.Expressions.Expression<Func<T, bool>>?)null,
+            (acc, term) => acc is null ? forTerm(term) : Or(acc, forTerm(term)))!;
+
+    /// <summary>Whether <paramref name="table"/> carries a full-text index on this instance. Cached per table
+    /// per process: it is a deployment property that changes only when the catalog is migrated or the feature
+    /// is installed, both of which restart or redeploy the control plane.</summary>
+    private static async Task<bool> HasFullTextIndexAsync(
+        CatalogDbContext db, string table, CancellationToken ct)
     {
-        if (_hasFullText is { } known)
+        if (FullTextProbes.TryGetValue(table, out var known))
         {
             return known;
         }
 
+        bool present;
         try
         {
-            var present = await db.Database
+            // The qualified name is a PARAMETER to OBJECT_ID, not string-concatenated into the statement, even
+            // though both table names are compile-time constants here.
+            var qualified = $"catalog.{table}";
+            var result = await db.Database
                 .SqlQuery<int>($@"
                     SELECT CASE WHEN SERVERPROPERTY('IsFullTextInstalled') = 1
                                  AND EXISTS (SELECT 1 FROM sys.fulltext_indexes
-                                             WHERE object_id = OBJECT_ID(N'catalog.SubscriberReportVisualQuestion'))
+                                             WHERE object_id = OBJECT_ID({qualified}))
                                 THEN 1 ELSE 0 END AS [Value]")
                 .SingleAsync(ct).ConfigureAwait(false);
-            _hasFullText = present == 1;
+            present = result == 1;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // A probe that cannot run (a restricted principal, an unusual provider) must not fail the search:
             // assume no index and use the LIKE path, which works on any instance.
-            _hasFullText = false;
+            present = false;
         }
 
-        return _hasFullText.Value;
+        FullTextProbes[table] = present;
+        return present;
     }
 
-    private static bool? _hasFullText;
+    /// <summary>The questions a sync derived from PowerBI report visuals.</summary>
+    private const string VisualQuestionTable = "SubscriberReportVisualQuestion";
 
-    /// <summary>Resets the cached full-text probe. For tests, which migrate a catalog mid-process and so can
-    /// see the index appear after a probe has already run.</summary>
-    internal static void ResetFullTextProbe() => _hasFullText = null;
+    /// <summary>The confirmed-example store the learning loop writes into.</summary>
+    private const string QuestionExampleTable = "QuestionExample";
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> FullTextProbes =
+        new(StringComparer.Ordinal);
+
+    /// <summary>Resets the cached full-text probes. For tests, which migrate a catalog mid-process and so can
+    /// see an index appear after a probe has already run.</summary>
+    internal static void ResetFullTextProbe() => FullTextProbes.Clear();
 
     /// <summary>
     /// Wraps one term as an inflectional full-text condition, so the index matches its grammatical forms
@@ -272,11 +420,28 @@ public static class QuestionSearch
     private static string InflectionalCondition(string term)
         => $"FORMSOF(INFLECTIONAL, \"{term.Replace("\"", "\"\"", StringComparison.Ordinal)}\")";
 
-    /// <summary>The most stored questions one search pulls back before ranking. A ceiling rather than a page:
-    /// past this many term hits the query is too broad for the extra rows to change the winners.</summary>
+    /// <summary>The most stored questions one search pulls back FROM EACH STORE before ranking. A ceiling
+    /// rather than a page: past this many term hits the query is too broad for the extra rows to change the
+    /// winners.</summary>
     private const int MaxCandidates = 500;
 
-    private sealed record QuestionRow(string Question, string VisualKey);
+    /// <summary>One candidate before resolution: its text, its provenance, and whichever identity resolves the
+    /// answer behind it. <paramref name="VisualKey"/> is set for a report-derived question and
+    /// <paramref name="ExampleId"/> for a confirmed example; exactly one of the two is meaningful, and a
+    /// non-zero id is what says which.</summary>
+    private sealed record QuestionRow(string Question, string Provenance, string? VisualKey, long ExampleId);
+
+    private sealed record ResolvedVisual(string QueryName, string? Title);
+
+    private sealed record ResolvedQuery(string Sql, string ObjectKeys, string SubscriberKey);
+
+    private sealed record ResolvedExample(string Sql, string ObjectKeys, string? ConfirmedBy);
+
+    /// <summary>The two lookups a report-derived match is built from, carried together so the resolution pass
+    /// returns one value rather than a tuple of dictionaries.</summary>
+    private sealed record VisualLookup(
+        IReadOnlyDictionary<string, ResolvedVisual> Visuals,
+        IReadOnlyDictionary<string, ResolvedQuery> Queries);
 
     private static System.Linq.Expressions.Expression<Func<T, bool>> Or<T>(
         System.Linq.Expressions.Expression<Func<T, bool>> left,

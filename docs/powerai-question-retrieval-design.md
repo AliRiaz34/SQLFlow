@@ -1,7 +1,8 @@
 # PowerAI Question Retrieval: Design
 
-Status: retrieval is built and reachable (Section 8 steps 1-5); the confirmed-example store and the
-learning loop on top of it are not.
+Status: retrieval is built and reachable, and so is the confirmed-example store it searches alongside the
+PowerBI-derived questions (Section 8, all six steps). What is left of the learning loop is the GUI
+affordance that asks a person to confirm an answer, rather than the assistant having to remember to.
 
 **This document's mechanism changed after it was first written, and the sections below record both.**
 It originally specified embedding similarity, and that was implemented; it was then replaced with
@@ -37,12 +38,11 @@ Two provenances, one shape, per the flat-table decision already made in POWERAI.
   enrichment step (`SubscriberQuestionEnrichment`). Each question is backed by a real rendered SQL
   query (via the visual's `QueryName` → `CatalogSubscriberQuery.Sql`) and the object keys that query
   reads (`CatalogSubscriberQuery.ObjectKeys`).
-- **`user-confirmed`**: new rows written when a person confirms (accepts or corrects) an answer from
-  the learning loop itself (Section 6 of POWERAI.md). This is the confirmed-example store; it does not
-  exist yet and is scoped alongside retrieval here because the two are built together — retrieval with
-  nothing to learn from is just the PowerBI-only case, so the storage and the search step share one
-  migration and one query shape from day one rather than needing a second migration once confirmation
-  lands.
+- **`user-confirmed`**: rows written when a person confirms (accepts or corrects) an answer from
+  the learning loop itself (Section 6 of POWERAI.md). This is the confirmed-example store, and it is
+  scoped alongside retrieval here because the two belong together: retrieval with nothing to learn from
+  is just the PowerBI-only case, so the storage and the search step share one query shape rather than
+  the search having to grow a second path once confirmation landed.
 
 The `user-confirmed` half gets its own table, `CatalogQuestionExample`, holding those rows alongside
 the PowerBI-derived ones the existing table already carries; a search spans both. Under the word-search
@@ -206,10 +206,36 @@ what replaced it, not as outstanding work.
    matching dashboard when it never searched. The tool description states that the score is the only
    trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and that
    execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
-6. Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject UI flow
-   (POWERAI.md Section 6) that writes into it, this is "the learning loop" itself and is the largest
-   remaining piece; everything above this line is useful (retrieval over PowerBI-derived questions
-   alone) even before this step lands.
+6. ~~Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject flow
+   (POWERAI.md Section 6) that writes into it.~~ **Done, except the GUI affordance.** The table landed as
+   `CatalogQuestionExample` (migrations `AddQuestionExamples` and `AddQuestionExampleFullTextSearch`),
+   holding the question, the SQL, the object keys, the provenance, the retrieval score the answer was built
+   from, the timestamp and the confirming user. `POST /api/v1/powerai/questions/confirm`
+   (`QuestionExampleEndpoints`, under the "operate" scope because a caller who can add examples steers every
+   later answer) records an accept, a correct, or a reject, and `confirm_question` exposes it to every
+   assistant surface. Three decisions are worth stating because each closed a way the store could have gone
+   wrong:
+   - **A rejection stores nothing** and is answered before the SQL is even parsed. POWERAI.md Section 6 is
+     explicit that nothing is learned as fact on rejection, and refusing the caller's report because the
+     wrong query was also malformed would throw away the one signal the exchange carried.
+   - **The SQL is parsed by the same `ReadOnlyQueryGuard` the DataOps prepare step uses.** An example is a
+     query later answers get adapted from, so one that would write if it ran must never enter the store,
+     however it was labelled on the way in. Storing an example still runs nothing; execution goes through
+     prepare/run and their human gate, unchanged.
+   - **A unique `ContentHash` over the normalized question and SQL** makes reaffirming an answer refresh one
+     row rather than store a duplicate. Two identical examples would each match the same terms and take two
+     of the top-K slots, crowding out every other precedent for that question.
+
+   `QuestionSearch.FindSimilarAsync` reads BOTH stores in one pass and ranks them together, so a confirmed
+   example competes with the dashboards' questions instead of arriving in a second list a caller would have
+   to merge; on an equal score the confirmed one wins, as the precedent a person actually checked, and each
+   match carries its provenance and (for a confirmed one) who confirmed it. The full-text probe is per TABLE
+   rather than per deployment, because the two indexes ship in separate migrations and an estate migrated
+   while the Full-Text feature was absent can genuinely carry one and not the other.
+
+   What remains is the GUI's own accept/correct/reject affordance on a generated answer, so confirming is a
+   click rather than something the assistant has to remember to ask for. Until that lands the loop is real
+   but opportunistic.
 
 ## 9. Open questions
 

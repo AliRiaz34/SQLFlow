@@ -45,6 +45,8 @@ public sealed class CatalogDbContext : DbContext
     public DbSet<CatalogSubscriberReportVisualQuestion> SubscriberReportVisualQuestions
         => Set<CatalogSubscriberReportVisualQuestion>();
 
+    public DbSet<CatalogQuestionExample> QuestionExamples => Set<CatalogQuestionExample>();
+
     public DbSet<CatalogFlowDependency> FlowDependencies => Set<CatalogFlowDependency>();
 
     public DbSet<CatalogRunFile> RunFiles => Set<CatalogRunFile>();
@@ -366,6 +368,24 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(q => q.Question).HasMaxLength(400).IsRequired();
             entity.HasIndex(q => q.VisualKey);
             entity.HasIndex(q => q.RepoId);
+        });
+
+        modelBuilder.Entity<CatalogQuestionExample>(entity =>
+        {
+            entity.ToTable("QuestionExample");
+            entity.HasKey(e => e.Id);
+            // Room for a question a person actually types, which can be a good deal longer than the terse
+            // one a visual's title generates. The SQL is unbounded for the same reason SubscriberQuery.Sql is.
+            entity.Property(e => e.Question).HasMaxLength(1000).IsRequired();
+            entity.Property(e => e.Sql).IsRequired();
+            entity.Property(e => e.Provenance).HasMaxLength(40).IsRequired();
+            entity.Property(e => e.ConfirmedBy).HasMaxLength(200);
+            entity.Property(e => e.ContentHash).HasMaxLength(64).IsRequired();
+            // Unique, so confirming the same question/query pair again refreshes the one row rather than
+            // adding a duplicate that would score identically to its twin in every later search.
+            entity.HasIndex(e => e.ContentHash).IsUnique();
+            entity.HasIndex(e => e.RepoId);
+            entity.HasIndex(e => e.Provenance);
         });
 
         modelBuilder.Entity<CatalogFlowDependency>(entity =>

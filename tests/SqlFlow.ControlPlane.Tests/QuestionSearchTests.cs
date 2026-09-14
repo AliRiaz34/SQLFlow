@@ -354,6 +354,171 @@ public sealed class QuestionSearchTests
         return await reader.ReadAsync() ? (reader.GetInt32(0), reader.GetInt32(1)) : (0, 0);
     }
 
+
+    /// <summary>
+    /// The confirmed-example store is searched as part of the SAME search, not a separate one: a question a
+    /// person accepted is found by the same expansion that finds the dashboards' questions, arrives with its
+    /// own SQL and the user who stood behind it, and outranks a report-derived question it ties with on score.
+    /// This is the retrieval half of POWERAI.md Section 6's learning loop: without it, nothing a person
+    /// confirms ever comes back.
+    /// </summary>
+    [SkippableFact]
+    public async Task AConfirmedExample_IsFoundByTheSameSearch_AndOutranksATiedReportQuestion()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|confirmed_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        var exampleQuestion = "How much revenue did each reseller bring in?";
+        var exampleSql = "SELECT ResellerKey, SUM(SalesAmount) FROM FactResellerSales GROUP BY ResellerKey";
+        var example = new CatalogQuestionExample
+        {
+            RepoId = repoId,
+            Question = exampleQuestion,
+            Sql = exampleSql,
+            ObjectKeys = "[Dw].[arc].[FactResellerSales]",
+            Provenance = QuestionExampleProvenance.UserConfirmed,
+            Confidence = 3,
+            ConfirmedUtc = DateTime.UtcNow,
+            ConfirmedBy = "analyst@example.com",
+            ContentHash = QuestionExampleHash.Compute(exampleQuestion, exampleSql),
+        };
+
+        try
+        {
+            // One report-derived question and one confirmed example that match the SAME single term, so the
+            // tie-break is what is under test rather than a difference in score.
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("Which region has the highest revenue?", "SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region",
+                    "[Dw].[arc].[Sales]", "Revenue by Region"),
+            ]);
+
+            db.QuestionExamples.Add(example);
+            await db.SaveChangesAsync();
+
+            var result = await FindWhenIndexedAsync(
+                db, "where does our revenue come from", ["revenue"], repoId,
+                r => r.Matches.Any(m => m.Provenance == QuestionExampleProvenance.UserConfirmed));
+
+            // Both questions carry "revenue" and so tie on score; the confirmed one comes first because a
+            // person checked it, which is the stronger precedent of the two.
+            Assert.Equal(2, result.Matches.Count);
+            var best = result.Matches[0];
+            Assert.Equal(QuestionExampleProvenance.UserConfirmed, best.Provenance);
+            Assert.Equal(exampleQuestion, best.Question);
+            Assert.Equal(result.Matches[1].Score, best.Score);
+
+            // A confirmed match carries its OWN answer, not a visual's: the SQL and objects come off its row,
+            // and the confirming user travels with it so a caller can say who stood behind it.
+            Assert.Equal(exampleSql, best.Sql);
+            Assert.Equal(["[Dw].[arc].[FactResellerSales]"], best.ObjectKeys);
+            Assert.Equal("analyst@example.com", best.ConfirmedBy);
+
+            // It has no report behind it, and says so rather than borrowing the other match's report.
+            Assert.Equal(string.Empty, best.SubscriberKey);
+            Assert.Null(best.VisualTitle);
+
+            // The report-derived half is unchanged by sharing the search: it still resolves to its visual's
+            // query and names the subscriber it came from.
+            var fromReport = result.Matches[1];
+            Assert.Equal(QuestionSearch.PowerBiProvenance, fromReport.Provenance);
+            Assert.Equal(subscriberKey, fromReport.SubscriberKey);
+            Assert.Equal("Revenue by Region", fromReport.VisualTitle);
+            Assert.Null(fromReport.ConfirmedBy);
+        }
+        finally
+        {
+            await db.QuestionExamples.Where(e => e.ContentHash == example.ContentHash).ExecuteDeleteAsync();
+            await CleanupAsync(db, repoId);
+        }
+    }
+
+    /// <summary>
+    /// An example attributed to NO repo is estate-wide knowledge and stays visible to a repo-scoped search: a
+    /// person's confirmation is a fact about the estate rather than about one repository's contents, so
+    /// narrowing the search to a repo must not hide the answers this estate has already checked.
+    /// </summary>
+    [SkippableFact]
+    public async Task AnUnattachedConfirmedExample_StaysVisibleToARepoScopedSearch()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var question = $"What is the average basket size in store {suffix}?";
+        var sql = "SELECT Store, AVG(BasketSize) FROM Baskets GROUP BY Store";
+        var hash = QuestionExampleHash.Compute(question, sql);
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            db.QuestionExamples.Add(new CatalogQuestionExample
+            {
+                RepoId = null,
+                Question = question,
+                Sql = sql,
+                ObjectKeys = "[Dw].[arc].[Baskets]",
+                Provenance = QuestionExampleProvenance.UserConfirmed,
+                ConfirmedUtc = DateTime.UtcNow,
+                ConfirmedBy = "analyst@example.com",
+                ContentHash = hash,
+            });
+            await db.SaveChangesAsync();
+
+            // Scoped to a repo the example is not attached to, and found anyway.
+            var result = await FindWhenIndexedAsync(
+                db, "how big is the average basket", ["basket"], repoId,
+                r => r.Matches.Any(m => m.Question == question));
+
+            var match = Assert.Single(result.Matches, m => m.Question == question);
+            Assert.Equal(sql, match.Sql);
+            Assert.Equal(QuestionExampleProvenance.UserConfirmed, match.Provenance);
+        }
+        finally
+        {
+            await db.QuestionExamples.Where(e => e.ContentHash == hash).ExecuteDeleteAsync();
+        }
+    }
+
+    /// <summary>
+    /// Runs the search, retrying until <paramref name="ready"/> holds or a deadline passes. SQL Server
+    /// populates a full-text index ASYNCHRONOUSLY, so a CONTAINS run immediately after an insert finds nothing
+    /// and then finds the row a second or two later. Polling the search itself (rather than the catalog's
+    /// item count, which is shared across every indexed table and so cannot say whether THIS row landed) is
+    /// what makes these assertions stable. On an instance without full-text the LIKE path reads the table
+    /// directly and the first attempt already satisfies the predicate.
+    /// </summary>
+    private static async Task<QuestionSearchResult> FindWhenIndexedAsync(
+        CatalogDbContext db, string question, IReadOnlyList<string> terms, Guid? repoId,
+        Func<QuestionSearchResult, bool> ready)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        QuestionSearchResult result;
+        do
+        {
+            result = await QuestionSearch.FindSimilarAsync(
+                db, question, topK: 5, terms, repoId, CancellationToken.None);
+            if (ready(result))
+            {
+                return result;
+            }
+
+            await Task.Delay(250);
+        }
+        while (DateTime.UtcNow < deadline);
+
+        throw new TimeoutException(
+            $"The search for '{question}' did not reach the expected state within 30s "
+            + $"(last result had {result.Matches.Count} match(es)).");
+    }
+
     private static async Task CleanupAsync(CatalogDbContext db, Guid repoId)
     {
         await db.SubscriberReportVisualQuestions.Where(q => q.RepoId == repoId).ExecuteDeleteAsync();

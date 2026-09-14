@@ -302,6 +302,29 @@ pub struct SimilarQuestionsInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConfirmQuestionInput {
+    /// The question that was asked, in the user's own words, exactly as they typed it. This is the text
+    /// later questions are matched against, so rewriting it into schema terms would store something nobody
+    /// will ever ask again.
+    pub question: String,
+    /// The query that answers it. On outcome="corrected" this is the CORRECTED SQL, not what was first
+    /// proposed: the store holds what worked, never what was fixed. Must be a single read-only SELECT; it is
+    /// parsed and refused otherwise.
+    pub sql: String,
+    /// What the person decided: "accepted" (the query answered the question), "corrected" (it answered it
+    /// after being edited), or "rejected" (it did not). A rejection stores nothing and says so.
+    pub outcome: String,
+    /// The warehouse object keys the query reads, when you resolved them (from describe_object or the match
+    /// you adapted). Omit rather than guessing: an example is still worth keeping without them.
+    pub object_keys: Option<Vec<String>>,
+    /// The find_similar_questions `score` this answer was built from, when it was built from a match. Omit
+    /// when the query was composed from the schema instead. Never your own estimate of your correctness.
+    pub confidence: Option<i32>,
+    /// The repo to attribute the example to. Omit to keep it estate-wide, which is usually right.
+    pub repo_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ObjectLineageInput {
     /// The object key (from search_all, describe_object, or lineage_objects).
     pub key: String,
@@ -1889,7 +1912,12 @@ and fix every finding first."
             actually looked for (the question expanded into business vocabulary) and `matchedTerms` which of \
             those each hit, so say plainly which match you built on and why it matched, and treat an \
             untrusted match as a lead to verify rather than an answer. Running anything you compose still \
-            goes through prepare_query/run_query and their human confirmation, unchanged. An empty `matches` \
+            goes through prepare_query/run_query and their human confirmation, unchanged. Each match also \
+            carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
+            a person accepted or corrected this exact answer before (and `confirmedBy` names them), which is \
+            the stronger precedent of the two at the same score. When a person tells you your answer was \
+            right, or tells you how to fix it, record that with confirm_question so the next similar question \
+            finds it. An empty `matches` \
             means nothing stored matched those terms (or no questions are stored yet), not that the question \
             is unanswerable: fall back to describe_object/get_table_joins and say that is what you did."
     )]
@@ -1902,6 +1930,41 @@ and fix every finding first."
             q.push(("repoId", repo_id));
         }
         self.get("/api/v1/lineage/subscribers/similar-questions", &q).await
+    }
+
+    #[tool(
+        description = "Record what a person decided about an answer you gave, so the estate LEARNS from it: \
+            the question, the SQL, and whether they accepted it, corrected it, or rejected it. This is the \
+            other half of find_similar_questions, and it is what makes retrieval improve with use rather than \
+            staying frozen at whatever the dashboards happened to ask. Call it AFTER a person has actually \
+            told you the answer was right (or told you what to fix), never on your own judgement that a query \
+            looks correct: the whole value of the store is that a human checked every row in it, and one \
+            self-confirmed guess in there becomes precedent that grounds later answers. On outcome=\"corrected\" \
+            pass the CORRECTED sql, not what you first proposed. On outcome=\"rejected\" nothing is stored (a \
+            refuted query is not knowledge) and the response says so. Pass `confidence` as the `score` of the \
+            find_similar_questions match you built on, when you built on one; omit it when you composed the \
+            query from the schema. The sql must be a single read-only SELECT and is parsed and refused \
+            otherwise, and confirming the same question and query twice refreshes the one example rather than \
+            storing a duplicate. Storing an example does NOT run anything: execution still goes through \
+            prepare_query/run_query and their human gate, unchanged."
+    )]
+    async fn confirm_question(&self, Parameters(i): Parameters<ConfirmQuestionInput>) -> String {
+        let mut body = json!({ "question": i.question, "sql": i.sql, "outcome": i.outcome });
+        if let Some(keys) = i.object_keys {
+            body["objectKeys"] = json!(keys);
+        }
+        if let Some(confidence) = i.confidence {
+            body["confidence"] = json!(confidence);
+        }
+        if let Some(repo_id) = i.repo_id {
+            body["repoId"] = json!(repo_id);
+        }
+        done(
+            self.cp
+                .post("/api/v1/powerai/questions/confirm", body)
+                .await
+                .map(|v| json_str(&v)),
+        )
     }
 
     // ---- Schedules, nodes, sources, summary (read) -----------------------

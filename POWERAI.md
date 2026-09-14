@@ -3,7 +3,9 @@
 Status: partially implemented. Extraction is done and landed (both the `.pbix` semantic model and
 its report/visual layer), the report structure is retrievable over MCP
 (`describe_subscriber_report`), and every visual can now carry 1-3 LLM-generated business questions
-(Section 9, step 3); the confirmed-example store and the learning loop do not exist yet. Section 10
+(Section 9, step 3). Retrieval over those questions is built, and so is the confirmed-example store
+behind it (`find_similar_questions` reads both halves, `confirm_question` writes the confirmed one);
+what is left of the learning loop is the GUI affordance that asks a person to confirm. Section 10
 states exactly what is built versus what remains. For the systems this feature builds on, see
 [docs/reference/flow/subscribers.md](reference/flow/subscribers.md) and
 [docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md).
@@ -107,8 +109,8 @@ known limitations for what remains unproven.
 
 ## 6. The learning loop (question -> guess -> confirm -> remember)
 
-Not started. Separate from extraction: a live feedback loop that grows the example set from real
-usage, not just from PowerBI.
+Built except for the confirmation moment itself (Section 10). Separate from extraction: a live
+feedback loop that grows the example set from real usage, not just from PowerBI.
 
 - A user asks a question. The system searches confirmed question/query examples (from PowerBI
   extraction and from prior confirmed answers alike) for a close match.
@@ -147,8 +149,10 @@ this that genuinely is graph-shaped, table-to-table join relationships inferred 
 already stored as a graph today and already walked as one by `get_table_joins`; PowerBI's declared
 relationships are a second, clearly-labeled kind of fact, not a merge into that same graph.
 
-The confirmed-example store (Section 6) remains unimplemented, and when it lands it should follow
-this same flat-table precedent rather than introduce a new shape.
+The confirmed-example store (Section 6) landed as `CatalogQuestionExample` and followed this same
+flat-table precedent exactly: one appendable table holding the question, the query, the objects it
+reads, the provenance and the confidence, searched by the same pass that searches the PowerBI-derived
+questions. No new storage shape was introduced.
 
 ## 8. Anticipated schema work (updated against what has landed)
 
@@ -192,12 +196,31 @@ Landed since:
   business questions, following this section's flat-table precedent exactly (a small child table
   keyed by `VisualKey`, matching `CatalogSubscriberReportField`'s own shape).
 
+Landed since that:
+
+- `CatalogQuestionExample` (migration `AddQuestionExamples`, full-text index in
+  `AddQuestionExampleFullTextSearch`): the confirmed-example store this section called for, carrying
+  the question text, the SQL, the source object keys, the provenance (`powerbi` | `user-confirmed`),
+  the retrieval score the answer was built from, the timestamp, and the confirming user. Flat and
+  appendable exactly as Section 7 requires, with no parallel graph store.
+  - It is the one subscriber-adjacent table a sync does NOT delete and reinsert. Every other
+    subscriber report table is repo-scoped and replaced wholesale on each pass; a human confirmation
+    is not a fact about the current contents of a repository, so a sync that no longer finds the
+    report a question came from must not erase the knowledge that the question was answered
+    correctly. `RepoId` is nullable for the same reason, and a repo-scoped search still sees the
+    unattached rows.
+  - `ContentHash` (`QuestionExampleHash.Compute`, the SHA-256 of the whitespace- and case-normalized
+    question and SQL) carries a UNIQUE index, so reaffirming an answer refreshes the one row instead
+    of storing a duplicate that would score identically to its twin and crowd every other match out
+    of the same search.
+  - Rejections are deliberately not stored, per Section 6: a table of "confirmed examples" that also
+    held refuted ones would need every reader to remember to filter them out, and the one that
+    forgot would ground an answer in a query a person already said was wrong.
+
 Still needed, not started:
 
-- A new table for confirmed question/query examples: question text, SQL, source object keys,
-  provenance (`powerbi` | `user-confirmed`), confidence/similarity, timestamp, confirming user.
-- Whatever storage the confirmed-example store turns out to need, following the flat-table
-  precedent in this section.
+- Nothing in this section's original list. The remaining work is the confirm/correct/reject FLOW
+  that calls into the store (Section 10), not further storage.
 
 ## 9. Roadmap
 
@@ -223,14 +246,19 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
    tables (Section 8).
 5. ~~Extract declared model relationships and cardinality.~~ **Done** (Section 5), tagged `active`;
    kept out of `CatalogObjectRelationship` per Section 7, not (yet) in dedicated catalog tables.
-6. **Build the confirmed-example store and the retrieval step.** Retrieval is **done**; the confirmed-example
-   store is not started. A typed question is expanded by an LLM into related business vocabulary and the stored
-   questions are ranked by how many of those terms they match, reachable as the
-   `find_similar_questions` MCP tool. See
+6. ~~**Build the confirmed-example store and the retrieval step.**~~ **Done.** A typed question is expanded by
+   an LLM into related business vocabulary and the stored questions are ranked by how many of those terms they
+   match, reachable as the `find_similar_questions` MCP tool; the `user-confirmed` half is
+   `CatalogQuestionExample` (Section 8), written through `POST /api/v1/powerai/questions/confirm` and the
+   `confirm_question` MCP tool, and searched by the SAME `QuestionSearch.FindSimilarAsync` pass rather than a
+   second one. See
    [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) for the design and what
-   each step landed. What remains of this item is the `user-confirmed` half: the table, and the flow that
-   writes into it.
-7. **Wire the learning loop.** Not started; depends on the confirmed-example store above.
+   each step landed.
+7. **Wire the learning loop.** Partly done: the store and the write path exist and every assistant surface can
+   reach both halves over MCP, so a model that is TOLD to confirm an answer can record it. What remains is the
+   part that makes it happen reliably rather than opportunistically: the GUI's own accept/correct/reject
+   affordance on an answer, so a person confirms by clicking rather than by the assistant remembering to ask.
+   Section 10 states the remaining scope.
 8. ~~Visuals/field-co-occurrence and default filters.~~ **Done**, and delivered earlier than
    originally sequenced (visual-layer data turned out to be the load-bearing signal: it is the only
    place a field's ROLE is recorded, and SQL-derived lineage cannot recover that fact). Every page,
@@ -464,15 +492,16 @@ In roughly the order it would need to land, since each depends on groundwork the
 3. ~~The business-question field~~ **Done** (Section 8, Section 9 step 3): every extracted visual
    can now carry 1-3 LLM-generated questions (`CatalogSubscriberReportVisualQuestion`), generated by
    a control-plane-only post-sync step and regenerated only when the visual's content changed. This
-   is what retrieval-by-similarity (step 5 below) will match against; the confirmed-example store
-   itself is still not started.
-4. ~~**Model-entity-to-warehouse-object resolution**~~ **Built** (known limitations, above): the M
+   is what retrieval-by-similarity (step 5 below) matches against, alongside the confirmed examples
+   a person accepted.
+4. ~~**Model-entity-to-warehouse-object resolution**~~ **Done** (known limitations, above): the M
    source expressions are pattern-matched in `tools/pbix-extract` and fed into the existing synonym
    pass as `SynonymLink` facts, so a resolved model table's consumption edge lands on the same node
    an ingestion flow writes. Only `Sql.Database`-shaped sources resolve; everything else is reported
-   unresolved rather than guessed. Still needs a SQL-backed sample report to prove the resolved path
-   end to end, which is why this is not marked done outright.
-5. **The confirmed-example store and retrieval** (Sections 6 and 8). Retrieval is **done**:
+   unresolved rather than guessed. Proven end to end against the restored AdventureWorksDW2022
+   database, which is also what found the two bugs that had kept the chain from ever working; what
+   it does not prove is breadth, since it rests on one report and one source shape.
+5. ~~**The confirmed-example store and retrieval** (Sections 6 and 8).~~ **Done.** Retrieval:
    `QuestionExpander` turns a typed question into related business vocabulary using the Anthropic account
    question generation already uses, `QuestionSearch.FindSimilarAsync` ranks the stored questions by how
    many of those terms they match (through a full-text index where the instance has one, a `LIKE` scan
@@ -482,10 +511,22 @@ In roughly the order it would need to land, since each depends on groundwork the
    and it adds no vendor beyond the Anthropic key: an embedding-based version was built first and removed
    for that reason, which
    [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) records along with
-   what the switch traded away. The flat table for user-confirmed question/query/provenance/confidence is
-   still not started.
-6. **The learning loop** (Section 6): wiring retrieval into an actual guess-confirm-remember flow
-   through the existing DataOps confirmation gate. Depends on step 5.
+   what the switch traded away. The store: `CatalogQuestionExample` (Section 8) holds the flat
+   question/query/objects/provenance/confidence/timestamp/user row, `POST /api/v1/powerai/questions/confirm`
+   (`QuestionExampleEndpoints`, "operate" scope) writes it, and `confirm_question` exposes that to every
+   assistant surface. The SAME search reads both halves and ranks them together, so a confirmed example
+   competes with the dashboards' questions rather than sitting in a second list a caller would have to
+   merge; on an equal score the confirmed one wins, as the precedent a person actually checked. A
+   rejection is accepted and stores nothing, and a query that would write is refused by the same
+   `ReadOnlyQueryGuard` the DataOps prepare step uses, so the store cannot come to hold a statement that
+   would mutate the warehouse if a later answer were adapted from it.
+6. **The learning loop** (Section 6): what remains is the CONFIRMATION MOMENT, not the machinery behind
+   it. Today a person's decision is recorded only when the assistant chooses to call `confirm_question`
+   after being told the answer was right, which makes the loop real but opportunistic. The missing piece
+   is the GUI's own accept/correct/reject affordance on a generated answer, so confirming is a click a
+   person makes rather than something a model has to remember to ask for, wired through the existing
+   DataOps confirmation gate rather than a second one. Nothing new needs storing: it calls the endpoint
+   that already exists.
 7. **Broader version coverage**: extraction is proven against one report from one PowerBI version.
    Widening this is a matter of running the tool against more real files as they turn up and fixing
    what the schema probes catch, not a design change.

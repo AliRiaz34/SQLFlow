@@ -716,7 +716,7 @@ public class CatalogSubscriberReportPage
 
 /// <summary>
 /// One visual on a PowerBI report page: a chart, table, or slicer, and the KIND of business question it answers
-/// (its chart type). This is the row the extractor keeps only for visuals that project at least one field — a
+/// (its chart type). This is the row the extractor keeps only for visuals that project at least one field: a
 /// shape or textbox with no <see cref="CatalogSubscriberReportField"/> children is decoration, not a question,
 /// and is never stored. A visual's own filters and any page-level filters that apply to it are not stored here;
 /// they are folded into the WHERE clause of the <see cref="CatalogSubscriberQuery"/> this visual produces, so a
@@ -849,6 +849,111 @@ public class CatalogSubscriberReportVisualQuestion
 
     /// <summary>The question text, as a person would actually type it.</summary>
     public string Question { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// One question/query pair the estate is willing to stand behind: the confirmed-example store POWERAI.md
+/// Sections 6 and 8 specify. A row records that a question was answered by a particular query and that the
+/// answer was CONFIRMED, either by having been derived from a report a team already runs in production
+/// (<see cref="QuestionExampleProvenance.PowerBi"/>) or by a person accepting or correcting a generated answer
+/// (<see cref="QuestionExampleProvenance.UserConfirmed"/>). It is what makes retrieval self-improving under
+/// real usage: an answer confirmed today is an example the next similar question is matched against.
+/// <para>
+/// Unlike <see cref="CatalogSubscriberReportVisualQuestion"/>, which is repo-scoped and deleted and reinserted
+/// wholesale on every sync, this table is APPEND-ONLY across syncs and never replaced by one. A human
+/// confirmation is not a fact about the current contents of a repository, so a sync that no longer finds the
+/// report a question came from must not erase the knowledge that the question was answered correctly. That is
+/// also why <see cref="RepoId"/> is nullable: an example is attributed to a repo when one is known, and stays
+/// estate-wide when it is not.
+/// </para>
+/// <para>
+/// Rejections are deliberately NOT stored. POWERAI.md Section 6 is explicit that on rejection nothing is
+/// learned as fact, and a table of "confirmed examples" that also held refuted ones would need every reader to
+/// remember to filter them out; the one that forgot would ground an answer in a query a person already said
+/// was wrong.
+/// </para>
+/// </summary>
+public class CatalogQuestionExample
+{
+    public long Id { get; set; }
+
+    /// <summary>The repo this example is attributed to, or null when it belongs to no single repo. Nullable
+    /// because a confirmation is a fact about the estate rather than about one repository's contents, and
+    /// because the question a person confirms may have been answered from objects several repos populate.</summary>
+    public Guid? RepoId { get; set; }
+
+    /// <summary>The question as a person would type it.</summary>
+    public string Question { get; set; } = string.Empty;
+
+    /// <summary>The query that answers it. Stored verbatim: this is the text a later answer is adapted from,
+    /// so normalizing or reformatting it would change what a caller is shown as precedent.</summary>
+    public string Sql { get; set; } = string.Empty;
+
+    /// <summary>The warehouse objects <see cref="Sql"/> reads, newline-joined in the order they were resolved,
+    /// exactly as <see cref="CatalogSubscriberQuery.ObjectKeys"/> stores them. Empty when the caller named
+    /// none.</summary>
+    public string ObjectKeys { get; set; } = string.Empty;
+
+    /// <summary>Where the example came from: <see cref="QuestionExampleProvenance.PowerBi"/> or
+    /// <see cref="QuestionExampleProvenance.UserConfirmed"/>. Kept as a value rather than inferred from which
+    /// table a row came from, so a caller weighing two matches can tell "a dashboard asks this" from "a person
+    /// checked this" without knowing how the store is laid out.</summary>
+    public string Provenance { get; set; } = string.Empty;
+
+    /// <summary>The retrieval score the confirmed answer was built from, or null when it was composed without
+    /// a prior match. This is the similarity that was actually observed, never a model's self-rating: POWERAI.md
+    /// Section 6 rests on the difference, because a wrong query can sound exactly as confident as a right one.</summary>
+    public int? Confidence { get; set; }
+
+    /// <summary>When the example was confirmed.</summary>
+    public DateTime ConfirmedUtc { get; set; }
+
+    /// <summary>Who confirmed it (the subject claim, falling back to the principal's name), or null for an
+    /// example that no interactive user stands behind.</summary>
+    public string? ConfirmedBy { get; set; }
+
+    /// <summary>The lowercase-hex SHA-256 of the normalized question and SQL, carrying a UNIQUE index. Confirming
+    /// the same pair twice is a person reaffirming an answer, not a second piece of knowledge, so the existing
+    /// row is refreshed instead of the store filling with duplicates that would each score identically and crowd
+    /// out every other match.</summary>
+    public string ContentHash { get; set; } = string.Empty;
+}
+
+/// <summary>The provenances a <see cref="CatalogQuestionExample"/> can carry, named once so the writer, the
+/// search, and the API surface cannot drift into spelling the same value differently.</summary>
+public static class QuestionExampleProvenance
+{
+    /// <summary>Derived from an extracted PowerBI report visual: a question a dashboard already asks in
+    /// production.</summary>
+    public const string PowerBi = "powerbi";
+
+    /// <summary>Accepted or corrected by a person: a question this estate has answered and checked.</summary>
+    public const string UserConfirmed = "user-confirmed";
+
+    /// <summary>Whether <paramref name="value"/> is one of the provenances above.</summary>
+    public static bool IsKnown(string? value)
+        => string.Equals(value, PowerBi, StringComparison.Ordinal)
+            || string.Equals(value, UserConfirmed, StringComparison.Ordinal);
+}
+
+/// <summary>
+/// Computes <see cref="CatalogQuestionExample.ContentHash"/> from a question and its query, so the writer and
+/// any later reader agree on when two confirmations are the same fact. Whitespace and case are normalized away
+/// because "What is our revenue?" retyped with a different capital letter or a stray double space is the same
+/// question a person confirmed before, and storing it twice would double its weight in every future search.
+/// </summary>
+public static class QuestionExampleHash
+{
+    /// <summary>The lowercase-hex SHA-256 of the whitespace-collapsed, lowercased question and SQL, separated
+    /// by a newline so no question's text can run into a query's and hash alike.</summary>
+    public static string Compute(string question, string sql)
+        => CatalogProjection.Hash($"{Collapse(question)}\n{Collapse(sql)}");
+
+    /// <summary>Collapses every run of whitespace to one space, trims, and lowercases.</summary>
+    private static string Collapse(string value)
+        => string.Join(' ', value.Split(
+            (char[]?)null, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .ToLowerInvariant();
 }
 
 /// <summary>
