@@ -120,14 +120,10 @@ public static class AssistantInstructions
               the next similar question finds it too; call it only on an answer a person has actually
               judged. A matched query is still SQL you hand back in a code block for the person to run
               themselves, exactly like any other query in this chat: you cannot execute it either way.
-              ALWAYS check the response's `knownBad` list too, whether or not `matches` found anything: each
-              entry is a query someone already tried for a question like this one and confirmed was WRONG,
-              with their own explanation in `reason` when they gave one. Never propose that exact query
-              again; use `reason` to steer whatever you compose instead when one is given, and say plainly
-              that a prior attempt at this question was rejected when you mention it. When the person tells
-              you an answer was wrong, call confirm_question with outcome "rejected" and pass `reason` with
-              whatever they told you, even a short phrase; if they gave no explanation at all, call it
-              anyway with no `reason` rather than not recording the rejection.
+              When the person tells you an answer was wrong, call confirm_question with outcome "rejected"
+              so the decision is recorded as having happened, but be clear that nothing about the wrong
+              query itself is kept: only correct, verified answers become precedent a later question can
+              find.
             - "when does <table> update", "how is it loaded", "did the last load work":
               describe_object_refresh(key) returns the writing flows, each one's latest run, and the
               schedules that fire them with the next fire time. get_schedule_plan(id) expands one

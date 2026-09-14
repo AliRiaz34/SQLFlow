@@ -1151,9 +1151,6 @@ namespace SqlFlow.Catalog.Migrations
                     b.Property<int?>("Confidence")
                         .HasColumnType("int");
 
-                    b.Property<bool>("Confirmed")
-                        .HasColumnType("bit");
-
                     b.Property<string>("ConfirmedBy")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
@@ -1180,10 +1177,6 @@ namespace SqlFlow.Catalog.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
-                    b.Property<string>("RejectionNote")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
                     b.Property<Guid?>("RepoId")
                         .HasColumnType("uniqueidentifier");
 
@@ -1196,8 +1189,6 @@ namespace SqlFlow.Catalog.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("Confirmed");
 
                     b.HasIndex("ContentHash")
                         .IsUnique();

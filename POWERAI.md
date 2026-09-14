@@ -123,24 +123,18 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
   correct. This is not a new gate; it is the existing DataOps human-confirmation requirement, with
   the similarity score used to decide how much a caller should trust a result already flagged for
   review, not whether review happens at all.
-- On confirmation (accept, correct, or reject), the question/query pair is written back into the
-  example store with its provenance (`powerbi` vs `user-confirmed`) and an updated confidence. A
-  rejection IS learned as fact too, as a KNOWN-BAD row (`CatalogQuestionExample.Confirmed = false`,
-  with an optional `RejectionNote` in the rejecting person's own words when they gave one): the next
-  time a similar question comes in, that exact wrong query is not proposed again, and the reason (when
-  given) steers a fresh attempt away from the same mistake. A rejection with no reason is still stored;
-  not every user will explain why an answer was wrong, and "do not propose this again" is worth
-  remembering even without one. A known-bad row is never returned as a match a caller can adapt or run;
-  `find_similar_questions` carries it in a separate `knownBad` list precisely so it cannot be mistaken
-  for one.
+- On confirmation (accept, correct, or reject), only accept and correct write the question/query pair
+  back into the example store, with its provenance (`powerbi` vs `user-confirmed`) and an updated
+  confidence. **A rejection is not stored.** Only correct, verified answers become precedent this
+  estate learns from; a query a person told us was wrong is not knowledge, and keeping it around risks
+  a mistake resurfacing as if it had been checked. `confirm_question` still accepts and records
+  `outcome="rejected"` so the decision is not silently lost from the moment, but the endpoint writes
+  nothing to `CatalogQuestionExample` and says so in its response.
 - This makes the system self-improving under real usage. Auto-running a TRUSTED match directly
   (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
-  confirmation gate when it would not finish in that budget) is the next planned step, not yet built;
-  an UNTRUSTED or absent match is always composed as a stated best guess and always goes through
-  the existing DataOps human confirmation before anything runs, unchanged. Auto-run needs to know
-  which datasource to run a trusted match's SQL against, which `CatalogQuestionExample` had no way
-  to record until `SourceRef` landed (Section 8); the auto-run step itself, and the GUI datasource
-  picker that is meant to set `SourceRef` at confirmation time, are both still open.
+  confirmation gate when it would not finish in that budget) reads `CatalogQuestionExample.SourceRef`
+  (Section 8) to know which datasource to run a trusted match's SQL against; the GUI datasource picker
+  that is meant to set `SourceRef` at confirmation time is still open (Section 10).
 
 ## 7. Storage: flat confirmed examples, not a separate AST/graph store
 
@@ -226,13 +220,6 @@ Landed since that:
     question and SQL) carries a UNIQUE index, so reaffirming an answer refreshes the one row instead
     of storing a duplicate that would score identically to its twin and crowd every other match out
     of the same search.
-  - `Confirmed` (bit, default true) and `RejectionNote` (nullable, migration
-    `AddQuestionExampleConfirmedFlag`) hold the known-bad half: a rejected question/query pair is
-    stored with `Confirmed = false` and the rejecting person's own explanation when they gave one,
-    per Section 6. Orthogonal to `Provenance`, which still says a person confirmed *something*; a
-    rejection is a person confirming that the answer was WRONG. The search layer filters on
-    `Confirmed` at the query level (never in application code after the fact), returning known-bad
-    rows only in a separate `knownBad` list a caller cannot mistake for an answer.
 
 Landed since that:
 
@@ -242,18 +229,22 @@ Landed since that:
   the same known-reference check `PrepareQueryRequest.Reference` enforces (a caller cannot set it to
   a connection the catalog has not already declared on some pipeline). `confirm_question` accepts it
   optionally and `find_similar_questions` returns it on every match, so this is the piece Section 6's
-  auto-run step was missing: today a stored example carries no fact about which connection its SQL
+  auto-run step needed: without it a stored example carried no fact about which connection its SQL
   runs against, so auto-running a trusted match had nothing to prepare the query with. Null on a
   confirmed example stored before a datasource was chosen for it, and always null for a PowerBI-derived
   question (which names a model entity, not a live connection). Populating it today means passing
   `sourceRef` to `confirm_question` by hand; the intended source is a datasource-selection control in
   the GUI's confirm/correct/reject affordance (Section 10), not built yet.
+- The auto-run step itself (`POST /api/v1/powerai/questions/{id}/auto-run`, `auto_run_trusted_match`):
+  runs a TRUSTED match's SQL directly, capped to the deployment's own row limit and timeout, with no
+  separate prepare/approve round trip, since the SQL was already shown to and confirmed by a person
+  when it was stored. Falls back cleanly to the existing manual confirmation gate when the match has
+  no `exampleId`/`SourceRef`, or when the run does not finish inside its budget.
 
 Still needed, not started:
 
 - Nothing else in this section's original list. The remaining work is the confirm/correct/reject FLOW
-  that calls into the store (Section 10), including the GUI control that sets `SourceRef`, plus the
-  auto-run step itself, which is what actually reads it back out.
+  that calls into the store (Section 10), including the GUI control that sets `SourceRef`.
 
 ## 9. Roadmap
 

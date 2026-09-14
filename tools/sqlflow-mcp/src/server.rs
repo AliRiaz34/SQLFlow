@@ -322,14 +322,12 @@ pub struct ConfirmQuestionInput {
     pub confidence: Option<i32>,
     /// The repo to attribute the example to. Omit to keep it estate-wide, which is usually right.
     pub repo_id: Option<String>,
-    /// On outcome="rejected", why the sql is wrong, in the rejecting person's own words. Omit when they gave
-    /// no reason; a rejection with none is still worth recording. Ignored for every other outcome.
-    pub reason: Option<String>,
     /// The datasource this sql runs against: a whole ${env:...} / ${keyvault:...} reference or an @alias,
     /// matching a datasource the catalog already declares (the same reference prepare_query takes). Pass it
     /// when the person told you, or picked, which datasource this answer is for; omit it when none was
     /// established. Without it a later trusted match to this example still stands as precedent but cannot be
-    /// auto-run, since nothing would tell prepare_query which connection to use. Ignored for outcome="rejected".
+    /// auto-run, since nothing would tell prepare_query which connection to use. Ignored for outcome="rejected",
+    /// which is never stored at all.
     #[serde(rename = "sourceRef")]
     pub source_ref: Option<String>,
 }
@@ -1958,12 +1956,10 @@ and fix every finding first."
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
             finds it. An empty `matches` \
             means nothing stored matched those terms (or no questions are stored yet), not that the question \
-            is unanswerable: fall back to describe_object/get_table_joins and say that is what you did. \
-            ALSO check `knownBad`, independently of whether `matches` found anything: each entry is a query \
-            someone already tried for a question like this one and confirmed was WRONG, with `reason` in \
-            their own words when they gave one. Never propose that exact query again; if a `reason` is given, \
-            use it to steer whatever you compose instead. `knownBad` can be non-empty even when `matches` is \
-            empty - a rejected answer with no confirmed replacement yet is exactly the case this warns about."
+            is unanswerable: fall back to describe_object/get_table_joins and say that is what you did. When a \
+            person tells you an answer was wrong, call confirm_question with outcome=\"rejected\" so the loop \
+            is recorded as having happened, but nothing about the wrong query is stored or returned by a later \
+            search: only correct, verified answers become precedent here."
     )]
     async fn find_similar_questions(&self, Parameters(i): Parameters<SimilarQuestionsInput>) -> String {
         let mut q: Vec<(&str, String)> = vec![("question", i.question)];
@@ -1984,12 +1980,8 @@ and fix every finding first."
             told you the answer was right (or told you what to fix), never on your own judgement that a query \
             looks correct: the whole value of the store is that a human checked every row in it, and one \
             self-confirmed guess in there becomes precedent that grounds later answers. On outcome=\"corrected\" \
-            pass the CORRECTED sql, not what you first proposed. On outcome=\"rejected\" the pair IS stored, \
-            as known-bad rather than as a match: it will never be returned as an answer, but find_similar_questions \
-            surfaces it as a warning (`knownBad`) so the same wrong query is not proposed again for a similar \
-            question. Pass `reason` with whatever the person told you was wrong, in their own words, when they \
-            told you anything at all; omit it when they just said \"no\" or \"that's wrong\" with no detail, \
-            which is common and still worth recording, just without a reason to steer the next attempt. Pass \
+            pass the CORRECTED sql, not what you first proposed. On outcome=\"rejected\" nothing is stored: a \
+            refuted query is not knowledge, so it never becomes an example a later answer is adapted from. Pass \
             `confidence` as the `score` of the \
             find_similar_questions match you built on, when you built on one; omit it when you composed the \
             query from the schema. The sql must be a single read-only SELECT and is parsed and refused \
@@ -2007,9 +1999,6 @@ and fix every finding first."
         }
         if let Some(repo_id) = i.repo_id {
             body["repoId"] = json!(repo_id);
-        }
-        if let Some(reason) = i.reason {
-            body["reason"] = json!(reason);
         }
         if let Some(source_ref) = i.source_ref {
             body["sourceRef"] = json!(source_ref);

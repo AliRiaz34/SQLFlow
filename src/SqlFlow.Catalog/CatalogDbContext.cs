@@ -386,8 +386,6 @@ public sealed class CatalogDbContext : DbContext
             entity.HasIndex(e => e.ContentHash).IsUnique();
             entity.HasIndex(e => e.RepoId);
             entity.HasIndex(e => e.Provenance);
-            entity.HasIndex(e => e.Confirmed);
-            entity.Property(e => e.RejectionNote).HasMaxLength(2000);
             entity.Property(e => e.SourceRef).HasMaxLength(512);
         });
 

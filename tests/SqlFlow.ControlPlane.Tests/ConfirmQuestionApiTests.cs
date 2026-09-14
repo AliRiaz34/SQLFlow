@@ -40,7 +40,7 @@ public sealed class ConfirmQuestionApiTests
     }
 
     [SkippableFact]
-    public async Task ARejection_IsStoredAsKnownBad_NeverAsAReadOnlyPrecedent()
+    public async Task ARejection_StoresNothing()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
@@ -50,54 +50,21 @@ public sealed class ConfirmQuestionApiTests
         using var client = factory.CreateClient();
         var token = await IssueOperateTokenAsync(client);
 
-        // Deliberately a statement that would NOT survive the read-only guard: a rejected row is never run,
-        // so it is stored as given rather than parsed, and this proves that path does not quietly demand a
-        // valid SELECT before it will remember a wrong answer.
+        // Deliberately a statement that would NOT survive the read-only guard: a rejection is answered before
+        // the SQL is parsed, since nothing is stored either way, so this proves that path does not quietly
+        // demand a valid SELECT before it will accept a rejection.
         using var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
-            question, "DELETE FROM Depots", QuestionConfirmationOutcome.Rejected, Reason: "Wrong table entirely"));
+            question, "DELETE FROM Depots", QuestionConfirmationOutcome.Rejected));
 
         response.EnsureSuccessStatusCode();
         var body = await response.Content.ReadFromJsonAsync<ConfirmedQuestionDto>();
         Assert.NotNull(body);
-        Assert.True(body.Stored);
-        Assert.False(body.Confirmed);
-        Assert.NotNull(body.ExampleId);
+        Assert.False(body.Stored);
+        Assert.Null(body.ExampleId);
+        Assert.Null(body.Provenance);
 
         await using var db = CatalogDatabase.Create(cs);
-        var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question == question);
-        Assert.False(stored.Confirmed);
-        Assert.Equal("DELETE FROM Depots", stored.Sql);
-        Assert.Equal("Wrong table entirely", stored.RejectionNote);
-        Assert.Equal(QuestionExampleProvenance.UserConfirmed, stored.Provenance);
-
-        await db.QuestionExamples.Where(e => e.Id == stored.Id).ExecuteDeleteAsync();
-    }
-
-    [SkippableFact]
-    public async Task ARejectionWithNoReason_IsStillStored()
-    {
-        var cs = CatalogTestDb.Require();
-        await CatalogDatabase.MigrateAsync(cs);
-
-        var question = $"Is depot volume normal on {Guid.NewGuid():N}?";
-        await using var factory = Enabled(cs);
-        using var client = factory.CreateClient();
-        var token = await IssueOperateTokenAsync(client);
-
-        using var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
-            question, "SELECT 1", QuestionConfirmationOutcome.Rejected));
-
-        response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadFromJsonAsync<ConfirmedQuestionDto>();
-        Assert.NotNull(body);
-        Assert.True(body.Stored);
-        Assert.False(body.Confirmed);
-
-        await using var db = CatalogDatabase.Create(cs);
-        var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question == question);
-        Assert.Null(stored.RejectionNote);
-
-        await db.QuestionExamples.Where(e => e.Id == stored.Id).ExecuteDeleteAsync();
+        Assert.False(await db.QuestionExamples.AnyAsync(e => e.Question == question));
     }
 
     [SkippableFact]

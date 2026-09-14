@@ -12,8 +12,8 @@ using SqlFlow.Catalog;
 namespace SqlFlow.Catalog.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    [Migration("20260914153000_AddQuestionExampleConfirmedFlag")]
-    partial class AddQuestionExampleConfirmedFlag
+    [Migration("20260914210352_AddQuestionExampleSourceRef")]
+    partial class AddQuestionExampleSourceRef
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -1161,9 +1161,6 @@ namespace SqlFlow.Catalog.Migrations
                     b.Property<DateTime>("ConfirmedUtc")
                         .HasColumnType("datetime2");
 
-                    b.Property<bool>("Confirmed")
-                        .HasColumnType("bit");
-
                     b.Property<string>("ContentHash")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -1183,20 +1180,18 @@ namespace SqlFlow.Catalog.Migrations
                         .HasMaxLength(1000)
                         .HasColumnType("nvarchar(1000)");
 
-                    b.Property<string>("RejectionNote")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
                     b.Property<Guid?>("RepoId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SourceRef")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
 
                     b.Property<string>("Sql")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("Confirmed");
 
                     b.HasIndex("ContentHash")
                         .IsUnique();

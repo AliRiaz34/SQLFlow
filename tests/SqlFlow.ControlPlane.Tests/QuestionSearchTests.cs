@@ -488,61 +488,6 @@ public sealed class QuestionSearchTests
     }
 
     /// <summary>
-    /// A rejected example is found as a KNOWN-BAD warning, never as a match, and surfaces even when there is
-    /// no confirmed-good precedent at all: a question with only a rejected attempt behind it is exactly the
-    /// case POWERAI.md's learning loop exists to warn about, not a case that should look like an empty search.
-    /// </summary>
-    [SkippableFact]
-    public async Task ARejectedExample_SurfacesAsKnownBad_NeverAsAMatch_EvenWithNoGoodPrecedent()
-    {
-        var cs = CatalogTestDb.Require();
-        await CatalogDatabase.MigrateAsync(cs);
-
-        var repoId = Guid.NewGuid();
-        var question = "How many parcels went missing last quarter?";
-        var sql = "SELECT COUNT(*) FROM Parcels WHERE Status = 'Lost'";
-        var hash = QuestionExampleHash.Compute(question, sql);
-
-        await using var db = CatalogDatabase.Create(cs);
-        var rejected = new CatalogQuestionExample
-        {
-            RepoId = repoId,
-            Question = question,
-            Sql = sql,
-            ObjectKeys = string.Empty,
-            Provenance = QuestionExampleProvenance.UserConfirmed,
-            ConfirmedUtc = DateTime.UtcNow,
-            ConfirmedBy = "analyst@example.com",
-            ContentHash = hash,
-            Confirmed = false,
-            RejectionNote = "Status is never 'Lost', it's 'Missing'",
-        };
-
-        try
-        {
-            db.QuestionExamples.Add(rejected);
-            await db.SaveChangesAsync();
-
-            var result = await FindWhenIndexedAsync(
-                db, "how many parcels are missing", ["parcels", "missing"], repoId,
-                r => r.KnownBad.Any(k => k.Question == question));
-
-            // Never a match, however well it scores.
-            Assert.DoesNotContain(result.Matches, m => m.Question == question);
-
-            var warning = Assert.Single(result.KnownBad, k => k.Question == question);
-            Assert.Equal(sql, warning.Sql);
-            Assert.Equal("Status is never 'Lost', it's 'Missing'", warning.Reason);
-            Assert.Equal("analyst@example.com", warning.RejectedBy);
-            Assert.Contains("parcels", warning.MatchedTerms);
-        }
-        finally
-        {
-            await db.QuestionExamples.Where(e => e.Id == rejected.Id).ExecuteDeleteAsync();
-        }
-    }
-
-    /// <summary>
     /// Runs the search, retrying until <paramref name="ready"/> holds or a deadline passes. SQL Server
     /// populates a full-text index ASYNCHRONOUSLY, so a CONTAINS run immediately after an insert finds nothing
     /// and then finds the row a second or two later. Polling the search itself (rather than the catalog's

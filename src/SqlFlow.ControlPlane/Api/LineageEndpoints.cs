@@ -257,23 +257,12 @@ public sealed record SimilarQuestionDto(
     string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle,
     string? ConfirmedBy, string? SourceRef = null, long? ExampleId = null);
 
-/// <summary>One previously REJECTED question/query pair relevant to a typed question: real knowledge, the
-/// opposite kind from a <see cref="SimilarQuestionDto"/>. Never an answer to adapt or run; it says "this exact
-/// query was already tried for a question like this one and a person said it was wrong", so it is not proposed
-/// again. <c>Reason</c> is the rejecting person's own explanation when they gave one, null when they did not:
-/// a rejection with no reason is still worth remembering.</summary>
-public sealed record KnownBadQuestionDto(
-    string Question, string Sql, string? Reason, int Score, IReadOnlyList<string> MatchedTerms,
-    string? RejectedBy, DateTime RejectedUtc);
-
 /// <summary>The matches for a question, with the terms actually searched for (the LLM's expansion of the typed
 /// question, or its own words when expansion is off or unavailable) and the score threshold they were judged
-/// against, so a caller explains its own confidence rather than inventing one. <c>KnownBad</c> is populated
-/// independently of <c>Matches</c>: a question can have no confirmed-good precedent yet and still have a
-/// rejected one, which is exactly the case worth surfacing rather than staying silent about.</summary>
+/// against, so a caller explains its own confidence rather than inventing one.</summary>
 public sealed record SimilarQuestionsDto(
     string Question, IReadOnlyList<string> SearchedTerms, int ScoreThreshold,
-    IReadOnlyList<SimilarQuestionDto> Matches, IReadOnlyList<KnownBadQuestionDto> KnownBad);
+    IReadOnlyList<SimilarQuestionDto> Matches);
 
 /// <summary>The Power BI report structure behind one subscriber: every page, the visuals on it, and each
 /// field's role. This is the consumption-side answer to "what questions does this dashboard already ask, and
@@ -1586,9 +1575,7 @@ public static class LineageEndpoints
             result.Matches.Select(m => new SimilarQuestionDto(
                 m.Question, m.Score, m.Score >= retrieval.RankThreshold, m.MatchedTerms, m.Provenance,
                 m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy, m.SourceRef, m.ExampleId))
-                .ToList(),
-            result.KnownBad.Select(k => new KnownBadQuestionDto(
-                k.Question, k.Sql, k.Reason, k.Score, k.MatchedTerms, k.RejectedBy, k.RejectedUtc)).ToList()));
+                .ToList()));
     }
 
     /// <summary>The most matches one search will return however many a caller asks for. Past a handful, extra

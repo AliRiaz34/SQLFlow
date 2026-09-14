@@ -28,9 +28,9 @@ public static class QuestionConfirmationOutcome
     /// the example the estate learns from is the one that actually worked.</summary>
     public const string Corrected = "corrected";
 
-    /// <summary>The query did not answer the question. This IS stored, as a known-bad row (never as a "match"
-    /// a search can return): the next time a similar question comes in, that exact wrong query is not proposed
-    /// again, and the rejecting person's own explanation (when they gave one) travels with it.</summary>
+    /// <summary>The query did not answer the question. Nothing is stored: POWERAI.md Section 6 is explicit that
+    /// only correct, verified answers become precedent, so a rejection is recorded as having happened without
+    /// being kept as fact.</summary>
     public const string Rejected = "rejected";
 
     /// <summary>Whether <paramref name="value"/> is one of the three outcomes, case-insensitively.</summary>
@@ -54,34 +54,28 @@ public static class QuestionConfirmationOutcome
 /// <param name="Confidence">The retrieval score the confirmed answer was built from, or null when it was
 /// composed without a prior match. Never a model's own estimate of its correctness.</param>
 /// <param name="RepoId">The repo to attribute the example to, or null to keep it estate-wide.</param>
-/// <param name="Reason">On <see cref="QuestionConfirmationOutcome.Rejected"/>, why the query is wrong, in the
-/// rejecting person's own words, when they gave one. Optional: many users will not have or give a reason, and
-/// a rejection with none is still worth storing so the same wrong query is not proposed again. Ignored for
-/// every other outcome.</param>
 /// <param name="SourceRef">The datasource <paramref name="Sql"/> runs against: a whole <c>${env:...}</c>/
 /// <c>${keyvault:...}</c> reference or an <c>@alias</c>, matching a datasource the catalog already declares
 /// (the same shape and the same known-reference gate <c>PrepareQueryRequest.Reference</c> enforces). Optional:
 /// an example is still worth keeping without one, but auto-run cannot pick a connection for it until a person
 /// (today, via the GUI's datasource picker) supplies it. Ignored on <see cref="QuestionConfirmationOutcome.Rejected"/>,
-/// which is never run against anything.</param>
+/// which is never stored at all.</param>
 public sealed record ConfirmQuestionRequest(
     string? Question, string? Sql, string? Outcome, IReadOnlyList<string>? ObjectKeys = null,
-    int? Confidence = null, Guid? RepoId = null, string? Reason = null, string? SourceRef = null);
+    int? Confidence = null, Guid? RepoId = null, string? SourceRef = null);
 
 /// <summary>
-/// What the confirmation did. <see cref="Stored"/> is the fact that matters: every outcome now stores a row
-/// (a rejection as a known-bad one), so a caller must read <see cref="Confirmed"/> rather than infer
-/// correctness from the 200.
+/// What the confirmation did. <see cref="Stored"/> is the fact that matters: a rejection is accepted by the
+/// endpoint and stores nothing, so a caller must read this rather than infer from the 200 that the estate
+/// learned something.
 /// </summary>
-/// <param name="Stored">Whether an example was written or refreshed. True for every outcome now.</param>
-/// <param name="ExampleId">The row that now holds the example.</param>
+/// <param name="Stored">Whether an example was written or refreshed.</param>
+/// <param name="ExampleId">The row that now holds the example, or null when nothing was stored.</param>
 /// <param name="Outcome">The outcome as it was recorded, normalized to lower case.</param>
-/// <param name="Provenance">The provenance the stored example carries.</param>
-/// <param name="Confirmed">True for a confirmed-good example (accepted/corrected), false for a known-bad one
-/// (rejected). A caller must never treat a <c>false</c> row as an answer to adapt.</param>
+/// <param name="Provenance">The provenance the stored example carries, or null when nothing was stored.</param>
 /// <param name="Message">What happened, in a sentence a caller can show a person verbatim.</param>
 public sealed record ConfirmedQuestionDto(
-    bool Stored, long? ExampleId, string Outcome, string? Provenance, bool Confirmed, string Message);
+    bool Stored, long? ExampleId, string Outcome, string? Provenance, string Message);
 
 /// <summary>
 /// What auto-running a trusted match did. <see cref="Ran"/> is the fact that matters: true means
@@ -189,42 +183,31 @@ public static class QuestionExampleEndpoints
                 StatusCodes.Status400BadRequest);
         }
 
-        var rejected = string.Equals(outcome, QuestionConfirmationOutcome.Rejected, StringComparison.Ordinal);
+        // A rejection is answered before the SQL is validated: the caller is telling us the query was WRONG,
+        // and refusing their report because the wrong query also failed to parse would lose the one signal the
+        // exchange carried. Nothing is stored either way, so nothing depends on the text being well-formed.
+        // POWERAI.md Section 6 is explicit that only correct, verified answers become precedent: a rejected
+        // query is not knowledge the estate should keep, so it is discarded rather than remembered as a
+        // "do not propose this again" row.
+        if (string.Equals(outcome, QuestionConfirmationOutcome.Rejected, StringComparison.Ordinal))
+        {
+            return TypedResults.Ok(new ConfirmedQuestionDto(
+                Stored: false, ExampleId: null, outcome, Provenance: null,
+                "The rejection was recorded and nothing was stored: a refuted query is not knowledge, so it "
+                + "never becomes an example later answers are grounded in."));
+        }
 
         string sql;
-        if (rejected)
+        try
         {
-            // A rejected row is NEVER run: it exists purely as a "do not propose this again" signal, so it is
-            // stored as given rather than parsed. Requiring it to pass ReadOnlyQueryGuard would silently drop
-            // exactly the case worth remembering most, a proposal that would have WRITTEN if anyone ran it.
-            sql = (request.Sql ?? string.Empty).Trim();
-            if (sql.Length == 0)
-            {
-                return Problem("The query being rejected must not be empty.", StatusCodes.Status400BadRequest);
-            }
+            // Parsed, not pattern-matched, and for the same reason the prepare step parses: an example is a
+            // query later answers get adapted from, so one that would write if it ran must never enter the
+            // store, however it was labelled on the way in.
+            sql = ReadOnlyQueryGuard.Validate(request.Sql ?? string.Empty);
         }
-        else
+        catch (SqlFlowException ex)
         {
-            try
-            {
-                // Parsed, not pattern-matched, and for the same reason the prepare step parses: a confirmed-good
-                // example is a query later answers get adapted from, so one that would write if it ran must
-                // never enter the store as reusable precedent, however it was labelled on the way in.
-                sql = ReadOnlyQueryGuard.Validate(request.Sql ?? string.Empty);
-            }
-            catch (SqlFlowException ex)
-            {
-                return Problem(ex.Message, StatusCodes.Status400BadRequest, "Query refused");
-            }
-        }
-
-        var reason = rejected ? request.Reason?.Trim() : null;
-        if (reason is { Length: > MaxReasonLength })
-        {
-            return Problem(
-                $"The rejection reason is {reason.Length} characters, over the {MaxReasonLength}-character "
-                + "limit.",
-                StatusCodes.Status400BadRequest);
+            return Problem(ex.Message, StatusCodes.Status400BadRequest, "Query refused");
         }
 
         if (request.RepoId is { } repoId)
@@ -236,12 +219,11 @@ public static class QuestionExampleEndpoints
             }
         }
 
-        // A rejected pair is never run, so no datasource applies to it; a good example carries one only when
-        // the caller supplied it, since a confirmation made before a datasource was chosen (or one confirmed
-        // from a PowerBI-derived question, which names a model entity rather than a connection) is still worth
-        // storing without it.
+        // A good example carries a datasource only when the caller supplied it, since a confirmation made
+        // before a datasource was chosen (or one confirmed from a PowerBI-derived question, which names a
+        // model entity rather than a connection) is still worth storing without it.
         string? sourceRef = null;
-        if (!rejected && !string.IsNullOrWhiteSpace(request.SourceRef))
+        if (!string.IsNullOrWhiteSpace(request.SourceRef))
         {
             sourceRef = request.SourceRef.Trim();
             if (!ComputeTaskPayload.IsWholeReference(sourceRef))
@@ -274,36 +256,29 @@ public static class QuestionExampleEndpoints
 
         // Tracked explicitly: the context defaults every query to QueryTrackingBehavior.NoTracking
         // (Program.cs), so without this the row below comes back Detached and every mutation made to it in
-        // this branch (ConfirmedUtc, the Confirmed flip, Confidence, ObjectKeys, RepoId, SourceRef) would be
-        // silently discarded by SaveChangesAsync, with no error, no exception, and a 200 response that lied
-        // about having refreshed anything.
+        // this branch (ConfirmedUtc, Confidence, ObjectKeys, RepoId, SourceRef) would be silently discarded by
+        // SaveChangesAsync, with no error, no exception, and a 200 response that lied about having refreshed
+        // anything.
         var existing = await db.QuestionExamples
             .AsTracking()
             .FirstOrDefaultAsync(e => e.ContentHash == hash, ct).ConfigureAwait(false);
         if (existing is not null)
         {
-            // Reaffirming a decision updates who last stood behind it and when, and takes the newer confidence
+            // Reaffirming an answer updates who last stood behind it and when, and takes the newer confidence
             // when one was supplied. The question and SQL are not rewritten: they are what the hash is OF, so
-            // a change to either is a different example rather than an edit to this one. A decision CAN flip
-            // here: the same question/query pair rejected once and accepted later (or the reverse) updates
-            // Confirmed rather than adding a second row, since the pair's identity is the hash, not the verdict.
+            // a change to either is a different example rather than an edit to this one.
             existing.ConfirmedUtc = now;
             existing.ConfirmedBy = confirmedBy;
             existing.Provenance = QuestionExampleProvenance.UserConfirmed;
-            existing.Confirmed = !rejected;
-            existing.RejectionNote = reason;
-            if (!rejected)
+            existing.Confidence = request.Confidence ?? existing.Confidence;
+            if (request.ObjectKeys is { Count: > 0 })
             {
-                existing.Confidence = request.Confidence ?? existing.Confidence;
-                if (request.ObjectKeys is { Count: > 0 })
-                {
-                    existing.ObjectKeys = JoinObjectKeys(request.ObjectKeys);
-                }
+                existing.ObjectKeys = JoinObjectKeys(request.ObjectKeys);
+            }
 
-                if (sourceRef is not null)
-                {
-                    existing.SourceRef = sourceRef;
-                }
+            if (sourceRef is not null)
+            {
+                existing.SourceRef = sourceRef;
             }
 
             if (request.RepoId is not null)
@@ -313,9 +288,9 @@ public static class QuestionExampleEndpoints
 
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
             return TypedResults.Ok(new ConfirmedQuestionDto(
-                Stored: true, existing.Id, outcome, existing.Provenance, existing.Confirmed,
-                "This question and query were already stored; the existing row was refreshed rather than "
-                + "duplicated, so reaffirming a decision does not give it extra weight in later searches."));
+                Stored: true, existing.Id, outcome, existing.Provenance,
+                "This question and query were already a confirmed example; the existing one was refreshed "
+                + "rather than stored twice, so reaffirming it does not give it extra weight in later searches."));
         }
 
         var example = new CatalogQuestionExample
@@ -323,14 +298,12 @@ public static class QuestionExampleEndpoints
             RepoId = request.RepoId,
             Question = question,
             Sql = sql,
-            ObjectKeys = rejected ? string.Empty : JoinObjectKeys(request.ObjectKeys),
+            ObjectKeys = JoinObjectKeys(request.ObjectKeys),
             Provenance = QuestionExampleProvenance.UserConfirmed,
-            Confidence = rejected ? null : request.Confidence,
+            Confidence = request.Confidence,
             ConfirmedUtc = now,
             ConfirmedBy = confirmedBy,
             ContentHash = hash,
-            Confirmed = !rejected,
-            RejectionNote = reason,
             SourceRef = sourceRef,
         };
 
@@ -353,18 +326,15 @@ public static class QuestionExampleEndpoints
             }
 
             return TypedResults.Ok(new ConfirmedQuestionDto(
-                Stored: true, winner.Id, outcome, winner.Provenance, winner.Confirmed,
-                "This question and query were confirmed concurrently by someone else; that decision is the "
-                + "one now stored."));
+                Stored: true, winner.Id, outcome, winner.Provenance,
+                "This question and query were confirmed concurrently by someone else; that example is the one "
+                + "now stored."));
         }
 
-        var message = rejected
-            ? "Stored as a known-bad example: this exact query will not be proposed again for a question "
-                + "like this one."
-            : "Stored as a confirmed example. Questions that mean the same thing will now find this query, "
-                + "and the match will carry that a person confirmed it.";
         return TypedResults.Ok(new ConfirmedQuestionDto(
-            Stored: true, example.Id, outcome, example.Provenance, example.Confirmed, message));
+            Stored: true, example.Id, outcome, example.Provenance,
+            "Stored as a confirmed example. Questions that mean the same thing will now find this query, and "
+            + "the match will carry that a person confirmed it."));
     }
 
     /// <summary>
@@ -406,14 +376,6 @@ public static class QuestionExampleEndpoints
         if (example is null)
         {
             return Problem($"No confirmed example '{exampleId}' exists.", StatusCodes.Status404NotFound);
-        }
-
-        if (!example.Confirmed)
-        {
-            return Problem(
-                "That example is a known-bad row, not a confirmed answer: it was recorded so this exact query "
-                + "is never proposed again, and auto-run must never run it.",
-                StatusCodes.Status409Conflict, "Known-bad example");
         }
 
         if (string.IsNullOrWhiteSpace(example.SourceRef))
@@ -517,9 +479,6 @@ public static class QuestionExampleEndpoints
     /// <summary>How often auto-run polls the compute task it just enqueued, matching the task-status endpoint's
     /// own poll interval.</summary>
     private static readonly TimeSpan AutoRunPollInterval = TimeSpan.FromMilliseconds(250);
-
-    /// <summary>The longest rejection reason stored, matching the column's own length.</summary>
-    private const int MaxReasonLength = 2000;
 
     /// <summary>Joins the object keys the way the catalog stores them everywhere else (newline-separated, blanks
     /// dropped), so a confirmed example's keys read back exactly like a subscriber query's.</summary>

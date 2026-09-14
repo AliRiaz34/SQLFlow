@@ -49,37 +49,14 @@ public sealed record QuestionMatch(
     string? SourceRef = null,
     long? ExampleId = null);
 
-/// <summary>
-/// One previously REJECTED question/query pair relevant to a newly typed question: real knowledge, the
-/// opposite kind from a <see cref="QuestionMatch"/>. Never an answer to adapt or run; it exists so the same
-/// wrong query is not proposed again for a question like this one, and so the rejecting person's own
-/// explanation (when they gave one) can steer a fresh attempt away from the same mistake.
-/// </summary>
-/// <param name="Question">The previously typed question this pair was rejected for.</param>
-/// <param name="Sql">The query that was tried and told to be wrong. For reference only; never execute it.</param>
-/// <param name="Reason">Why it is wrong, in the rejecting person's own words, or null when none was given: a
-/// rejection with no reason is still worth remembering as "do not propose this again," even without one.</param>
-/// <param name="Score">How many of the searched terms this rejected question matched.</param>
-/// <param name="MatchedTerms">Which searched terms matched.</param>
-/// <param name="RejectedBy">Who rejected it, or null.</param>
-/// <param name="RejectedUtc">When it was rejected.</param>
-public sealed record RejectedMatch(
-    string Question, string Sql, string? Reason, int Score, IReadOnlyList<string> MatchedTerms,
-    string? RejectedBy, DateTime RejectedUtc);
-
 /// <summary>The outcome of one search: the terms actually searched for (the expansion, or the question's own
-/// words when expansion is off or unavailable), the trustworthy matches, and any known-bad precedent found
-/// alongside them. The terms travel with the result so a caller can show what was looked for, which is what
-/// makes an empty result interpretable rather than mysterious. <see cref="KnownBad"/> is populated
-/// independently of <see cref="Matches"/>: a question can have no confirmed-good precedent yet and still have
-/// a rejected one, which is exactly the case worth surfacing.</summary>
+/// words when expansion is off or unavailable) and the trustworthy matches. The terms travel with the result
+/// so a caller can show what was looked for, which is what makes an empty result interpretable rather than
+/// mysterious.</summary>
 /// <param name="SearchedTerms">The terms the stored questions were matched against.</param>
 /// <param name="Matches">The best confirmed-good matches, best first.</param>
-/// <param name="KnownBad">Rejected question/query pairs relevant to this search, best first. Never a match;
-/// always a warning.</param>
 public sealed record QuestionSearchResult(
-    IReadOnlyList<string> SearchedTerms, IReadOnlyList<QuestionMatch> Matches,
-    IReadOnlyList<RejectedMatch> KnownBad);
+    IReadOnlyList<string> SearchedTerms, IReadOnlyList<QuestionMatch> Matches);
 
 /// <summary>
 /// Matches stored questions against a newly typed one (POWERAI.md Section 6). The mechanism is a word search,
@@ -155,14 +132,8 @@ public static class QuestionSearch
         terms = Normalize(terms);
         if (terms.Count == 0)
         {
-            return new QuestionSearchResult([], [], []);
+            return new QuestionSearchResult([], []);
         }
-
-        // Computed unconditionally and early, alongside the good-match search rather than after it: a question
-        // can have NO confirmed-good precedent yet and STILL have a known-bad one (someone already tried and
-        // was told it was wrong), which is exactly the case this exists to warn about. Every return from here
-        // down carries it.
-        var knownBad = await FindKnownBadAsync(db, terms, repoId, ct).ConfigureAwait(false);
 
         // One full-text predicate per term, OR-ed: a question matching more of them ranks higher. Built as a
         // single CONTAINS over an OR-of-terms string would let SQL Server rank internally, but that means
@@ -171,7 +142,7 @@ public static class QuestionSearch
         var candidates = await MatchingQuestionsAsync(db, terms, repoId, ct).ConfigureAwait(false);
         if (candidates.Count == 0)
         {
-            return new QuestionSearchResult(terms, [], knownBad);
+            return new QuestionSearchResult(terms, []);
         }
 
         // Every candidate already matched at least one term in the database. Scoring re-checks each term here
@@ -194,7 +165,7 @@ public static class QuestionSearch
             .ToList();
         if (ranked.Count == 0)
         {
-            return new QuestionSearchResult(terms, [], knownBad);
+            return new QuestionSearchResult(terms, []);
         }
 
         var visuals = await ResolveVisualsAsync(db, ranked.Select(r => r.Row), ct).ConfigureAwait(false);
@@ -208,7 +179,7 @@ public static class QuestionSearch
                 : VisualMatch(row, matched, score, visuals));
         }
 
-        return new QuestionSearchResult(terms, matches, knownBad);
+        return new QuestionSearchResult(terms, matches);
     }
 
     /// <summary>
@@ -359,25 +330,23 @@ public static class QuestionSearch
                 .ToListAsync(ct).ConfigureAwait(false));
         }
 
-        rows.AddRange(await MatchingExamplesAsync(db, terms, repoId, confirmed: true, ct).ConfigureAwait(false));
+        rows.AddRange(await MatchingExamplesAsync(db, terms, repoId, ct).ConfigureAwait(false));
         return rows;
     }
 
     /// <summary>
-    /// Loads <see cref="CatalogQuestionExample"/> rows containing any of <paramref name="terms"/>, restricted
-    /// to <paramref name="confirmed"/> good examples or known-bad rejected ones, via full-text or LIKE
-    /// depending on what the instance has. Shared by the main candidate search (<c>confirmed: true</c>, called
-    /// from <see cref="MatchingQuestionsAsync"/>) and the known-bad lookup (<c>confirmed: false</c>, called
-    /// from <see cref="FindKnownBadAsync"/>), so the two paths cannot drift into matching differently.
+    /// Loads <see cref="CatalogQuestionExample"/> rows containing any of <paramref name="terms"/>, via full-text
+    /// or LIKE depending on what the instance has. Every stored example is a confirmed-good precedent: a
+    /// rejection is never written to this table (POWERAI.md Section 6), so there is no separate confirmed/
+    /// known-bad split to filter on here.
     /// </summary>
     private static async Task<List<QuestionRow>> MatchingExamplesAsync(
-        CatalogDbContext db, IReadOnlyList<string> terms, Guid? repoId, bool confirmed, CancellationToken ct)
+        CatalogDbContext db, IReadOnlyList<string> terms, Guid? repoId, CancellationToken ct)
     {
         // A confirmed example attributed to NO repo stays in a repo-scoped search on purpose: a person's
         // confirmation is a fact about the estate rather than about one repository's contents, so scoping the
         // search to a repo must not hide the answers this estate has already checked.
         var examples = db.QuestionExamples.AsNoTracking()
-            .Where(e => e.Confirmed == confirmed)
             .Where(e => repoId == null || e.RepoId == repoId || e.RepoId == null);
 
         // Probed per TABLE rather than once for the deployment: the two full-text indexes ship in separate
@@ -403,62 +372,6 @@ public static class QuestionSearch
             .Take(MaxCandidates)
             .ToListAsync(ct).ConfigureAwait(false);
     }
-
-    /// <summary>
-    /// Ranks and resolves the known-bad rejected examples relevant to this search, capped small
-    /// (<see cref="MaxKnownBad"/>): these are warnings, not candidates competing for the top answer, so a long
-    /// tail of loosely-related rejections would only add noise. Uses the SAME term-matching and scoring as the
-    /// good-match path, so "which of these are relevant" means the same thing on both sides.
-    /// </summary>
-    private static async Task<IReadOnlyList<RejectedMatch>> FindKnownBadAsync(
-        CatalogDbContext db, IReadOnlyList<string> terms, Guid? repoId, CancellationToken ct)
-    {
-        var candidates = await MatchingExamplesAsync(db, terms, repoId, confirmed: false, ct)
-            .ConfigureAwait(false);
-        if (candidates.Count == 0)
-        {
-            return [];
-        }
-
-        var ranked = candidates
-            .Select(c => (Row: c, Matched: terms.Where(t => MatchesTerm(c.Question, t)).ToList()))
-            .Select(c => (c.Row, c.Matched, Score: c.Matched.Count))
-            .Where(c => c.Score > 0)
-            .OrderByDescending(c => c.Score)
-            .ThenBy(c => c.Row.Question.Length)
-            .Take(MaxKnownBad)
-            .ToList();
-        if (ranked.Count == 0)
-        {
-            return [];
-        }
-
-        var ids = ranked.Select(r => r.Row.ExampleId).ToList();
-        var details = await db.QuestionExamples.AsNoTracking()
-            .Where(e => ids.Contains(e.Id))
-            .Select(e => new { e.Id, e.Sql, e.RejectionNote, e.ConfirmedBy, e.ConfirmedUtc })
-            .ToListAsync(ct).ConfigureAwait(false);
-        var byId = details.ToDictionary(d => d.Id);
-
-        var results = new List<RejectedMatch>(ranked.Count);
-        foreach (var (row, matched, score) in ranked)
-        {
-            if (!byId.TryGetValue(row.ExampleId, out var detail))
-            {
-                continue;
-            }
-
-            results.Add(new RejectedMatch(
-                row.Question, detail.Sql, detail.RejectionNote, score, matched, detail.ConfirmedBy,
-                detail.ConfirmedUtc));
-        }
-
-        return results;
-    }
-
-    /// <summary>The most known-bad rejections one search surfaces. Small on purpose: these are warnings
-    /// riding alongside the real answer, not a second ranked list a caller has to work through.</summary>
-    private const int MaxKnownBad = 5;
 
     /// <summary>Folds one predicate per term into a single OR-ed predicate, so a row matching any term is a
     /// candidate and a per-term factory is all each store has to supply.</summary>
