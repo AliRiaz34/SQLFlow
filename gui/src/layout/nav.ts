@@ -1,7 +1,6 @@
 import {
   Activity,
   Bell,
-  BookmarkCheck,
   BookOpen,
   BotMessageSquare,
   Cable,
@@ -106,9 +105,7 @@ export const navGroups: NavGroup[] = [
     requiresScope: "admin",
     items: [
       { label: "Users", to: "/users", icon: Users, testId: "nav-users" },
-      { label: "Semantic layer", to: "/semantic-layer", icon: Sparkles, testId: "nav-semantic-layer" },
-      { label: "Saved answers", to: "/saved-answers", icon: BookmarkCheck, testId: "nav-saved-answers" },
-    ],
+      { label: "Semantic layer", to: "/semantic-layer", icon: Sparkles, testId: "nav-semantic-layer" },    ],
   },
   {
     id: "settings",

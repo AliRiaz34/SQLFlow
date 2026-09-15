@@ -1,43 +1,42 @@
-// The PowerAI saved answers: every question/query pair a person confirmed, which the assistant reuses for questions
-// that mean the same thing (and runs without asking when one matches closely). Answers are ADDED only by confirming
-// one in a conversation; this page is where an admin reviews what was stored, corrects a query, or deletes an answer
-// that should no longer be precedent.
-
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Pencil, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { questionExampleApi } from "../../api/endpoints";
-import type { QuestionExampleAdmin } from "../../api/types";
+import { semanticLayerApi } from "../../api/endpoints";
+import type { SemanticExampleAdmin } from "../../api/types";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
-import { Page } from "../../components/Page";
-import { PageHeader } from "../../components/PageHeader";
 import { PagedTable, type Column } from "../../components/PagedTable";
 import { RelativeTime } from "../../components/RelativeTime";
-import { errorText, ServedBadge, useDebouncedValue } from "../semantic-layer/shared";
-import { SavedAnswerDialog } from "./SavedAnswerDialog";
-import { refreshSavedAnswers, SAVED_ANSWERS_ROOT } from "./savedAnswers";
+import { ExampleDialog } from "./ExampleDialog";
+import { errorText, refreshSemanticLayer, SEMANTIC_ROOT, ServedBadge, useDebouncedValue } from "./shared";
 
-export default function SavedAnswersPage() {
+/**
+ * Every saved answer across the layer: the question/query pairs people confirmed, which the assistant reuses as the
+ * example queries of the tables they read (and runs without asking when a new question matches one closely). Answers
+ * are ADDED only by confirming one in a conversation; this tab is where an admin reviews what was stored, corrects a
+ * query, or deletes an answer that should no longer be precedent. A table's own Examples tab shows the same answers for
+ * that table.
+ */
+export function SavedAnswersPanel() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const term = useDebouncedValue(search.trim(), 300);
-  const [editing, setEditing] = useState<QuestionExampleAdmin | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<QuestionExampleAdmin | null>(null);
+  const [editing, setEditing] = useState<SemanticExampleAdmin | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SemanticExampleAdmin | null>(null);
 
   const remove = useMutation({
-    mutationFn: (id: number) => questionExampleApi.remove(id),
+    mutationFn: (id: number) => semanticLayerApi.deleteExample(id),
     onSuccess: () => {
       toast.success("Saved answer deleted.");
       setPendingDelete(null);
-      refreshSavedAnswers(queryClient);
+      refreshSemanticLayer(queryClient);
     },
     onError: (error) => toast.error(errorText(error)),
   });
 
-  const columns: Column<QuestionExampleAdmin>[] = [
+  const columns: Column<SemanticExampleAdmin>[] = [
     {
       id: "question",
       header: "Question",
@@ -109,11 +108,11 @@ export default function SavedAnswersPage() {
   ];
 
   return (
-    <Page data-testid="page-saved-answers">
-      <PageHeader
-        title="Saved answers"
-        subtitle="Queries people confirmed as the right answer to a question. The assistant reuses them, and runs one without asking when a new question matches it closely."
-      />
+    <div className="flex flex-col gap-3" data-testid="semantic-saved-answers-panel">
+      <p className="text-[13px] text-muted-foreground">
+        Queries people confirmed as the right answer to a question. The assistant reuses them as example queries for the
+        tables they read, and runs one without asking when a new question matches it closely.
+      </p>
       <div className="max-w-sm">
         <Input
           value={search}
@@ -124,9 +123,9 @@ export default function SavedAnswersPage() {
           data-testid="saved-answers-search"
         />
       </div>
-      <PagedTable<QuestionExampleAdmin>
-        queryKey={[SAVED_ANSWERS_ROOT, "list", term]}
-        fetchPage={(page, pageSize) => questionExampleApi.list({ search: term === "" ? undefined : term, page, pageSize })}
+      <PagedTable<SemanticExampleAdmin>
+        queryKey={[SEMANTIC_ROOT, "examples", term]}
+        fetchPage={(page, pageSize) => semanticLayerApi.examples({ search: term === "" ? undefined : term, page, pageSize })}
         columns={columns}
         rowKey={(row) => row.id}
         onRowClick={(row) => setEditing(row)}
@@ -135,7 +134,7 @@ export default function SavedAnswersPage() {
           : "No saved answer matches this search."}
         data-testid="saved-answers-table"
       />
-      {editing !== null && <SavedAnswerDialog answer={editing} onClose={() => setEditing(null)} />}
+      {editing !== null && <ExampleDialog example={editing} onClose={() => setEditing(null)} />}
       <ConfirmDialog
         open={pendingDelete !== null}
         title="Delete this saved answer?"
@@ -146,6 +145,6 @@ export default function SavedAnswersPage() {
         onConfirm={() => pendingDelete !== null && remove.mutate(pendingDelete.id)}
         onClose={() => setPendingDelete(null)}
       />
-    </Page>
+    </div>
   );
 }

@@ -26,9 +26,29 @@ public sealed record SemanticMeasureDto(
 /// <summary>A stored question with the SQL that already answers it, reading the table it is listed under.</summary>
 public sealed record SemanticExampleDto(long Id, string Question, string Sql, string Provenance, DateTime ConfirmedUtc);
 
+/// <summary>A Power BI measure or calculated column a report defines on a semantic layer table. <c>Expression</c> is
+/// DAX, not SQL: mirror its logic rather than pasting it.</summary>
+public sealed record SemanticReportFieldDto(string Name, string Expression, string? Description);
+
+/// <summary>A relationship a Power BI model declares from a semantic layer table to another layer table, in warehouse
+/// terms: the table's own column, the other table, and its column, each spelled as the catalog spells it.
+/// <c>IsActive</c> false means it applies only where a measure invokes it with USERELATIONSHIP. <c>ModelTable</c> and
+/// <c>OtherModelTable</c> are the report's names for the two tables, as its DAX refers to them.</summary>
+public sealed record SemanticReportRelationshipDto(
+    string OwnColumn, string OtherObjectKey, string OtherName, string OtherColumn, string? Cardinality, bool IsActive,
+    string ModelTable, string OtherModelTable);
+
+/// <summary>One Power BI report's model table that loads from a semantic layer table, reduced to what the column
+/// allow-list lets through: the measures and calculated columns whose every column is allowed, and the relationships
+/// whose both tables are in the layer and both columns allowed.</summary>
+public sealed record SemanticReportModelDto(
+    string SubscriberKey, string SubscriberName, string ReportFile, string ModelTable,
+    IReadOnlyList<SemanticReportFieldDto> Measures, IReadOnlyList<SemanticReportFieldDto> CalculatedColumns,
+    IReadOnlyList<SemanticReportRelationshipDto> Relationships);
+
 /// <summary>One semantic layer table's whole grounding bundle: identity, business context, allowed columns, the
-/// servable key, joins, measures, example queries, the reports and dashboards that consume it, and the layer-wide
-/// instructions.</summary>
+/// servable key, joins, measures, example queries, the Power BI models built on it, the reports and dashboards that
+/// consume it, and the layer-wide instructions.</summary>
 public sealed record SemanticTableDto(
     string Key, string ServerRef, string? Database, string? Schema, string Name, string Kind,
     string? BusinessName, string? Description, IReadOnlyList<string> Synonyms,
@@ -37,6 +57,7 @@ public sealed record SemanticTableDto(
     IReadOnlyList<SemanticJoinDto> Joins,
     IReadOnlyList<SemanticMeasureDto> Measures,
     IReadOnlyList<SemanticExampleDto> Examples,
+    IReadOnlyList<SemanticReportModelDto> ReportModels,
     IReadOnlyList<ObjectSubscriberDto> Consumers,
     string? Instructions);
 

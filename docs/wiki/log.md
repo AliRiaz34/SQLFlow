@@ -218,3 +218,12 @@ still describe the confirmed-example table and the GUI confirmation row as unbui
 (`CatalogQuestionExample`, `AnswerConfirmation.tsx`), plus the admin Saved answers page added the same
 day. The raw document is left as written. The map now links the semantic layer decision page, which had
 no inbound `related` link.
+
+## [2026-09-15] ingest | Saved answers and Power BI models join the semantic layer
+
+Extended [The semantic layer is the column allow-list](decisions/semantic-layer-is-the-allow-list.md) with two
+decisions the human made: the saved answers are stored in the semantic layer (`QuestionExample` renamed to
+`SemanticExample` by a hand-written rename migration, curation moved to the Semantic layer page, the confirm and
+auto-run routes kept), and a Power BI report's model is served on the warehouse table each model table loads from
+(`describe_semantic_table`'s `reportModels`), graded against the column allow-list, rather than imported as curated
+annotations or served ungraded. The surfaces are documented in `concept-semantic-layer` and `flow-subscribers`.

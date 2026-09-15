@@ -826,6 +826,12 @@ public class CatalogSubscriberModelTable
 
     /// <summary>The warehouse table the expression resolved to, when it resolved.</summary>
     public string? SourceName { get; set; }
+
+    /// <summary>The node key of the warehouse object the table loads from (a <see cref="CatalogObject.Key"/>), resolved
+    /// at sync through lineage's identity resolution. This is what the semantic layer serves the model on: the table's
+    /// measures, calculated columns, and relationships appear in that object's bundle. Null when the source did not
+    /// resolve.</summary>
+    public string? ObjectKey { get; set; }
 }
 
 /// <summary>
@@ -963,8 +969,8 @@ public class CatalogSubscriberReportVisualQuestion
 /// One question/query pair the estate is willing to stand behind: the confirmed-example store POWERAI.md
 /// Sections 6 and 8 specify. A row records that a question was answered by a particular query and that the
 /// answer was CONFIRMED, either by having been derived from a report a team already runs in production
-/// (<see cref="QuestionExampleProvenance.PowerBi"/>) or by a person accepting or correcting a generated answer
-/// (<see cref="QuestionExampleProvenance.UserConfirmed"/>). It is what makes retrieval self-improving under
+/// (<see cref="SemanticExampleProvenance.PowerBi"/>) or by a person accepting or correcting a generated answer
+/// (<see cref="SemanticExampleProvenance.UserConfirmed"/>). It is what makes retrieval self-improving under
 /// real usage: an answer confirmed today is an example the next similar question is matched against.
 /// <para>
 /// Unlike <see cref="CatalogSubscriberReportVisualQuestion"/>, which is repo-scoped and deleted and reinserted
@@ -980,7 +986,7 @@ public class CatalogSubscriberReportVisualQuestion
 /// risk a mistake resurfacing as if it were checked.
 /// </para>
 /// </summary>
-public class CatalogQuestionExample
+public class CatalogSemanticExample
 {
     public long Id { get; set; }
 
@@ -1001,8 +1007,8 @@ public class CatalogQuestionExample
     /// none.</summary>
     public string ObjectKeys { get; set; } = string.Empty;
 
-    /// <summary>Where the example came from: <see cref="QuestionExampleProvenance.PowerBi"/> or
-    /// <see cref="QuestionExampleProvenance.UserConfirmed"/>. Kept as a value rather than inferred from which
+    /// <summary>Where the example came from: <see cref="SemanticExampleProvenance.PowerBi"/> or
+    /// <see cref="SemanticExampleProvenance.UserConfirmed"/>. Kept as a value rather than inferred from which
     /// table a row came from, so a caller weighing two matches can tell "a dashboard asks this" from "a person
     /// checked this" without knowing how the store is laid out.</summary>
     public string Provenance { get; set; } = string.Empty;
@@ -1036,9 +1042,9 @@ public class CatalogQuestionExample
     public string? SourceRef { get; set; }
 }
 
-/// <summary>The provenances a <see cref="CatalogQuestionExample"/> can carry, named once so the writer, the
+/// <summary>The provenances a <see cref="CatalogSemanticExample"/> can carry, named once so the writer, the
 /// search, and the API surface cannot drift into spelling the same value differently.</summary>
-public static class QuestionExampleProvenance
+public static class SemanticExampleProvenance
 {
     /// <summary>Derived from an extracted PowerBI report visual: a question a dashboard already asks in
     /// production.</summary>
@@ -1054,12 +1060,12 @@ public static class QuestionExampleProvenance
 }
 
 /// <summary>
-/// Computes <see cref="CatalogQuestionExample.ContentHash"/> from a question and its query, so the writer and
+/// Computes <see cref="CatalogSemanticExample.ContentHash"/> from a question and its query, so the writer and
 /// any later reader agree on when two confirmations are the same fact. Whitespace and case are normalized away
 /// because "What is our revenue?" retyped with a different capital letter or a stray double space is the same
 /// question a person confirmed before, and storing it twice would double its weight in every future search.
 /// </summary>
-public static class QuestionExampleHash
+public static class SemanticExampleHash
 {
     /// <summary>The lowercase-hex SHA-256 of the whitespace-collapsed, lowercased question and SQL, separated
     /// by a newline so no question's text can run into a query's and hash alike.</summary>

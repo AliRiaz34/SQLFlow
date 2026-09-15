@@ -1533,6 +1533,7 @@ public sealed class CatalogSync
                         SourceDatabase = table.SourceDatabase,
                         SourceSchema = table.SourceSchema,
                         SourceName = table.SourceName,
+                        ObjectKey = table.ObjectKey,
                     });
 
                     foreach (var field in table.Fields)

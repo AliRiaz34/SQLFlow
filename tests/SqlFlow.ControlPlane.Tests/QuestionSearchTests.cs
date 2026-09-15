@@ -421,17 +421,17 @@ public sealed class QuestionSearchTests
         await using var db = CatalogDatabase.Create(cs);
         var exampleQuestion = "How much revenue did each reseller bring in?";
         var exampleSql = "SELECT ResellerKey, SUM(SalesAmount) FROM FactResellerSales GROUP BY ResellerKey";
-        var example = new CatalogQuestionExample
+        var example = new CatalogSemanticExample
         {
             RepoId = repoId,
             Question = exampleQuestion,
             Sql = exampleSql,
             ObjectKeys = "[Dw].[arc].[FactResellerSales]",
-            Provenance = QuestionExampleProvenance.UserConfirmed,
+            Provenance = SemanticExampleProvenance.UserConfirmed,
             Confidence = 3,
             ConfirmedUtc = DateTime.UtcNow,
             ConfirmedBy = "analyst@example.com",
-            ContentHash = QuestionExampleHash.Compute(exampleQuestion, exampleSql),
+            ContentHash = SemanticExampleHash.Compute(exampleQuestion, exampleSql),
         };
 
         try
@@ -444,18 +444,18 @@ public sealed class QuestionSearchTests
                     "[Dw].[arc].[Sales]", "Revenue by Region"),
             ]);
 
-            db.QuestionExamples.Add(example);
+            db.SemanticExamples.Add(example);
             await db.SaveChangesAsync();
 
             var result = await FindWhenIndexedAsync(
                 db, "where does our revenue come from", ["revenue"], repoId,
-                r => r.Matches.Any(m => m.Provenance == QuestionExampleProvenance.UserConfirmed));
+                r => r.Matches.Any(m => m.Provenance == SemanticExampleProvenance.UserConfirmed));
 
             // Both questions carry "revenue" and so tie on score; the confirmed one comes first because a
             // person checked it, which is the stronger precedent of the two.
             Assert.Equal(2, result.Matches.Count);
             var best = result.Matches[0];
-            Assert.Equal(QuestionExampleProvenance.UserConfirmed, best.Provenance);
+            Assert.Equal(SemanticExampleProvenance.UserConfirmed, best.Provenance);
             Assert.Equal(exampleQuestion, best.Question);
             Assert.Equal(result.Matches[1].Score, best.Score);
 
@@ -479,7 +479,7 @@ public sealed class QuestionSearchTests
         }
         finally
         {
-            await db.QuestionExamples.Where(e => e.ContentHash == example.ContentHash).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => e.ContentHash == example.ContentHash).ExecuteDeleteAsync();
             await CleanupAsync(db, repoId);
         }
     }
@@ -499,18 +499,18 @@ public sealed class QuestionSearchTests
         var repoId = Guid.NewGuid();
         var question = $"What is the average basket size in store {suffix}?";
         var sql = "SELECT Store, AVG(BasketSize) FROM Baskets GROUP BY Store";
-        var hash = QuestionExampleHash.Compute(question, sql);
+        var hash = SemanticExampleHash.Compute(question, sql);
 
         await using var db = CatalogDatabase.Create(cs);
         try
         {
-            db.QuestionExamples.Add(new CatalogQuestionExample
+            db.SemanticExamples.Add(new CatalogSemanticExample
             {
                 RepoId = null,
                 Question = question,
                 Sql = sql,
                 ObjectKeys = "[Dw].[arc].[Baskets]",
-                Provenance = QuestionExampleProvenance.UserConfirmed,
+                Provenance = SemanticExampleProvenance.UserConfirmed,
                 ConfirmedUtc = DateTime.UtcNow,
                 ConfirmedBy = "analyst@example.com",
                 ContentHash = hash,
@@ -524,11 +524,11 @@ public sealed class QuestionSearchTests
 
             var match = Assert.Single(result.Matches, m => m.Question == question);
             Assert.Equal(sql, match.Sql);
-            Assert.Equal(QuestionExampleProvenance.UserConfirmed, match.Provenance);
+            Assert.Equal(SemanticExampleProvenance.UserConfirmed, match.Provenance);
         }
         finally
         {
-            await db.QuestionExamples.Where(e => e.ContentHash == hash).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => e.ContentHash == hash).ExecuteDeleteAsync();
         }
     }
 

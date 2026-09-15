@@ -25,6 +25,10 @@ sourceRefs:
   - src/SqlFlow.ControlPlane/Api/SemanticLayer.cs
   - src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs
   - src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs
+  - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
+  - src/SqlFlow.Catalog/CatalogSync.cs
+  - gui/src/features/semantic-layer/SavedAnswersPanel.tsx
   - src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs
   - src/SqlFlow.ControlPlane/Api/ColumnPolicyGuard.cs
   - src/SqlFlow.Catalog/CatalogEntities.cs
@@ -58,7 +62,8 @@ On top of that set the layer holds business context, all admin-authored:
 | Curated relationships | `SemanticRelationship` | Joins an admin vouches for, preferred over joins discovered from code |
 | Measures | `SemanticMeasure` | Named SQL expressions anchored to one table, to reuse verbatim |
 | General instructions | `SemanticLayerSettings.Instructions` | Conventions every query must follow |
-| Example queries | `QuestionExample` (the existing confirmed-question store) | Questions already answered with SQL reading the table |
+| Power BI models | `SubscriberModelTable`, `SubscriberModelField`, `SubscriberModelRelationship`, written at sync from each report and tied to the warehouse table each model table loads from (`ObjectKey`) | The measures, calculated columns (DAX), and relationships reports build on the table |
+| Example queries (saved answers) | `SemanticExample` (every question/query pair a person confirmed; renamed from `QuestionExample` by migration `MoveQuestionExamplesIntoSemanticLayer`) | Questions already answered with SQL reading the table |
 
 ## What is served, and what is withheld
 
@@ -73,10 +78,17 @@ long after something naming it was written (`SemanticLayer.cs`):
 - **Measures**: composed as `SELECT expression AS [measure_value] FROM anchor` and served only when that parses
   to exactly one scalar select over the anchor (no second table, filter, grouping, or subquery; comments and `;`
   are refused outright) and passes `ReadOnlyQueryGuard` and `ColumnPolicyGuard`.
-- **Examples**: the newest `QuestionExample` rows whose `ObjectKeys` include the table, served only when their
+- **Examples**: the newest `SemanticExample` rows whose `ObjectKeys` include the table, served only when their
   SQL passes `ReadOnlyQueryGuard` and `ColumnPolicyGuard`; at most 10 per table. A confirmed example sent without
-  object keys gets them from the catalogued tables its SQL names, and admins correct or delete examples on the GUI's
-  Saved answers page (`/saved-answers`).
+  object keys gets them from the catalogued tables its SQL names, and admins correct or delete them on the editor's
+  Saved answers tab and on each table's Examples tab.
+- **Power BI models**: every report model table whose `ObjectKey` is the table (at most 20). A measure or calculated
+  column is served only when every column its DAX reads (`Table[Column]`, `'Table'[Column]`, `[Column]`) is an allowed
+  column of the warehouse table its model table loads from, and every measure or calculated column it uses is itself
+  servable. A column the report renamed counts as not allowed, since nothing maps it back to its warehouse column. A
+  relationship is served only when both model tables load from layer tables and both columns are allowed, spelled as
+  the catalog spells them. A report none of whose definitions pass is left out. DAX is served verbatim and never
+  evaluated.
 
 The admin editor shows every annotation with its state: `served`, or `withheld` with the reason.
 
@@ -91,7 +103,7 @@ is refused with 409.
 | `GET /api/v1/semantic-layer` | Instructions, the (database, schema) pairs holding layer tables with counts, and every servable measure |
 | `GET /api/v1/semantic-layer/search?q=` | Layer tables matching every word (name, schema, business name, description, synonyms, or an allowed column's name, description, or synonyms), with the matched columns; plus matching measures |
 | `GET /api/v1/semantic-layer/tables?database=&schema=` | Layer tables, paged, with business context and allowed column count |
-| `GET /api/v1/semantic-layer/tables/describe?key=` | One table's bundle: allowed columns, key, joins with a ready `on` clause, measures, examples, consumers, instructions. 404 when the table is not in the layer |
+| `GET /api/v1/semantic-layer/tables/describe?key=` | One table's bundle: allowed columns, key, joins with a ready `on` clause, measures, examples, the Power BI `reportModels` built on it, consumers, instructions. 404 when the table is not in the layer |
 
 ## Admin API (admin scope)
 
@@ -99,11 +111,12 @@ is refused with 409.
 | --- | --- |
 | `GET /api/v1/powerai/semantic-layer/schemas` | Objects with catalogued columns per (database, schema), and how many are in the layer |
 | `GET /api/v1/powerai/semantic-layer/objects?database=&schema=&name=&inLayer=` | Objects with allowed/total column counts, paged |
-| `GET /api/v1/powerai/semantic-layer/objects/detail?key=` | One object's editor state: every column with its policy, annotation, curated and discovered joins, measures, examples, each with served/withheld state |
+| `GET /api/v1/powerai/semantic-layer/objects/detail?key=` | One object's editor state: every column with its policy, annotation, curated and discovered joins, measures, examples, and Power BI report models, each with served/withheld state |
 | `PUT /api/v1/powerai/semantic-layer/objects/annotation` | Replace business name, description, synonyms, curated key (all empty removes the annotation) |
 | `GET`, `PUT /api/v1/powerai/semantic-layer/instructions` | Read or replace the layer-wide instructions (at most 20000 characters) |
 | `GET`, `POST /api/v1/powerai/semantic-layer/measures`; `PUT`, `DELETE .../measures/{id}` | List (with state), create, replace, delete measures |
 | `POST /api/v1/powerai/semantic-layer/relationships`; `PUT`, `DELETE .../relationships/{id}` | Create, replace, delete curated relationships (`joinType` `Inner` or `Left`) |
+| `GET /api/v1/powerai/semantic-layer/examples?search=`; `GET`, `PUT`, `DELETE .../examples/{id}` | List (newest first, with state), read, correct, and delete saved answers. An edit takes `question`, `sql`, and `sourceRef` (blank to infer), is validated exactly as a confirmation is, re-resolves the tables it reads when the SQL changes, and answers 409 when it would duplicate another. Confirming a new one stays `POST /api/v1/powerai/questions/confirm` (operate scope) |
 
 Column allow state, description, and synonyms are written through `PUT /api/v1/powerai/column-policies` (one
 column) and `PUT /api/v1/powerai/column-policies/objects` (every column of an object).
@@ -161,11 +174,16 @@ step), but never their columns.
 
 ## GUI
 
-Admin > **Semantic layer** (`/semantic-layer`; `/column-policies` redirects there) has three tabs:
+Admin > **Semantic layer** (`/semantic-layer`; `/column-policies` redirects there) has four tabs:
 
 - **Tables**: a database > schema > object tree badged with allowed/total columns (optionally only objects in
   the layer), and for the selected object the About (business name, description, synonyms, key), Columns (allow
   toggle, description, synonyms, reason; allow all, deny all), Relationships (curated and discovered), Measures,
-  and Examples tabs. The selected object is in the URL as `?object=`.
+  and Examples (each saved answer reading the table, with edit and delete), and Power BI (what reports define on the table, read-only, each with its
+  served/withheld state) tabs. The selected object is in the URL
+  as `?object=`.
 - **Instructions & measures**: the layer-wide instructions and every measure.
+- **Saved answers** (`?tab=examples`; `/saved-answers` redirects here): every saved answer across the layer, with a
+  search over question and query text, its datasource, who last stood behind it, its served/withheld state, and
+  edit and delete.
 - **Blocked columns**: every column outside the layer, denied or never reviewed.

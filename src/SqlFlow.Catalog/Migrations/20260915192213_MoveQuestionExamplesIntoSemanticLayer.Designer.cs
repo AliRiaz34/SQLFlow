@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SqlFlow.Catalog;
 
@@ -11,9 +12,11 @@ using SqlFlow.Catalog;
 namespace SqlFlow.Catalog.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    partial class CatalogDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260915192213_MoveQuestionExamplesIntoSemanticLayer")]
+    partial class MoveQuestionExamplesIntoSemanticLayer
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2420,10 +2423,6 @@ namespace SqlFlow.Catalog.Migrations
                         .HasMaxLength(250)
                         .HasColumnType("nvarchar(250)");
 
-                    b.Property<string>("ObjectKey")
-                        .HasMaxLength(900)
-                        .HasColumnType("nvarchar(900)");
-
                     b.Property<string>("PowerQuery")
                         .HasColumnType("nvarchar(max)");
 
@@ -2453,8 +2452,6 @@ namespace SqlFlow.Catalog.Migrations
                         .HasColumnType("nvarchar(900)");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ObjectKey");
 
                     b.HasIndex("RepoId");
 

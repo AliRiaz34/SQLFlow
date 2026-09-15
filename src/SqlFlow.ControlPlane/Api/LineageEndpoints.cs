@@ -249,7 +249,7 @@ public sealed record SubscriberReportPageDto(
 /// know which connection the query runs against instead of asking a person.
 /// </para>
 /// <para>
-/// <c>ExampleId</c> is the <c>CatalogQuestionExample.Id</c> behind this match, present only for a
+/// <c>ExampleId</c> is the <c>CatalogSemanticExample.Id</c> behind this match, present only for a
 /// user-confirmed one: pass it to <c>POST /api/v1/powerai/questions/{id}/auto-run</c> (the
 /// <c>auto_run_trusted_match</c> MCP tool) to run a TRUSTED match's SQL immediately, capped small, without a
 /// person confirming it again. Null for a PowerBI-derived question, which has no such row.
@@ -266,38 +266,14 @@ public sealed record SimilarQuestionsDto(
     string Question, IReadOnlyList<string> SearchedTerms, int ScoreThreshold,
     IReadOnlyList<SimilarQuestionDto> Matches);
 
-/// <summary>One column, calculated column, or measure of a report's semantic model. <c>Kind</c> is
-/// <c>column</c>, <c>calculatedColumn</c>, or <c>measure</c>; <c>Expression</c> is the DAX of a calculated column or
-/// measure (stored verbatim, never evaluated); <c>DataType</c> a column's model type.</summary>
-public sealed record SubscriberReportModelFieldDto(
-    string Name, string Kind, string? DataType, string? Expression, string? Description);
-
-/// <summary>One table of a report's semantic model: the entity visuals and DAX name, the Power Query (M) that loads
-/// it, the warehouse object that expression resolved to (null parts when it did not resolve), and its fields.</summary>
-public sealed record SubscriberReportModelTableDto(
-    string Name, string? SourceDatabase, string? SourceSchema, string? SourceName, string? PowerQuery,
-    IReadOnlyList<SubscriberReportModelFieldDto> Fields);
-
-/// <summary>One relationship between two model tables. <c>IsActive</c> false means it applies only where a measure
-/// invokes it with USERELATIONSHIP.</summary>
-public sealed record SubscriberReportModelRelationshipDto(
-    string FromTable, string? FromColumn, string ToTable, string? ToColumn, string? Cardinality, bool IsActive);
-
-/// <summary>The semantic model behind one report file.</summary>
-public sealed record SubscriberReportModelDto(
-    string ReportFile, IReadOnlyList<SubscriberReportModelTableDto> Tables,
-    IReadOnlyList<SubscriberReportModelRelationshipDto> Relationships);
-
 /// <summary>The Power BI report structure behind one subscriber: every page, the visuals on it, and each
-/// field's role, plus <c>Models</c>, the semantic model behind each report file (how it computes its numbers).
-/// This is the consumption-side answer to "what questions does this dashboard already ask, and in what shape",
-/// distinct from <see cref="SubscriberDossierDto"/>'s queries/objects (which answer "what tables does it read").
-/// Empty <c>Pages</c> means the subscriber has no extracted report, not that one failed to load; empty
-/// <c>Models</c> means no model was extracted (a hand-authored subscriber, or a report connected live to a
-/// published dataset).</summary>
+/// field's role. This is the consumption-side answer to "what questions does this dashboard already ask, and in
+/// what shape", distinct from <see cref="SubscriberDossierDto"/>'s queries/objects (which answer "what tables
+/// does it read"). Empty <c>Pages</c> means the subscriber has no extracted report, not that one failed to load.
+/// The report's semantic model (measures, calculated columns, relationships) is served by the semantic layer on the
+/// warehouse table each model table loads from, where it is checked against the column allow-list.</summary>
 public sealed record SubscriberReportDto(
-    string SubscriberKey, string SubscriberName, IReadOnlyList<SubscriberReportPageDto> Pages,
-    IReadOnlyList<SubscriberReportModelDto> Models);
+    string SubscriberKey, string SubscriberName, IReadOnlyList<SubscriberReportPageDto> Pages);
 
 /// <summary>One repo whose lineage references an object: how many edges in that repo touch it, and whether any of
 /// them writes/creates it (the repo where a flow populates it). The list is ranked so the writing repo comes
@@ -1079,10 +1055,6 @@ public static class LineageEndpoints
     /// collection is capped for a stable, single-response payload (the paged endpoints serve the full sets).</summary>
     private const int MaxDossierRows = 500;
 
-    /// <summary>The row cap on each of a report's semantic model reads (tables, fields, relationships): higher than
-    /// <see cref="MaxDossierRows"/> because one model routinely declares hundreds of columns.</summary>
-    private const int MaxModelRows = 5000;
-
     /// <summary>The node-key prefix every data subscriber carries: subscribers live on a synthetic server
     /// identity, so a key starting with this is a consumer, never a database object. Mirrors the <c>file|</c>
     /// prefix the drawable graph already keys file endpoints by.</summary>
@@ -1789,47 +1761,7 @@ public static class LineageEndpoints
                 p.ReportFile, p.Ordinal, p.DisplayName, visualsByPage[p.PageKey].ToList()))
             .ToList();
 
-        // The semantic model behind each report file, loaded flat and grouped in memory like the pages. Capped more
-        // generously than the report rows: one model routinely declares hundreds of columns.
-        var modelTables = await db.SubscriberModelTables.AsNoTracking()
-            .Where(t => t.SubscriberKey == key)
-            .OrderBy(t => t.ReportFile).ThenBy(t => t.Name)
-            .Take(MaxModelRows)
-            .ToListAsync(ct).ConfigureAwait(false);
-        var modelFields = await db.SubscriberModelFields.AsNoTracking()
-            .Where(f => f.SubscriberKey == key)
-            .OrderBy(f => f.Id)
-            .Take(MaxModelRows)
-            .ToListAsync(ct).ConfigureAwait(false);
-        var modelRelationships = await db.SubscriberModelRelationships.AsNoTracking()
-            .Where(r => r.SubscriberKey == key)
-            .OrderBy(r => r.Id)
-            .Take(MaxModelRows)
-            .ToListAsync(ct).ConfigureAwait(false);
-
-        var fieldsByTable = modelFields.ToLookup(f => (f.ReportFile, f.TableName));
-        var tablesByFile = modelTables.ToLookup(t => t.ReportFile);
-        var relationshipsByFile = modelRelationships.ToLookup(r => r.ReportFile);
-        var models = modelTables.Select(t => t.ReportFile)
-            .Concat(modelRelationships.Select(r => r.ReportFile))
-            .Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal)
-            .Select(file => new SubscriberReportModelDto(
-                file,
-                tablesByFile[file]
-                    .Select(t => new SubscriberReportModelTableDto(
-                        t.Name, t.SourceDatabase, t.SourceSchema, t.SourceName, t.PowerQuery,
-                        fieldsByTable[(t.ReportFile, t.Name)]
-                            .Select(f => new SubscriberReportModelFieldDto(f.Name, f.Kind, f.DataType, f.Expression, f.Description))
-                            .ToList()))
-                    .ToList(),
-                relationshipsByFile[file]
-                    .Select(r => new SubscriberReportModelRelationshipDto(
-                        r.FromTable, r.FromColumn, r.ToTable, r.ToColumn, r.Cardinality, r.IsActive))
-                    .ToList()))
-            .ToList();
-
-        return TypedResults.Ok(new SubscriberReportDto(subscriber.ObjectKey, subscriber.Name, pages, models));
+        return TypedResults.Ok(new SubscriberReportDto(subscriber.ObjectKey, subscriber.Name, pages));
     }
 
     /// <summary>The subscribers consuming one object, for its dossier: the read edges attributed to a subscriber

@@ -64,7 +64,7 @@ public sealed class ConfirmQuestionApiTests
         Assert.Null(body.Provenance);
 
         await using var db = CatalogDatabase.Create(cs);
-        Assert.False(await db.QuestionExamples.AnyAsync(e => e.Question == question));
+        Assert.False(await db.SemanticExamples.AnyAsync(e => e.Question == question));
     }
 
     [SkippableFact]
@@ -75,7 +75,7 @@ public sealed class ConfirmQuestionApiTests
 
         var question = $"How many parcels shipped on {Guid.NewGuid():N}?";
         const string Sql = "SELECT COUNT(*) FROM Parcels";
-        var hash = QuestionExampleHash.Compute(question, Sql);
+        var hash = SemanticExampleHash.Compute(question, Sql);
 
         await using var factory = Enabled(cs);
         using var client = factory.CreateClient();
@@ -91,14 +91,14 @@ public sealed class ConfirmQuestionApiTests
                 var body = await first.Content.ReadFromJsonAsync<ConfirmedQuestionDto>();
                 Assert.NotNull(body);
                 Assert.True(body.Stored);
-                Assert.Equal(QuestionExampleProvenance.UserConfirmed, body.Provenance);
+                Assert.Equal(SemanticExampleProvenance.UserConfirmed, body.Provenance);
             }
 
-            var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.ContentHash == hash);
+            var stored = await db.SemanticExamples.AsNoTracking().SingleAsync(e => e.ContentHash == hash);
             Assert.Equal(Sql, stored.Sql);
             Assert.Equal("[Dw].[arc].[Parcels]", stored.ObjectKeys);
             Assert.Equal(4, stored.Confidence);
-            Assert.Equal(QuestionExampleProvenance.UserConfirmed, stored.Provenance);
+            Assert.Equal(SemanticExampleProvenance.UserConfirmed, stored.Provenance);
 
             // The same pair again, differently spaced and capitalized: the hash normalizes both away, so this
             // is the same fact being reaffirmed rather than a second one to store.
@@ -113,11 +113,11 @@ public sealed class ConfirmQuestionApiTests
                 Assert.Equal(stored.Id, body.ExampleId);
             }
 
-            Assert.Equal(1, await db.QuestionExamples.CountAsync(e => e.ContentHash == hash));
+            Assert.Equal(1, await db.SemanticExamples.CountAsync(e => e.ContentHash == hash));
         }
         finally
         {
-            await db.QuestionExamples.Where(e => e.ContentHash == hash).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => e.ContentHash == hash).ExecuteDeleteAsync();
         }
     }
 
@@ -145,8 +145,8 @@ public sealed class ConfirmQuestionApiTests
         const string FromKeysSql = "SELECT COUNT(*) AS N FROM ReportModelParcels";
         var hashes = new[]
         {
-            QuestionExampleHash.Compute(fromSqlQuestion, fromSql),
-            QuestionExampleHash.Compute(fromKeysQuestion, FromKeysSql),
+            SemanticExampleHash.Compute(fromSqlQuestion, fromSql),
+            SemanticExampleHash.Compute(fromKeysQuestion, FromKeysSql),
         };
 
         await using var factory = Enabled(cs);
@@ -183,7 +183,7 @@ public sealed class ConfirmQuestionApiTests
                 response.EnsureSuccessStatusCode();
             }
 
-            var stored = await db.QuestionExamples.AsNoTracking()
+            var stored = await db.SemanticExamples.AsNoTracking()
                 .Where(e => hashes.Contains(e.ContentHash))
                 .ToDictionaryAsync(e => e.Question, e => e.SourceRef);
             Assert.Equal(reference, stored[fromSqlQuestion]);
@@ -191,7 +191,7 @@ public sealed class ConfirmQuestionApiTests
         }
         finally
         {
-            await db.QuestionExamples.Where(e => hashes.Contains(e.ContentHash)).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => hashes.Contains(e.ContentHash)).ExecuteDeleteAsync();
             await db.Objects.Where(o => o.Key == objectKey).ExecuteDeleteAsync();
             await db.Pipelines.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();
             await db.Repos.Where(r => r.Id == repoId).ExecuteDeleteAsync();
@@ -215,7 +215,7 @@ public sealed class ConfirmQuestionApiTests
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 
         await using var db = CatalogDatabase.Create(cs);
-        Assert.False(await db.QuestionExamples.AnyAsync(e => e.Question == question));
+        Assert.False(await db.SemanticExamples.AnyAsync(e => e.Question == question));
     }
 
     [SkippableFact]
@@ -260,13 +260,13 @@ public sealed class ConfirmQuestionApiTests
                 response.EnsureSuccessStatusCode();
             }
 
-            var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question.Contains(question));
+            var stored = await db.SemanticExamples.AsNoTracking().SingleAsync(e => e.Question.Contains(question));
             Assert.Equal(question, stored.Question);
-            Assert.Equal(QuestionExampleHash.Compute(question, Sql), stored.ContentHash);
+            Assert.Equal(SemanticExampleHash.Compute(question, Sql), stored.ContentHash);
         }
         finally
         {
-            await db.QuestionExamples.Where(e => e.Question.Contains(question)).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => e.Question.Contains(question)).ExecuteDeleteAsync();
         }
     }
 

@@ -43,9 +43,9 @@ sourceRefs:
   - gui/src/features/chat/chatAdapters.ts
   - gui/src/features/chat/AnswerConfirmation.tsx
   - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
-  - src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs
-  - gui/src/features/saved-answers/SavedAnswersPage.tsx
-  - gui/src/features/saved-answers/SavedAnswerDialog.tsx
+  - src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs
+  - gui/src/features/semantic-layer/SavedAnswersPanel.tsx
+  - gui/src/features/semantic-layer/ExampleDialog.tsx
   - gui/src/features/chat/QueryResultPage.tsx
   - tools/sqlflow-mcp/src/server.rs
   - gui/src/features/chat/SqlRunPanel.tsx
@@ -117,19 +117,21 @@ The assistant itself calls `confirm_question` only when the person, after seeing
 
 ## Managing saved answers
 
-Admins curate what confirming stored on the **Saved answers** page (`/saved-answers`, Admin in the navigation, `admin` scope). It lists every saved answer newest first, with a search over question and query text, the datasource it runs against, who last stood behind it, and whether the assistant is currently offered it (`served`, or `withheld` with the reason, when its SQL no longer passes the read-only guard or the column allow-list).
+Saved answers are the semantic layer's example queries (`catalog.SemanticExample`, see [Semantic layer](../concepts/semantic-layer.md)). Admins curate them under Admin > **Semantic layer**, on the **Saved answers** tab (`/semantic-layer?tab=examples`; the old `/saved-answers` link redirects there) and on each table's **Examples** tab, which holds the answers that read that table (`admin` scope). The Saved answers tab lists every saved answer newest first, with a search over question and query text, the datasource it runs against, who last stood behind it, and whether the assistant is currently offered it (`served`, or `withheld` with the reason, when its SQL no longer passes the read-only guard or the column allow-list).
 
 - **Edit** changes the question, the query (edited as plain text, stored exactly as written), or the datasource. It is validated exactly as a confirmation is (the question length, `ReadOnlyQueryGuard`, `ColumnPolicyGuard`, the known-reference gate). The duplicate hash is recomputed, and an edit that would make the answer identical to another saved one answers 409. When the query changes, the tables it reads are resolved again; a blank datasource is worked out from them. The editor becomes `ConfirmedBy`, because a trusted answer auto-runs on the strength of someone having checked exactly that query.
 - **Delete** removes it: later questions stop finding it, and it can no longer be auto-run.
 
-Adding an answer is still only done by confirming one. The endpoints (`QuestionExampleAdminEndpoints`, admin scope):
+Adding an answer is still only done by confirming one. The curation endpoints (`SemanticExampleAdminEndpoints`, admin scope):
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/v1/powerai/questions?search=&page=&pageSize=` | Saved answers, newest first, each with its served/withheld `problem` |
-| `GET /api/v1/powerai/questions/{id}` | One saved answer |
-| `PUT /api/v1/powerai/questions/{id}` | Edit `question`, `sql`, and `sourceRef` (blank to infer); 400 when refused, 409 when it would duplicate another |
-| `DELETE /api/v1/powerai/questions/{id}` | Delete it; 404 when it does not exist |
+| `GET /api/v1/powerai/semantic-layer/examples?search=&page=&pageSize=` | Saved answers, newest first, each with its served/withheld `problem` |
+| `GET /api/v1/powerai/semantic-layer/examples/{id}` | One saved answer |
+| `PUT /api/v1/powerai/semantic-layer/examples/{id}` | Edit `question`, `sql`, and `sourceRef` (blank to infer); 400 when refused, 409 when it would duplicate another |
+| `DELETE /api/v1/powerai/semantic-layer/examples/{id}` | Delete it; 404 when it does not exist |
+
+Confirming (`POST /api/v1/powerai/questions/confirm`) and auto-running a trusted match (`POST /api/v1/powerai/questions/{id}/auto-run`) keep their routes.
 
 ## Running a query
 

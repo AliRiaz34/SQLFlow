@@ -155,6 +155,15 @@ public sealed record LineageSubscriberModelTable
     /// <summary>The warehouse table the expression resolved to, when it resolved.</summary>
     public string? SourceName { get; init; }
 
+    /// <summary>The connection identity the report reads through (the server segment of a node key), set by the
+    /// collector when the table's source resolved.</summary>
+    public string? ServerRef { get; init; }
+
+    /// <summary>The node key of the warehouse object the table loads from, resolved by the graph builder through the
+    /// same identity resolution every lineage edge takes, so it is the key the catalog and the semantic layer use for
+    /// that object. Null when the source did not resolve.</summary>
+    public string? ObjectKey { get; init; }
+
     /// <summary>Its columns, calculated columns, and measures, in that order.</summary>
     public required IReadOnlyList<LineageSubscriberModelField> Fields { get; init; }
 }

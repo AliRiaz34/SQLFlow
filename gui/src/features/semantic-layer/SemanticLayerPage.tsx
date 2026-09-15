@@ -17,14 +17,15 @@ import { PageHeader } from "../../components/PageHeader";
 import { PagedTable, type Column } from "../../components/PagedTable";
 import { RelativeTime } from "../../components/RelativeTime";
 import { MeasureDialog } from "./MeasureDialog";
+import { SavedAnswersPanel } from "./SavedAnswersPanel";
 import { MeasuresTable, SemanticObjectPanel } from "./SemanticObjectPanel";
 import { SemanticTree } from "./SemanticTree";
 import { COLUMN_POLICY_ROOT, errorText, refreshSemanticLayer, SEMANTIC_ROOT, textOrNull } from "./shared";
 
-type PageTab = "tables" | "instructions" | "blocked";
+type PageTab = "tables" | "instructions" | "examples" | "blocked";
 
 const parseTab = (value: string | null): PageTab =>
-  value === "instructions" || value === "blocked" ? value : "tables";
+  value === "instructions" || value === "examples" || value === "blocked" ? value : "tables";
 
 /** The layer-wide instructions and every measure: what an assistant reads before writing any SQL. */
 function InstructionsPanel({ onOpenObject }: { onOpenObject: (key: string) => void }) {
@@ -205,6 +206,7 @@ export default function SemanticLayerPage() {
         <TabsList variant="line">
           <TabsTrigger value="tables" data-testid="semantic-page-tab-tables">Tables</TabsTrigger>
           <TabsTrigger value="instructions" data-testid="semantic-page-tab-instructions">Instructions &amp; measures</TabsTrigger>
+          <TabsTrigger value="examples" data-testid="semantic-page-tab-examples">Saved answers</TabsTrigger>
           <TabsTrigger value="blocked" data-testid="semantic-page-tab-blocked">Blocked columns</TabsTrigger>
         </TabsList>
 
@@ -229,6 +231,10 @@ export default function SemanticLayerPage() {
 
         <TabsContent value="instructions">
           <InstructionsPanel onOpenObject={openObject} />
+        </TabsContent>
+
+        <TabsContent value="examples">
+          <SavedAnswersPanel />
         </TabsContent>
 
         <TabsContent value="blocked">

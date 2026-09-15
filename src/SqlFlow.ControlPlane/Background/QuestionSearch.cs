@@ -13,8 +13,8 @@ namespace SqlFlow.ControlPlane.Background;
 /// <param name="Question">The stored question text.</param>
 /// <param name="Sql">The query that answers it, empty when the visual's query could not be resolved.</param>
 /// <param name="ObjectKeys">The warehouse objects <paramref name="Sql"/> reads.</param>
-/// <param name="Provenance">Where the example came from: <see cref="QuestionExampleProvenance.PowerBi"/> for a
-/// question derived from an extracted report visual, <see cref="QuestionExampleProvenance.UserConfirmed"/> for
+/// <param name="Provenance">Where the example came from: <see cref="SemanticExampleProvenance.PowerBi"/> for a
+/// question derived from an extracted report visual, <see cref="SemanticExampleProvenance.UserConfirmed"/> for
 /// one a person accepted or corrected. The difference is what lets a caller weigh "a dashboard asks this"
 /// against "a person checked this" rather than treating every match as equally settled.</param>
 /// <param name="Score">How many of the searched terms this question matched. Unbounded and relative to the
@@ -33,7 +33,7 @@ namespace SqlFlow.ControlPlane.Background;
 /// which names a model entity rather than a live connection. This is what an auto-run caller reads to know
 /// which connection to prepare <paramref name="Sql"/> against; without it the match still stands as precedent
 /// but cannot be run without a person choosing a datasource first.</param>
-/// <param name="ExampleId">The <c>CatalogQuestionExample.Id</c> behind this match, for an auto-run caller to
+/// <param name="ExampleId">The <c>CatalogSemanticExample.Id</c> behind this match, for an auto-run caller to
 /// name (<c>POST /api/v1/powerai/questions/{id}/auto-run</c>). Null for a PowerBI-derived question, which has
 /// no confirmed-example row and so nothing an auto-run endpoint could address.</param>
 /// <param name="SameQuestion">Whether the stored question carries exactly the typed question's meaningful words
@@ -73,7 +73,7 @@ public sealed record QuestionSearchResult(
 /// <para>
 /// TWO stores are searched as one: the questions derived from extracted PowerBI visuals
 /// (<see cref="CatalogSubscriberReportVisualQuestion"/>) and the confirmed examples a person accepted or
-/// corrected (<see cref="CatalogQuestionExample"/>). They are ranked together by the same scoring, so the
+/// corrected (<see cref="CatalogSemanticExample"/>). They are ranked together by the same scoring, so the
 /// learning loop's output competes with the dashboards' on equal terms and a caller gets one ordered list
 /// rather than having to merge two. Which store a match came from survives as its
 /// <see cref="QuestionMatch.Provenance"/>.
@@ -87,9 +87,9 @@ public sealed record QuestionSearchResult(
 public static class QuestionSearch
 {
     /// <summary>The provenance of a question derived from an extracted PowerBI report visual. An alias for
-    /// <see cref="QuestionExampleProvenance.PowerBi"/> so the catalog and the search cannot spell it
+    /// <see cref="SemanticExampleProvenance.PowerBi"/> so the catalog and the search cannot spell it
     /// differently.</summary>
-    public const string PowerBiProvenance = QuestionExampleProvenance.PowerBi;
+    public const string PowerBiProvenance = SemanticExampleProvenance.PowerBi;
 
     /// <summary>
     /// Returns the <paramref name="topK"/> stored questions best matching <paramref name="question"/>, best
@@ -247,7 +247,7 @@ public static class QuestionSearch
             return new Dictionary<long, ResolvedExample>();
         }
 
-        var examples = await db.QuestionExamples.AsNoTracking()
+        var examples = await db.SemanticExamples.AsNoTracking()
             .Where(e => ids.Contains(e.Id))
             .Select(e => new { e.Id, e.Sql, e.ObjectKeys, e.ConfirmedBy, e.SourceRef })
             .ToListAsync(ct).ConfigureAwait(false);
@@ -354,7 +354,7 @@ public static class QuestionSearch
     }
 
     /// <summary>
-    /// Loads <see cref="CatalogQuestionExample"/> rows containing any of <paramref name="terms"/>, via full-text
+    /// Loads <see cref="CatalogSemanticExample"/> rows containing any of <paramref name="terms"/>, via full-text
     /// or LIKE depending on what the instance has. Every stored example is a confirmed-good precedent: a
     /// rejection is never written to this table (POWERAI.md Section 6), so there is no separate confirmed/
     /// known-bad split to filter on here.
@@ -365,17 +365,17 @@ public static class QuestionSearch
         // A confirmed example attributed to NO repo stays in a repo-scoped search on purpose: a person's
         // confirmation is a fact about the estate rather than about one repository's contents, so scoping the
         // search to a repo must not hide the answers this estate has already checked.
-        var examples = db.QuestionExamples.AsNoTracking()
+        var examples = db.SemanticExamples.AsNoTracking()
             .Where(e => repoId == null || e.RepoId == repoId || e.RepoId == null);
 
         // Probed per TABLE rather than once for the deployment: the two full-text indexes ship in separate
         // migrations, so an estate migrated while the Full-Text feature was absent and upgraded afterwards can
         // genuinely carry one index and not the other. A single probe for both would then either skip every
         // confirmed example or aim CONTAINS at a table that has no index to serve it.
-        if (await HasFullTextIndexAsync(db, QuestionExampleTable, ct).ConfigureAwait(false))
+        if (await HasFullTextIndexAsync(db, SemanticExampleTable, ct).ConfigureAwait(false))
         {
             return await examples
-                .Where(AnyTerm<CatalogQuestionExample>(terms, term =>
+                .Where(AnyTerm<CatalogSemanticExample>(terms, term =>
                 {
                     var condition = InflectionalCondition(term);
                     return e => EF.Functions.Contains(e.Question, condition);
@@ -386,7 +386,7 @@ public static class QuestionSearch
         }
 
         return await examples
-            .Where(AnyTerm<CatalogQuestionExample>(terms, term => e => e.Question.Contains(term)))
+            .Where(AnyTerm<CatalogSemanticExample>(terms, term => e => e.Question.Contains(term)))
             .Select(e => new QuestionRow(e.Question, e.Provenance, null, e.Id))
             .Take(MaxCandidates)
             .ToListAsync(ct).ConfigureAwait(false);
@@ -441,8 +441,8 @@ public static class QuestionSearch
     /// <summary>The questions a sync derived from PowerBI report visuals.</summary>
     private const string VisualQuestionTable = "SubscriberReportVisualQuestion";
 
-    /// <summary>The confirmed-example store the learning loop writes into.</summary>
-    private const string QuestionExampleTable = "QuestionExample";
+    /// <summary>The confirmed-example store the learning loop writes into: the semantic layer's example queries.</summary>
+    private const string SemanticExampleTable = "SemanticExample";
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> FullTextProbes =
         new(StringComparer.Ordinal);

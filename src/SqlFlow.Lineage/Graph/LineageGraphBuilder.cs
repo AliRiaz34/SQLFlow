@@ -443,6 +443,19 @@ public static class LineageGraphBuilder
             return NodeKey.For(resolved.ServerRef, resolved.Database, resolved.Schema, resolved.Name);
         }
 
+        // A report's model table resolved to the warehouse object its Power Query source loads, through the same identity
+        // resolution every edge takes, so the key matches the catalog object the semantic layer serves it on.
+        string? SourceObjectKey(LineageSubscriberModelTable table)
+        {
+            if (table.ServerRef is null || string.IsNullOrWhiteSpace(table.SourceName))
+            {
+                return null;
+            }
+
+            var resolved = ResolveIdentity(table.ServerRef, table.SourceDatabase, table.SourceSchema, table.SourceName);
+            return NodeKey.For(resolved.ServerRef, resolved.Database, resolved.Schema, resolved.Name);
+        }
+
         // One key per object: the best hint wins, ranked by how explicit the interpretation is (a PRIMARY KEY
         // clause beats the YAML declaration beats a MERGE match key), then by tier for a stable pick.
         var keyByObject = new Dictionary<string, CollectedKeyHint>(StringComparer.Ordinal);
@@ -615,7 +628,12 @@ public static class LineageGraphBuilder
                     })
                     .ToList(),
                 Pages = s.Pages,
-                Models = s.Models,
+                Models = s.Models
+                    .Select(m => m with
+                    {
+                        Tables = m.Tables.Select(t => t with { ObjectKey = SourceObjectKey(t) }).ToList(),
+                    })
+                    .ToList(),
             })
             .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();

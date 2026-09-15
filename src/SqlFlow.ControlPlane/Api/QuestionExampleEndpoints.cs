@@ -235,14 +235,14 @@ public static class QuestionExampleEndpoints
 
         var now = clock.GetUtcNow().UtcDateTime;
         var confirmedBy = user.FindFirst("sub")?.Value ?? user.Identity?.Name;
-        var hash = QuestionExampleHash.Compute(question, sql);
+        var hash = SemanticExampleHash.Compute(question, sql);
 
         // Tracked explicitly: the context defaults every query to QueryTrackingBehavior.NoTracking
         // (Program.cs), so without this the row below comes back Detached and every mutation made to it in
         // this branch (ConfirmedUtc, Confidence, ObjectKeys, RepoId, SourceRef) would be silently discarded by
         // SaveChangesAsync, with no error, no exception, and a 200 response that lied about having refreshed
         // anything.
-        var existing = await db.QuestionExamples
+        var existing = await db.SemanticExamples
             .AsTracking()
             .FirstOrDefaultAsync(e => e.ContentHash == hash, ct).ConfigureAwait(false);
         if (existing is not null)
@@ -252,7 +252,7 @@ public static class QuestionExampleEndpoints
             // a change to either is a different example rather than an edit to this one.
             existing.ConfirmedUtc = now;
             existing.ConfirmedBy = confirmedBy;
-            existing.Provenance = QuestionExampleProvenance.UserConfirmed;
+            existing.Provenance = SemanticExampleProvenance.UserConfirmed;
             existing.Confidence = request.Confidence ?? existing.Confidence;
             if (request.ObjectKeys is { Count: > 0 } || (existing.ObjectKeys.Length == 0 && objectKeys.Count > 0))
             {
@@ -276,13 +276,13 @@ public static class QuestionExampleEndpoints
                 + "rather than stored twice, so reaffirming it does not give it extra weight in later searches."));
         }
 
-        var example = new CatalogQuestionExample
+        var example = new CatalogSemanticExample
         {
             RepoId = request.RepoId,
             Question = question,
             Sql = sql,
             ObjectKeys = JoinObjectKeys(objectKeys),
-            Provenance = QuestionExampleProvenance.UserConfirmed,
+            Provenance = SemanticExampleProvenance.UserConfirmed,
             Confidence = request.Confidence,
             ConfirmedUtc = now,
             ConfirmedBy = confirmedBy,
@@ -290,7 +290,7 @@ public static class QuestionExampleEndpoints
             SourceRef = sourceRef,
         };
 
-        db.QuestionExamples.Add(example);
+        db.SemanticExamples.Add(example);
         try
         {
             await db.SaveChangesAsync(ct).ConfigureAwait(false);
@@ -301,7 +301,7 @@ public static class QuestionExampleEndpoints
             // the loser reports the winner's row rather than failing a confirmation that did land. Any other
             // write failure is rethrown, so a real problem is not disguised as a successful confirmation.
             db.Entry(example).State = EntityState.Detached;
-            var winner = await db.QuestionExamples.AsNoTracking()
+            var winner = await db.SemanticExamples.AsNoTracking()
                 .FirstOrDefaultAsync(e => e.ContentHash == hash, ct).ConfigureAwait(false);
             if (winner is null)
             {
@@ -354,7 +354,7 @@ public static class QuestionExampleEndpoints
                 StatusCodes.Status501NotImplemented, "Not enabled");
         }
 
-        var example = await db.QuestionExamples.AsNoTracking()
+        var example = await db.SemanticExamples.AsNoTracking()
             .FirstOrDefaultAsync(e => e.Id == exampleId, ct).ConfigureAwait(false);
         if (example is null)
         {

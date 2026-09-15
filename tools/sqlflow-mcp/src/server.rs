@@ -1561,8 +1561,13 @@ and fix every finding first."
             Discovered = inferred from the codebase's own joins, ranked by `occurrences`, and `isRangeJoin` \
             marks an interval join that must never be treated as a key match); the measures anchored to it \
             (reuse `expression` verbatim); example questions with the SQL that already answers them (mirror \
-            their shape for a similar question); the reports and dashboards that consume it (`consumers`, \
-            the answer to \"who uses this table\"); and the layer's general instructions. Takes the `key` from \
+            their shape for a similar question); `reportModels`, the Power BI semantic models built on it (for \
+            each report whose model table loads from this table: its `measures` and `calculatedColumns` with \
+            their DAX `expression`, and its `relationships` to other layer tables with the warehouse \
+            `ownColumn`/`otherColumn`, `cardinality`, and `isActive`, where an inactive one applies only where a \
+            measure invokes USERELATIONSHIP; DAX is not SQL, so mirror its logic rather than pasting it, and \
+            only definitions whose every column is allowed are included); the reports and dashboards that \
+            consume it (`consumers`, the answer to \"who uses this table\"); and the layer's general instructions. Takes the `key` from \
             search_semantic_layer or list_semantic_tables. A 404 means the table is not in the semantic \
             layer, so it cannot be queried: say so rather than composing SQL against it."
     )]
@@ -2114,15 +2119,9 @@ and fix every finding first."
             list means the subscriber has no extracted report (a hand-authored subscriber, or one whose \
             report has not synced yet), not that one failed to load; an empty `questions` on a visual means \
             question generation is disabled or has not run for it yet, not that the visual answers nothing. \
-            `models` is the semantic model behind each report file, which is how the report COMPUTES its \
-            numbers: every model table with the Power Query (M) expression that loads it and, when it resolved, \
-            the warehouse `sourceDatabase`/`sourceSchema`/`sourceName` it reads; each table's columns (with \
-            `dataType`), calculated columns, and measures (with their DAX `expression` and author \
-            `description`); and the relationships between tables with their columns, `cardinality`, and \
-            `isActive` (an inactive relationship applies only where a measure invokes USERELATIONSHIP). Use it \
-            to answer \"how is this number calculated in the report\" and to mirror a measure when writing SQL. \
-            An empty `models` list means no model was extracted (a hand-authored subscriber, or a report \
-            connected live to a published dataset). Takes the `key` from list_subscribers."
+            How the report COMPUTES its numbers (its Power BI measures, calculated columns, and relationships) \
+            is not here: describe_semantic_table serves it as `reportModels` on the warehouse table each model \
+            table loads from. Takes the `key` from list_subscribers."
     )]
     async fn describe_subscriber_report(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/subscribers/report", &[("key", i.key)]).await

@@ -247,11 +247,13 @@ A subscriber whose `pbix:` report was extracted also stores the report's structu
 
 | Table | One row per |
 | --- | --- |
-| `catalog.SubscriberModelTable` | Model table: its name, its Power Query (M) expression, and the warehouse database, schema, and table that expression resolved to (null when it did not resolve) |
+| `catalog.SubscriberModelTable` | Model table: its name, its Power Query (M) expression, and the warehouse database, schema, and table that expression resolved to (null when it did not resolve), with that object's node key (`ObjectKey`) |
 | `catalog.SubscriberModelField` | Column (with its data type), calculated column, or measure (with its DAX expression and description) on a model table |
 | `catalog.SubscriberModelRelationship` | Relationship between two model tables: their columns, the cardinality, and whether it is active |
 
 They are keyed by subscriber, report file, and table name, and replaced wholesale with the rest of the repo's subscriber rows. Power Query and DAX text is redacted on the same path query text takes. DAX is stored verbatim and never evaluated. The model is only present when the sync ran on a machine with `pbix-extract`.
+
+A model table's `ObjectKey` is resolved at sync through the same identity resolution lineage edges take, so it is the key of the catalog object the table loads from. The model is served from there, by the semantic layer: `describe_semantic_table` lists a table's Power BI measures, calculated columns, and relationships as `reportModels`, keeping only those whose every column is on the column allow-list (see [Semantic layer](../concepts/semantic-layer.md)).
 
 ## Business questions per visual
 
@@ -267,7 +269,7 @@ The feature is off by default and independent of `ControlPlane:Assistant:Enabled
 | --- | --- |
 | `GET /lineage/subscribers` | What consumes the warehouse. Filter by `type` (the tool) or `search` (name, owner, description). Each row carries how many queries it runs and how many distinct objects those queries read. |
 | `GET /lineage/subscribers/dossier?key=<node key>` | What one subscriber consumes: its queries, and every object they read, named and located from the object registry, with the queries that reference each one. |
-| `GET /lineage/subscribers/report?key=<node key>` | The Power BI report structure behind one subscriber: every page, the visuals on it, and each field's role, plus each visual's `questions` (1-3 business questions it answers, empty when question generation is disabled or has not run for it yet), and `models`: the semantic model behind each report file (tables with their Power Query source and resolved warehouse object, columns with data types, calculated columns and measures with their DAX, and relationships with cardinality and whether each is active). Served to the assistants by the `describe_subscriber_report` MCP tool. |
+| `GET /lineage/subscribers/report?key=<node key>` | The Power BI report structure behind one subscriber: every page, the visuals on it, and each field's role, plus each visual's `questions` (1-3 business questions it answers, empty when question generation is disabled or has not run for it yet). The report's semantic model is not served here: the semantic layer serves it on the warehouse table each model table loads from (`describe_semantic_table`'s `reportModels`). |
 | `GET /lineage/objects/dossier?key=<node key>` | Now also returns `subscribers`: who consumes THIS object, with the specific queries that name it. |
 | `GET /search/subscribers`, and the `subscribers` category of `GET /search/all` | Subscribers as a surface of the GLOBAL search, matched on name, type, owner, description, notes, location, or declaring file. It is the LAST category, deliberately: the warehouse is the subject and consumption is a convention on top of it, so a bare term is far more often a table or a column than the name of a report. A subscriber is neither a database object nor a flow, so without this a report searched for by name returned nothing and looked absent rather than unsearched. |
 

@@ -77,8 +77,8 @@ public sealed class SemanticLayerApiTests
                     Tier = "Observed", Occurrences = 1,
                 });
 
-                db.QuestionExamples.Add(Example($"who rode {suffix}", blockedExampleSql, tripsKey, now));
-                db.QuestionExamples.Add(Example($"total amount {suffix}", servableExampleSql, tripsKey, now.AddMinutes(-1)));
+                db.SemanticExamples.Add(Example($"who rode {suffix}", blockedExampleSql, tripsKey, now));
+                db.SemanticExamples.Add(Example($"total amount {suffix}", servableExampleSql, tripsKey, now.AddMinutes(-1)));
                 await db.SaveChangesAsync();
             }
 
@@ -203,7 +203,7 @@ public sealed class SemanticLayerApiTests
             await db.SemanticMeasures.Where(m => m.ObjectKey == tripsKey).ExecuteDeleteAsync();
             await db.SemanticRelationships.Where(r => r.FromObjectKey == tripsKey || r.ToObjectKey == tripsKey).ExecuteDeleteAsync();
             await db.SemanticObjects.Where(s => s.ObjectKey == tripsKey || s.ObjectKey == stationKey).ExecuteDeleteAsync();
-            await db.QuestionExamples.Where(e => e.ObjectKeys == tripsKey).ExecuteDeleteAsync();
+            await db.SemanticExamples.Where(e => e.ObjectKeys == tripsKey).ExecuteDeleteAsync();
             await db.ObjectRelationships.Where(r => r.RepoId == repoId).ExecuteDeleteAsync();
             await db.ColumnPolicies.Where(p => p.ObjectKey == tripsKey || p.ObjectKey == stationKey).ExecuteDeleteAsync();
             await db.ObjectColumns.Where(c => c.ObjectKey == tripsKey || c.ObjectKey == stationKey).ExecuteDeleteAsync();
@@ -211,17 +211,145 @@ public sealed class SemanticLayerApiTests
         }
     }
 
+    /// <summary>
+    /// A Power BI model built on a warehouse table is served in that table's bundle, graded against the allow-list the
+    /// same way every other annotation is: a measure reading only allowed columns is served, one reading a denied column
+    /// is withheld, and so is one that merely USES a withheld measure. A relationship is served only when both tables are
+    /// in the layer and both columns are allowed. The denied column's name never reaches the assistant.
+    /// </summary>
+    [SkippableFact]
+    public async Task APowerBiModel_IsServedOnTheTableItLoadsFrom_OnlyWhereEveryColumnItNamesIsAllowed()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var serverRef = "${env:SQLFLOW_PBIMODEL_" + suffix + "}";
+        var salesName = "FactSales_" + suffix;
+        var dateName = "DimDate_" + suffix;
+        var salesKey = $"{serverRef}|dw|dbo|{salesName.ToLowerInvariant()}";
+        var dateKey = $"{serverRef}|dw|dbo|{dateName.ToLowerInvariant()}";
+        var subscriberKey = $"subscriber|||pbimodel_{suffix}";
+        var customerSsn = "CustomerSsn_" + suffix;
+        var repoId = Guid.NewGuid();
+        const string ReportFile = "sales.pbix";
+        var now = DateTime.UtcNow;
+
+        await using var factory = new ControlPlaneAppFactory().WithCatalog(cs);
+        try
+        {
+            await using (var db = CatalogDatabase.Create(cs))
+            {
+                db.Objects.Add(new CatalogObject
+                {
+                    Key = salesKey, ServerRef = serverRef, Database = "dw", Schema = "dbo", Name = salesName,
+                    Kind = "Table", FirstSeenUtc = now, LastSeenUtc = now,
+                });
+                db.Objects.Add(new CatalogObject
+                {
+                    Key = dateKey, ServerRef = serverRef, Database = "dw", Schema = "dbo", Name = dateName,
+                    Kind = "Table", FirstSeenUtc = now, LastSeenUtc = now,
+                });
+                AddColumn(db, salesKey, 1, "Amount", "decimal(18,2)");
+                AddColumn(db, salesKey, 2, "DateKey", "int");
+                AddColumn(db, salesKey, 3, customerSsn, "varchar(11)");
+                AddColumn(db, dateKey, 1, "DateKey", "int");
+
+                db.Subscribers.Add(new CatalogSubscriber
+                {
+                    RepoId = repoId, Name = "Sales Report " + suffix, Type = "PowerBI", ObjectKey = subscriberKey,
+                    File = "subscribers.yaml", FirstSeenUtc = now, LastSeenUtc = now,
+                });
+                db.SubscriberModelTables.Add(ModelTable(repoId, subscriberKey, ReportFile, "Sales", salesKey));
+                db.SubscriberModelTables.Add(ModelTable(repoId, subscriberKey, ReportFile, "Date", dateKey));
+                db.SubscriberModelFields.Add(ModelField(repoId, subscriberKey, ReportFile, "Sales", "Total Sales", "SUM(Sales[Amount])"));
+                db.SubscriberModelFields.Add(ModelField(repoId, subscriberKey, ReportFile, "Sales", "Customers", $"DISTINCTCOUNT(Sales[{customerSsn}])"));
+                db.SubscriberModelFields.Add(ModelField(repoId, subscriberKey, ReportFile, "Sales", "Average Sale", "DIVIDE([Total Sales], COUNTROWS(Sales))"));
+                db.SubscriberModelFields.Add(ModelField(repoId, subscriberKey, ReportFile, "Sales", "Sales per Customer", "DIVIDE([Total Sales], [Customers])"));
+                db.SubscriberModelRelationships.Add(ModelRelationship(repoId, subscriberKey, ReportFile, "Sales", "DateKey", "Date", "DateKey", isActive: false));
+                db.SubscriberModelRelationships.Add(ModelRelationship(repoId, subscriberKey, ReportFile, "Sales", customerSsn, "Date", "DateKey", isActive: true));
+                await db.SaveChangesAsync();
+            }
+
+            using var client = factory.CreateClient();
+            var adminToken = await IssueTokenAsync(client, ["read", "operate", "admin"]);
+            await SetColumnAsync(client, adminToken, new SetColumnPolicyRequest(salesKey, "Amount", true, null));
+            await SetColumnAsync(client, adminToken, new SetColumnPolicyRequest(salesKey, "DateKey", true, null));
+            await SetColumnAsync(client, adminToken, new SetColumnPolicyRequest(dateKey, "DateKey", true, null));
+
+            var describe = $"/api/v1/semantic-layer/tables/describe?key={Uri.EscapeDataString(salesKey)}";
+            Assert.DoesNotContain(customerSsn, await GetStringAsync(client, adminToken, describe), StringComparison.OrdinalIgnoreCase);
+
+            var table = await GetJsonAsync<SemanticTableDto>(client, adminToken, describe);
+            var model = Assert.Single(table.ReportModels);
+            Assert.Equal("Sales", model.ModelTable);
+            Assert.Equal(["Total Sales", "Average Sale"], model.Measures.Select(m => m.Name));
+            Assert.Equal("SUM(Sales[Amount])", model.Measures[0].Expression);
+            var relationship = Assert.Single(model.Relationships);
+            Assert.Equal("DateKey", relationship.OwnColumn);
+            Assert.Equal(dateKey, relationship.OtherObjectKey);
+            Assert.Equal("DateKey", relationship.OtherColumn);
+            Assert.False(relationship.IsActive);
+
+            // The editor shows everything the report defines, with why each withheld item is withheld.
+            var admin = await GetJsonAsync<SemanticObjectAdminDto>(
+                client, adminToken, $"/api/v1/powerai/semantic-layer/objects/detail?key={Uri.EscapeDataString(salesKey)}");
+            var adminModel = Assert.Single(admin.ReportModels);
+            Assert.Equal(4, adminModel.Fields.Count);
+            Assert.NotNull(Assert.Single(adminModel.Fields, f => f.Name == "Customers").Problem);
+            Assert.NotNull(Assert.Single(adminModel.Fields, f => f.Name == "Sales per Customer").Problem);
+            Assert.Null(Assert.Single(adminModel.Fields, f => f.Name == "Average Sale").Problem);
+            Assert.Equal(2, adminModel.Relationships.Count);
+            Assert.Single(adminModel.Relationships, r => r.Problem is not null);
+        }
+        finally
+        {
+            await using var db = CatalogDatabase.Create(cs);
+            await db.SubscriberModelFields.Where(f => f.SubscriberKey == subscriberKey).ExecuteDeleteAsync();
+            await db.SubscriberModelRelationships.Where(r => r.SubscriberKey == subscriberKey).ExecuteDeleteAsync();
+            await db.SubscriberModelTables.Where(t => t.SubscriberKey == subscriberKey).ExecuteDeleteAsync();
+            await db.Subscribers.Where(s => s.ObjectKey == subscriberKey).ExecuteDeleteAsync();
+            await db.ColumnPolicies.Where(p => p.ObjectKey == salesKey || p.ObjectKey == dateKey).ExecuteDeleteAsync();
+            await db.ObjectColumns.Where(c => c.ObjectKey == salesKey || c.ObjectKey == dateKey).ExecuteDeleteAsync();
+            await db.Objects.Where(o => o.Key == salesKey || o.Key == dateKey).ExecuteDeleteAsync();
+        }
+    }
+
+    private static CatalogSubscriberModelTable ModelTable(
+        Guid repoId, string subscriberKey, string reportFile, string name, string objectKey)
+        => new()
+        {
+            RepoId = repoId, SubscriberKey = subscriberKey, ReportFile = reportFile, Name = name, ObjectKey = objectKey,
+        };
+
+    private static CatalogSubscriberModelField ModelField(
+        Guid repoId, string subscriberKey, string reportFile, string table, string name, string dax)
+        => new()
+        {
+            RepoId = repoId, SubscriberKey = subscriberKey, ReportFile = reportFile, TableName = table, Name = name,
+            Kind = "measure", Expression = dax,
+        };
+
+    private static CatalogSubscriberModelRelationship ModelRelationship(
+        Guid repoId, string subscriberKey, string reportFile, string fromTable, string fromColumn, string toTable,
+        string toColumn, bool isActive)
+        => new()
+        {
+            RepoId = repoId, SubscriberKey = subscriberKey, ReportFile = reportFile, FromTable = fromTable,
+            FromColumn = fromColumn, ToTable = toTable, ToColumn = toColumn, Cardinality = "M:1", IsActive = isActive,
+        };
+
     private static void AddColumn(CatalogDbContext db, string objectKey, int ordinal, string name, string dataType)
         => db.ObjectColumns.Add(new CatalogObjectColumn
         {
             ObjectKey = objectKey, Ordinal = ordinal, Name = name, DataType = dataType, Nullable = false, Tier = "Observed",
         });
 
-    private static CatalogQuestionExample Example(string question, string sql, string objectKey, DateTime confirmedUtc)
+    private static CatalogSemanticExample Example(string question, string sql, string objectKey, DateTime confirmedUtc)
         => new()
         {
-            Question = question, Sql = sql, ObjectKeys = objectKey, Provenance = QuestionExampleProvenance.UserConfirmed,
-            ConfirmedUtc = confirmedUtc, ContentHash = QuestionExampleHash.Compute(question, sql),
+            Question = question, Sql = sql, ObjectKeys = objectKey, Provenance = SemanticExampleProvenance.UserConfirmed,
+            ConfirmedUtc = confirmedUtc, ContentHash = SemanticExampleHash.Compute(question, sql),
         };
 
     private static async Task SetColumnAsync(HttpClient client, string token, SetColumnPolicyRequest request)

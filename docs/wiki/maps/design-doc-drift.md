@@ -27,7 +27,7 @@ rawRefs:
 sourceRefs:
   - src/SqlFlow.Catalog/CatalogEntities.cs
   - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
-  - src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs
   - gui/src/features/chat/AnswerConfirmation.tsx
 referenceRefs:
   - concept-architecture-and-execution
@@ -99,7 +99,7 @@ claims are not, as of 2026-09-15:
 | Where | What it says | What the code shows |
 | --- | --- | --- |
 | Status line | What is left of the learning loop is the GUI affordance that asks a person to confirm an answer | The GUI confirmation row exists (`gui/src/features/chat/AnswerConfirmation.tsx`), posting to the same confirm endpoint as `confirm_question` |
-| Section 7 | The `CatalogQuestionExample` table for the user-confirmed half is still unbuilt | The entity exists (`CatalogQuestionExample` in `src/SqlFlow.Catalog/CatalogEntities.cs`), written by `QuestionExampleEndpoints` and curated on the admin Saved answers page (`QuestionExampleAdminEndpoints`) |
+| Section 7 | The `CatalogQuestionExample` table for the user-confirmed half is still unbuilt | The entity exists (now `CatalogSemanticExample`, the semantic layer's example queries, in `src/SqlFlow.Catalog/CatalogEntities.cs`), written by `QuestionExampleEndpoints` and curated on the Semantic layer page's Saved answers tab (`SemanticExampleAdminEndpoints`) |
 | Section 8, step 6 | What remains is the GUI's own accept/correct/reject affordance | The same confirmation row; a rejection stores nothing and nothing records that it was made |
 
 The raw document is left as written. For what the learning loop does today, read the reference page

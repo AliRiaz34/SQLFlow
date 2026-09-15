@@ -523,6 +523,12 @@ public sealed class FlowSetCollector
         // The semantic model behind this report file: how it computes its numbers, which its visuals only name. A
         // report connected live to a published dataset carries none, and then contributes nothing here.
         var model = extracted.Model;
+
+        // The connection identity the report reads through: the server segment a resolved source's node key carries,
+        // the same one its model-source synonyms are declared under.
+        var serverRef = connections.TryGetValue(server, out var connection)
+            ? ServerIdentity.From(connection.ConnectionRef)
+            : null;
         if (model.Tables.Count > 0 || model.Relationships.Count > 0)
         {
             models.Add(new Core.Lineage.LineageSubscriberModel
@@ -536,6 +542,7 @@ public sealed class FlowSetCollector
                         SourceDatabase = t.SourceDatabase,
                         SourceSchema = t.SourceSchema,
                         SourceName = t.SourceName,
+                        ServerRef = t.SourceName is null ? null : serverRef,
                         Fields = t.Fields
                             .Select(f => new Core.Lineage.LineageSubscriberModelField
                             {

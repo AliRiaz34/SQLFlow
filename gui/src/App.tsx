@@ -35,7 +35,6 @@ const LineageGraphPage = lazyRoute("LineageGraphPage", () => import("./features/
 const SearchPage = lazyRoute("SearchPage", () => import("./features/search/SearchPage"));
 const UsersPage = lazyRoute("UsersPage", () => import("./features/users/UsersPage"));
 const SemanticLayerPage = lazyRoute("SemanticLayerPage", () => import("./features/semantic-layer/SemanticLayerPage"));
-const SavedAnswersPage = lazyRoute("SavedAnswersPage", () => import("./features/saved-answers/SavedAnswersPage"));
 const AccessTokensPage = lazyRoute("AccessTokensPage", () => import("./features/tokens/AccessTokensPage"));
 const NotificationsPage = lazyRoute("NotificationsPage", () => import("./features/notifications/NotificationsPage"));
 const MaintenancePage = lazyRoute("MaintenancePage", () => import("./features/maintenance/MaintenancePage"));
@@ -119,14 +118,8 @@ export default function App() {
               </RequireScope>
             )}
           />
-          <Route
-            path="/saved-answers"
-            element={(
-              <RequireScope scope="admin">
-                <SavedAnswersPage />
-              </RequireScope>
-            )}
-          />
+          {/* Saved answers moved into the semantic layer as its example queries; keep old links working. */}
+          <Route path="/saved-answers" element={<Navigate to="/semantic-layer?tab=examples" replace />} />
           {/* The column policy page became the semantic layer editor; keep old links working. */}
           <Route path="/column-policies" element={<Navigate to="/semantic-layer" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />

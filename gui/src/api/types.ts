@@ -1499,15 +1499,28 @@ export interface SemanticMeasureAdmin extends SemanticMeasure {
   updatedUtc: string;
 }
 
-/** A stored example query reading the object; `problem` says why it is withheld, null when served. */
+/** A saved answer (one of the layer's example queries); `problem` says why it is withheld, null when served.
+ * `confirmedBy` is whoever last stood behind it: the person who confirmed it, or the admin who last edited it. */
 export interface SemanticExampleAdmin {
   id: number;
   question: string;
   sql: string;
+  sourceRef: string | null;
+  objectKeys: string[];
   provenance: string;
+  confidence: number | null;
+  repoId: string | null;
   confirmedBy: string | null;
   confirmedUtc: string;
   problem: string | null;
+}
+
+/** An edit to a saved answer. The SQL is validated exactly as a confirmation is; a null `sourceRef` is worked out
+ * from the tables the query reads. */
+export interface UpdateSemanticExampleRequest {
+  question: string;
+  sql: string;
+  sourceRef: string | null;
 }
 
 /** Everything the semantic layer editor shows for one object. */
@@ -1526,6 +1539,38 @@ export interface SemanticObjectAdmin {
   discoveredJoins: SemanticDiscoveredJoin[];
   measures: SemanticMeasureAdmin[];
   examples: SemanticExampleAdmin[];
+  reportModels: SemanticReportModelAdmin[];
+}
+
+/** A Power BI measure or calculated column built on the object; `problem` says why it is withheld, null when served. */
+export interface SemanticReportFieldAdmin {
+  name: string;
+  kind: string;
+  expression: string;
+  description: string | null;
+  problem: string | null;
+}
+
+/** A Power BI model relationship from the object's model table, with the warehouse columns it maps to when they do. */
+export interface SemanticReportRelationshipAdmin {
+  modelTable: string;
+  ownColumn: string | null;
+  otherModelTable: string;
+  otherColumn: string | null;
+  otherObjectKey: string | null;
+  cardinality: string | null;
+  isActive: boolean;
+  problem: string | null;
+}
+
+/** One report's model table that loads from the object: what the report defines on it, read-only. */
+export interface SemanticReportModelAdmin {
+  subscriberKey: string;
+  subscriberName: string;
+  reportFile: string;
+  modelTable: string;
+  fields: SemanticReportFieldAdmin[];
+  relationships: SemanticReportRelationshipAdmin[];
 }
 
 export interface SetSemanticAnnotationRequest {
@@ -1602,31 +1647,6 @@ export interface ConfirmedQuestion {
   outcome: string;
   provenance: string | null;
   message: string;
-}
-
-/** A saved answer as the management page shows it. `problem` says why the assistant is not offered it (its SQL no
- * longer passes the read-only guard or the column allow-list), null when it is served. `confirmedBy` is whoever
- * last stood behind it: the person who confirmed it, or the admin who last edited it. */
-export interface QuestionExampleAdmin {
-  id: number;
-  question: string;
-  sql: string;
-  sourceRef: string | null;
-  objectKeys: string[];
-  provenance: string;
-  confidence: number | null;
-  repoId: string | null;
-  confirmedBy: string | null;
-  confirmedUtc: string;
-  problem: string | null;
-}
-
-/** An edit to a saved answer. The SQL is validated exactly as a confirmation is; a null `sourceRef` is worked out
- * from the tables the query reads. */
-export interface UpdateQuestionExampleRequest {
-  question: string;
-  sql: string;
-  sourceRef: string | null;
 }
 
 // ---- Personal access tokens -------------------------------------------------------------------------------------

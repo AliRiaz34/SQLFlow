@@ -73,9 +73,23 @@ internal static partial class SemanticLayer
             => new(Measure.Id, Measure.Name, Measure.ObjectKey, ObjectName, Measure.Expression, Measure.Description);
     }
 
-    /// <summary>A stored example query that reads an object, with why it cannot be served when it cannot.</summary>
+    /// <summary>A stored example query (a saved answer), with why it cannot be served when it cannot.</summary>
     internal sealed record ExampleEvaluation(
-        long Id, string Question, string Sql, string Provenance, string? ConfirmedBy, DateTime ConfirmedUtc, string? Problem);
+        long Id, string Question, string Sql, string? SourceRef, IReadOnlyList<string> ObjectKeys, string Provenance,
+        int? Confidence, Guid? RepoId, string? ConfirmedBy, DateTime ConfirmedUtc, string? Problem)
+    {
+        /// <summary>The evaluation as the editor shows it: the table's Examples tab and the Saved answers tab alike.</summary>
+        public SemanticExampleAdminDto ToAdminDto()
+            => new(Id, Question, Sql, SourceRef, ObjectKeys, Provenance, Confidence, RepoId, ConfirmedBy, ConfirmedUtc, Problem);
+
+        /// <summary>Evaluates one stored example against the current query guards.</summary>
+        public static async Task<ExampleEvaluation> OfAsync(CatalogDbContext db, CatalogSemanticExample example, CancellationToken ct)
+            => new(
+                example.Id, example.Question, example.Sql, example.SourceRef,
+                QuestionExampleEndpoints.SplitObjectKeys(example.ObjectKeys), example.Provenance, example.Confidence,
+                example.RepoId, example.ConfirmedBy, example.ConfirmedUtc,
+                await QueryProblemAsync(db, example.Sql, ct).ConfigureAwait(false));
+    }
 
     /// <summary>The identity recorded as a row's last editor: the subject claim, falling back to the principal's name.</summary>
     internal static string? Actor(ClaimsPrincipal user) => user.FindFirst("sub")?.Value ?? user.Identity?.Name;
@@ -523,35 +537,301 @@ internal static partial class SemanticLayer
         CatalogDbContext db, string objectKey, int take, bool servableOnly, CancellationToken ct)
     {
         // The stored key list is newline-joined, so a substring match narrows in SQL and an exact split confirms it.
-        var candidates = await db.QuestionExamples.AsNoTracking()
+        var candidates = await db.SemanticExamples.AsNoTracking()
             .Where(e => e.ObjectKeys.Contains(objectKey))
             .OrderByDescending(e => e.ConfirmedUtc).ThenByDescending(e => e.Id)
             .Take(take * 4)
-            .Select(e => new { e.Id, e.Question, e.Sql, e.Provenance, e.ConfirmedBy, e.ConfirmedUtc, e.ObjectKeys })
             .ToListAsync(ct).ConfigureAwait(false);
 
         var result = new List<ExampleEvaluation>(take);
         foreach (var example in candidates)
         {
-            var reads = example.ObjectKeys.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (!reads.Contains(objectKey, StringComparer.Ordinal))
+            if (!QuestionExampleEndpoints.SplitObjectKeys(example.ObjectKeys).Contains(objectKey, StringComparer.Ordinal))
             {
                 continue;
             }
 
-            var problem = await QueryProblemAsync(db, example.Sql, ct).ConfigureAwait(false);
-            if (servableOnly && problem is not null)
+            var evaluation = await ExampleEvaluation.OfAsync(db, example, ct).ConfigureAwait(false);
+            if (servableOnly && evaluation.Problem is not null)
             {
                 continue;
             }
 
-            result.Add(new ExampleEvaluation(
-                example.Id, example.Question, example.Sql, example.Provenance, example.ConfirmedBy, example.ConfirmedUtc,
-                problem));
+            result.Add(evaluation);
             if (result.Count == take)
             {
                 break;
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>The most Power BI model tables one table's bundle carries (one per report model table loading from it).</summary>
+    internal const int MaxReportModels = 20;
+
+    /// <summary>A Power BI measure or calculated column defined on a model table, with why it cannot be served when it
+    /// cannot.</summary>
+    internal sealed record ReportFieldEvaluation(CatalogSubscriberModelField Field, string? Problem);
+
+    /// <summary>A Power BI model relationship between a table's model table and another model table, read from the
+    /// table's own side, with the warehouse columns and object it maps to and why it cannot be served when it cannot.</summary>
+    internal sealed record ReportRelationshipEvaluation(
+        CatalogSubscriberModelRelationship Relationship, string ModelTable, string? OwnColumn, string OtherModelTable,
+        string? OtherColumn, string? OtherObjectKey, string? OtherName, string? Problem);
+
+    /// <summary>One report's model table that loads from a warehouse table, with its evaluated measures, calculated
+    /// columns, and relationships.</summary>
+    internal sealed record ReportModelEvaluation(
+        CatalogSubscriberModelTable Table, string SubscriberName,
+        IReadOnlyList<ReportFieldEvaluation> Fields, IReadOnlyList<ReportRelationshipEvaluation> Relationships)
+    {
+        /// <summary>Only what may be served: definitions whose every column is allowed.</summary>
+        public SemanticReportModelDto ToServedDto() => new(
+            Table.SubscriberKey, SubscriberName, Table.ReportFile, Table.Name,
+            Fields.Where(f => f.Problem is null && f.Field.Kind == MeasureKind).Select(f => ToFieldDto(f.Field)).ToList(),
+            Fields.Where(f => f.Problem is null && f.Field.Kind == CalculatedColumnKind).Select(f => ToFieldDto(f.Field)).ToList(),
+            Relationships
+                .Where(r => r.Problem is null)
+                .Select(r => new SemanticReportRelationshipDto(
+                    r.OwnColumn!, r.OtherObjectKey!, r.OtherName!, r.OtherColumn!, r.Relationship.Cardinality,
+                    r.Relationship.IsActive, r.ModelTable, r.OtherModelTable))
+                .ToList());
+
+        /// <summary>Everything, with its state, for the editor.</summary>
+        public SemanticReportModelAdminDto ToAdminDto() => new(
+            Table.SubscriberKey, SubscriberName, Table.ReportFile, Table.Name,
+            Fields
+                .Select(f => new SemanticReportFieldAdminDto(
+                    f.Field.Name, f.Field.Kind, f.Field.Expression ?? string.Empty, f.Field.Description, f.Problem))
+                .ToList(),
+            Relationships
+                .Select(r => new SemanticReportRelationshipAdminDto(
+                    r.ModelTable, r.OwnColumn, r.OtherModelTable, r.OtherColumn, r.OtherObjectKey,
+                    r.Relationship.Cardinality, r.Relationship.IsActive, r.Problem))
+                .ToList());
+
+        private static SemanticReportFieldDto ToFieldDto(CatalogSubscriberModelField field)
+            => new(field.Name, field.Expression ?? string.Empty, field.Description);
+    }
+
+    /// <summary>The model field kind a Power BI measure is stored under.</summary>
+    internal const string MeasureKind = "measure";
+
+    /// <summary>The model field kind a Power BI calculated column is stored under.</summary>
+    internal const string CalculatedColumnKind = "calculatedColumn";
+
+    /// <summary>A column or measure reference in DAX: <c>Table[Name]</c>, <c>'Quoted Table'[Name]</c>, or a bare
+    /// <c>[Name]</c>. A quote inside a quoted table name is doubled, and a closing bracket inside a name is doubled.</summary>
+    [GeneratedRegex(@"(?:'(?<quoted>(?:[^']|'')+)'|(?<bare>[A-Za-z_][A-Za-z0-9_]*))?\[(?<name>(?:[^\]]|\]\])+)\]", RegexOptions.CultureInvariant)]
+    private static partial Regex DaxReferencePattern();
+
+    /// <summary>Every column or measure reference in a DAX expression, with its table when the reference names one. A
+    /// bracketed name inside a string literal is read as a reference too, which can only withhold a definition, never
+    /// serve one that names a denied column.</summary>
+    internal static IEnumerable<(string? Table, string Name)> DaxReferences(string expression)
+    {
+        foreach (Match match in DaxReferencePattern().Matches(expression))
+        {
+            string? table = match.Groups["quoted"].Success
+                ? match.Groups["quoted"].Value.Replace("''", "'", StringComparison.Ordinal)
+                : match.Groups["bare"].Success ? match.Groups["bare"].Value : null;
+            yield return (table, match.Groups["name"].Value.Replace("]]", "]", StringComparison.Ordinal));
+        }
+    }
+
+    /// <summary>
+    /// The Power BI semantic models built on <paramref name="objectKey"/>: every report model table that loads from it
+    /// (resolved at sync, <see cref="CatalogSubscriberModelTable.ObjectKey"/>), with that table's measures and calculated
+    /// columns and its relationships to other model tables, each evaluated against the column allow-list.
+    /// <para>
+    /// A report names MODEL columns, and a model column only counts as an allowed warehouse column when its name is one:
+    /// a column the report renamed is treated as not allowed, since nothing maps it back to the warehouse column it came
+    /// from. So a measure or calculated column is served only when every column its DAX reads is an allowed column of
+    /// the warehouse table its model table loads from, and every measure or calculated column it uses is itself
+    /// servable. A relationship is served only when both model tables load from layer tables and both columns are
+    /// allowed there. Everything is still returned, with the reason, for the editor.
+    /// </para>
+    /// </summary>
+    internal static async Task<IReadOnlyList<ReportModelEvaluation>> EvaluateReportModelsAsync(
+        CatalogDbContext db, string objectKey, CancellationToken ct)
+    {
+        var anchors = await db.SubscriberModelTables.AsNoTracking()
+            .Where(t => t.ObjectKey == objectKey)
+            .OrderBy(t => t.SubscriberKey).ThenBy(t => t.ReportFile).ThenBy(t => t.Name)
+            .Take(MaxReportModels)
+            .ToListAsync(ct).ConfigureAwait(false);
+        if (anchors.Count == 0)
+        {
+            return [];
+        }
+
+        // Everything the anchors' reports declare: every model table (to resolve a reference to another table) and
+        // every field (to tell a column from a measure or calculated column), plus the relationships.
+        var subscriberKeys = anchors.Select(t => t.SubscriberKey).Distinct(StringComparer.Ordinal).ToList();
+        var reportTables = await db.SubscriberModelTables.AsNoTracking()
+            .Where(t => subscriberKeys.Contains(t.SubscriberKey))
+            .ToListAsync(ct).ConfigureAwait(false);
+        var reportFields = await db.SubscriberModelFields.AsNoTracking()
+            .Where(f => subscriberKeys.Contains(f.SubscriberKey))
+            .OrderBy(f => f.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+        var reportRelationships = await db.SubscriberModelRelationships.AsNoTracking()
+            .Where(r => subscriberKeys.Contains(r.SubscriberKey))
+            .OrderBy(r => r.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+        var subscriberNames = (await db.Subscribers.AsNoTracking()
+                .Where(s => subscriberKeys.Contains(s.ObjectKey))
+                .Select(s => new { s.ObjectKey, s.Name })
+                .ToListAsync(ct).ConfigureAwait(false))
+            .GroupBy(s => s.ObjectKey, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().Name, StringComparer.Ordinal);
+
+        var objectKeys = reportTables.Select(t => t.ObjectKey).OfType<string>().Append(objectKey)
+            .Distinct(StringComparer.Ordinal).ToList();
+        var allowed = await LoadAllowedColumnsAsync(db, objectKeys, ct).ConfigureAwait(false);
+        var objectNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var chunk in objectKeys.Chunk(KeyChunk))
+        {
+            var rows = await db.Objects.AsNoTracking()
+                .Where(o => chunk.Contains(o.Key))
+                .Select(o => new { o.Key, o.Name })
+                .ToListAsync(ct).ConfigureAwait(false);
+            foreach (var row in rows)
+            {
+                objectNames[row.Key] = row.Name;
+            }
+        }
+
+        var result = new List<ReportModelEvaluation>(anchors.Count);
+        foreach (var anchor in anchors)
+        {
+            bool SameReport(string subscriberKey, string reportFile)
+                => string.Equals(subscriberKey, anchor.SubscriberKey, StringComparison.Ordinal)
+                    && string.Equals(reportFile, anchor.ReportFile, StringComparison.Ordinal);
+
+            var tableKeys = reportTables
+                .Where(t => SameReport(t.SubscriberKey, t.ReportFile))
+                .GroupBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First().ObjectKey, StringComparer.OrdinalIgnoreCase);
+            var fields = reportFields.Where(f => SameReport(f.SubscriberKey, f.ReportFile)).ToList();
+
+            // The warehouse column a model column name maps to, or the reason it does not.
+            string? ColumnProblem(string modelTable, string column, out string? canonical, out string? key)
+            {
+                canonical = null;
+                key = null;
+                if (!tableKeys.TryGetValue(modelTable, out key) || key is null)
+                {
+                    return $"The model table '{modelTable}' is not loaded from a warehouse table the catalog knows.";
+                }
+
+                var warehouseName = objectNames.GetValueOrDefault(key, key);
+                if (!allowed.TryGetValue(key, out var columns))
+                {
+                    return $"The model table '{modelTable}' loads from '{warehouseName}', which is not in the semantic layer.";
+                }
+
+                canonical = columns.FirstOrDefault(c => string.Equals(c.Name, column, StringComparison.OrdinalIgnoreCase))?.Name;
+                return canonical is null
+                    ? $"'{modelTable}[{column}]' is not an allow-listed column of '{warehouseName}'. A column the report " +
+                        "renamed counts as not allowed, since nothing maps it back to its warehouse column."
+                    : null;
+            }
+
+            var memo = new Dictionary<CatalogSubscriberModelField, string?>();
+            string? FieldProblem(CatalogSubscriberModelField field, HashSet<CatalogSubscriberModelField> visiting)
+            {
+                if (memo.TryGetValue(field, out var known))
+                {
+                    return known;
+                }
+
+                if (string.IsNullOrWhiteSpace(field.Expression))
+                {
+                    return memo[field] = "It has no DAX expression.";
+                }
+
+                // A cycle between definitions names no column the walk has not already checked on its way round.
+                if (!visiting.Add(field))
+                {
+                    return null;
+                }
+
+                string? problem = null;
+                foreach (var (table, name) in DaxReferences(field.Expression))
+                {
+                    var owner = table ?? field.TableName;
+                    var definition = fields.FirstOrDefault(f =>
+                        f.Kind != "column"
+                        && string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase)
+                        && (table is null
+                            ? f.Kind == MeasureKind || string.Equals(f.TableName, owner, StringComparison.OrdinalIgnoreCase)
+                            : string.Equals(f.TableName, table, StringComparison.OrdinalIgnoreCase)));
+                    if (definition is not null)
+                    {
+                        if (!ReferenceEquals(definition, field) && FieldProblem(definition, visiting) is { } nested)
+                        {
+                            problem = $"It uses '{definition.Name}', which is withheld. {nested}";
+                            break;
+                        }
+
+                        continue;
+                    }
+
+                    if (ColumnProblem(owner, name, out _, out _) is { } columnProblem)
+                    {
+                        problem = columnProblem;
+                        break;
+                    }
+                }
+
+                visiting.Remove(field);
+                return memo[field] = problem;
+            }
+
+            var evaluatedFields = fields
+                .Where(f => f.Kind != "column" && string.Equals(f.TableName, anchor.Name, StringComparison.OrdinalIgnoreCase))
+                .Select(f => new ReportFieldEvaluation(f, FieldProblem(f, [])))
+                .ToList();
+
+            var evaluatedRelationships = new List<ReportRelationshipEvaluation>();
+            foreach (var relationship in reportRelationships.Where(r => SameReport(r.SubscriberKey, r.ReportFile)))
+            {
+                var outgoing = string.Equals(relationship.FromTable, anchor.Name, StringComparison.OrdinalIgnoreCase);
+                if (!outgoing && !string.Equals(relationship.ToTable, anchor.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var ownColumn = outgoing ? relationship.FromColumn : relationship.ToColumn;
+                var otherTable = outgoing ? relationship.ToTable : relationship.FromTable;
+                var otherColumn = outgoing ? relationship.ToColumn : relationship.FromColumn;
+
+                string? ownCanonical = null;
+                string? otherCanonical = null;
+                string? otherKey = null;
+                string? problem;
+                if (ownColumn is null || otherColumn is null)
+                {
+                    problem = "The model does not name both of the relationship's columns.";
+                }
+                else
+                {
+                    problem = ColumnProblem(anchor.Name, ownColumn, out ownCanonical, out _)
+                        ?? ColumnProblem(otherTable, otherColumn, out otherCanonical, out otherKey);
+                }
+
+                tableKeys.TryGetValue(otherTable, out var resolvedOther);
+                otherKey ??= resolvedOther;
+                evaluatedRelationships.Add(new ReportRelationshipEvaluation(
+                    relationship, anchor.Name, ownCanonical ?? ownColumn, otherTable, otherCanonical ?? otherColumn,
+                    otherKey, otherKey is null ? null : objectNames.GetValueOrDefault(otherKey, otherKey), problem));
+            }
+
+            result.Add(new ReportModelEvaluation(
+                anchor, subscriberNames.GetValueOrDefault(anchor.SubscriberKey, anchor.SubscriberKey),
+                evaluatedFields, evaluatedRelationships));
         }
 
         return result;
@@ -604,6 +884,13 @@ internal static partial class SemanticLayer
             .Select(e => new SemanticExampleDto(e.Id, e.Question, e.Sql, e.Provenance, e.ConfirmedUtc))
             .ToList();
 
+        // The Power BI models built on the table, reduced to what may be served; a report whose every definition is
+        // withheld is left out entirely rather than listed empty.
+        var reportModels = (await EvaluateReportModelsAsync(db, key, ct).ConfigureAwait(false))
+            .Select(m => m.ToServedDto())
+            .Where(m => m.Measures.Count > 0 || m.CalculatedColumns.Count > 0 || m.Relationships.Count > 0)
+            .ToList();
+
         // Who consumes the table is object-level (report names and owners), so it names no column and is served
         // whole: it is how an assistant answers "who uses this table" without a raw catalog reader.
         var consumers = await LineageEndpoints.LoadObjectSubscribersAsync(db, key, ct).ConfigureAwait(false);
@@ -612,6 +899,6 @@ internal static partial class SemanticLayer
         return new SemanticTableDto(
             obj.Key, obj.ServerRef, obj.Database, obj.Schema, obj.Name, obj.Kind,
             annotation?.BusinessName, annotation?.Description, SplitSynonyms(annotation?.Synonyms),
-            keyColumns, keyOrigin, columns, joins, measures, examples, consumers, instructions);
+            keyColumns, keyOrigin, columns, joins, measures, examples, reportModels, consumers, instructions);
     }
 }

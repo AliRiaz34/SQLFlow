@@ -52,7 +52,8 @@ public sealed class CatalogDbContext : DbContext
     public DbSet<CatalogSubscriberModelRelationship> SubscriberModelRelationships
         => Set<CatalogSubscriberModelRelationship>();
 
-    public DbSet<CatalogQuestionExample> QuestionExamples => Set<CatalogQuestionExample>();
+    /// <summary>The semantic layer's example queries: every question/query pair a person confirmed (the saved answers).</summary>
+    public DbSet<CatalogSemanticExample> SemanticExamples => Set<CatalogSemanticExample>();
 
     public DbSet<CatalogFlowDependency> FlowDependencies => Set<CatalogFlowDependency>();
 
@@ -397,6 +398,8 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(t => t.SourceDatabase).HasMaxLength(128);
             entity.Property(t => t.SourceSchema).HasMaxLength(128);
             entity.Property(t => t.SourceName).HasMaxLength(128);
+            entity.Property(t => t.ObjectKey).HasMaxLength(900);
+            entity.HasIndex(t => t.ObjectKey);
             entity.HasIndex(t => t.SubscriberKey);
             entity.HasIndex(t => t.RepoId);
         });
@@ -430,9 +433,11 @@ public sealed class CatalogDbContext : DbContext
             entity.HasIndex(r => r.RepoId);
         });
 
-        modelBuilder.Entity<CatalogQuestionExample>(entity =>
+        modelBuilder.Entity<CatalogSemanticExample>(entity =>
         {
-            entity.ToTable("QuestionExample");
+            // Owned by the semantic layer: the saved answers are the layer's example queries. Renamed from
+            // QuestionExample by MoveQuestionExamplesIntoSemanticLayer, which keeps the rows and the full-text index.
+            entity.ToTable("SemanticExample");
             entity.HasKey(e => e.Id);
             // Room for a question a person actually types, which can be a good deal longer than the terse
             // one a visual's title generates. The SQL is unbounded for the same reason SubscriberQuery.Sql is.

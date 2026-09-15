@@ -23,10 +23,18 @@ sourceRefs:
   - tests/SqlFlow.ControlPlane.Tests/SemanticLayerApiTests.cs
   - src/SqlFlow.ControlPlane/Api/AssistantScope.cs
   - tools/sqlflow-mcp/src/control_plane.rs
+  - src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs
+  - src/SqlFlow.Catalog/Migrations/20260915192213_MoveQuestionExamplesIntoSemanticLayer.cs
+  - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
 referenceRefs:
   - concept-semantic-layer
   - concept-data-operations
   - concept-shadow-catalog
+  - flow-subscribers
+  - guide-chat-assistant
+related:
+  - wiki-design-doc-drift
+  - wiki-powerbi-model-entity-resolution
 updated: 2026-09-15
 ---
 
@@ -99,6 +107,36 @@ on the strength of having been valid when it was saved:
 
 A withheld annotation is kept, not deleted. Allowing the column again restores it. The editor shows why an
 annotation is withheld instead of silently dropping it.
+
+## Saved answers and Power BI models belong to the layer
+
+Two further stores grew up beside the layer, and the human pulled both into it.
+
+**Saved answers are the layer's example queries.** The confirmed question/query pairs were already served as each
+table's examples, but they lived in their own store with their own admin page. The human decided they are stored in
+the semantic layer. The table was renamed from `QuestionExample` to `SemanticExample`, and curation moved to the
+Semantic layer page (a Saved answers tab, plus edit and delete on each table's Examples tab).
+
+- **Renamed, not recreated.** EF's scaffolder cannot tell a renamed entity from a new one and generated a drop and a
+  create, which would have deleted every saved answer. The migration was rewritten as guarded renames of the table,
+  its primary key, and its indexes, with the full-text index dropped and recreated around them because it is keyed
+  on the primary key index.
+- **Confirming and auto-run kept their routes** (`/powerai/questions/confirm`, `/powerai/questions/{id}/auto-run`).
+  The MCP tools and the GUI's confirmation row call them, and moving them would have broken those callers without
+  changing what they do. Only the admin curation routes moved, under `/powerai/semantic-layer/examples`.
+
+**A Power BI model is served on the warehouse table it loads from.** The model spec pbix-extract emits (measures,
+calculated columns, relationships) was first stored per report and served by `describe_subscriber_report`. The
+human wanted it available from the semantic layer. Each model table now records the node key its Power Query source
+resolves to, through lineage's own identity resolution, and `describe_semantic_table` serves it as `reportModels`.
+
+- **Rejected: importing it as curated measures and joins** for an admin to approve. The human chose to attach it
+  read-only instead, labelled with its report, so the report stays the source of those definitions.
+- **Rejected: serving everything on a layer table.** The human chose to grade it like every other annotation. A
+  measure is served only when every column its DAX reads is allowed. A report column name is not mapped back to a
+  warehouse column, so a renamed column counts as not allowed.
+- **`describe_subscriber_report` stopped returning the model.** Leaving it there would have handed the chat an
+  ungraded copy of the same DAX, which is exactly what the grading exists to prevent.
 
 ## The tools the chat kept still returned column names in their text
 

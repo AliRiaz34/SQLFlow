@@ -1347,6 +1347,10 @@
         "src/SqlFlow.ControlPlane/Api/SemanticLayer.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
+        "src/SqlFlow.Catalog/CatalogSync.cs",
+        "gui/src/features/semantic-layer/SavedAnswersPanel.tsx",
         "src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/ColumnPolicyGuard.cs",
         "src/SqlFlow.Catalog/CatalogEntities.cs",
@@ -2633,9 +2637,9 @@
         "gui/src/features/chat/chatAdapters.ts",
         "gui/src/features/chat/AnswerConfirmation.tsx",
         "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
-        "src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs",
-        "gui/src/features/saved-answers/SavedAnswersPage.tsx",
-        "gui/src/features/saved-answers/SavedAnswerDialog.tsx",
+        "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
+        "gui/src/features/semantic-layer/SavedAnswersPanel.tsx",
+        "gui/src/features/semantic-layer/ExampleDialog.tsx",
         "gui/src/features/chat/QueryResultPage.tsx",
         "tools/sqlflow-mcp/src/server.rs",
         "gui/src/features/chat/SqlRunPanel.tsx",
@@ -3483,7 +3487,7 @@
       "sourceRefs": [
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
-        "src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
         "gui/src/features/chat/AnswerConfirmation.tsx"
       ]
     },
@@ -4081,7 +4085,10 @@
         "chat tool allowlist",
         "no-tracking"
       ],
-      "related": [],
+      "related": [
+        "wiki-design-doc-drift",
+        "wiki-powerbi-model-entity-resolution"
+      ],
       "sourceRefs": [
         "src/SqlFlow.ControlPlane/Api/SemanticLayer.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs",
@@ -4092,7 +4099,10 @@
         "src/SqlFlow.Assistant/AssistantSettings.cs",
         "tests/SqlFlow.ControlPlane.Tests/SemanticLayerApiTests.cs",
         "src/SqlFlow.ControlPlane/Api/AssistantScope.cs",
-        "tools/sqlflow-mcp/src/control_plane.rs"
+        "tools/sqlflow-mcp/src/control_plane.rs",
+        "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
+        "src/SqlFlow.Catalog/Migrations/20260915192213_MoveQuestionExamplesIntoSemanticLayer.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs"
       ]
     },
     {

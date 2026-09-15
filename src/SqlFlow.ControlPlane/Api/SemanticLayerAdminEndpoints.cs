@@ -38,9 +38,41 @@ public sealed record SemanticMeasureAdminDto(
     long Id, string Name, string ObjectKey, string ObjectName, string Expression, string? Description,
     string? Problem, string? UpdatedBy, DateTime UpdatedUtc);
 
-/// <summary>A stored example query reading the edited object, with why it is not served when it is not.</summary>
+/// <summary>
+/// A saved answer (one of the semantic layer's example queries) as the editor shows it, on a table's Examples tab and on
+/// the Saved answers tab alike.
+/// </summary>
+/// <param name="Id">The example's id, the one <c>find_similar_questions</c> reports as <c>exampleId</c>.</param>
+/// <param name="Question">The question it answers.</param>
+/// <param name="Sql">The query that answers it.</param>
+/// <param name="SourceRef">The datasource it runs against, or null when none is stored.</param>
+/// <param name="ObjectKeys">The warehouse objects the query reads, which decide the tables it is an example of.</param>
+/// <param name="Provenance">Where the example came from.</param>
+/// <param name="Confidence">The retrieval score the answer was built from, when it was built from a match.</param>
+/// <param name="RepoId">The repo it is attributed to, or null when estate-wide.</param>
+/// <param name="ConfirmedBy">Who last stood behind it: the person who confirmed it, or the admin who last edited it.</param>
+/// <param name="ConfirmedUtc">When that happened.</param>
+/// <param name="Problem">Why the assistant is not currently offered it, or null when it is served.</param>
 public sealed record SemanticExampleAdminDto(
-    long Id, string Question, string Sql, string Provenance, string? ConfirmedBy, DateTime ConfirmedUtc, string? Problem);
+    long Id, string Question, string Sql, string? SourceRef, IReadOnlyList<string> ObjectKeys, string Provenance,
+    int? Confidence, Guid? RepoId, string? ConfirmedBy, DateTime ConfirmedUtc, string? Problem);
+
+/// <summary>A Power BI measure or calculated column built on the edited object, with why it is not served when it is
+/// not. <c>Kind</c> is <c>measure</c> or <c>calculatedColumn</c>; <c>Expression</c> is its DAX.</summary>
+public sealed record SemanticReportFieldAdminDto(
+    string Name, string Kind, string Expression, string? Description, string? Problem);
+
+/// <summary>A Power BI model relationship from the edited object's model table, with the warehouse columns and object
+/// it maps to (when they resolve) and why it is not served when it is not.</summary>
+public sealed record SemanticReportRelationshipAdminDto(
+    string ModelTable, string? OwnColumn, string OtherModelTable, string? OtherColumn, string? OtherObjectKey,
+    string? Cardinality, bool IsActive, string? Problem);
+
+/// <summary>One report's model table that loads from the edited object, with everything it defines and each item's
+/// state. Read-only: the report is the source of these definitions.</summary>
+public sealed record SemanticReportModelAdminDto(
+    string SubscriberKey, string SubscriberName, string ReportFile, string ModelTable,
+    IReadOnlyList<SemanticReportFieldAdminDto> Fields, IReadOnlyList<SemanticReportRelationshipAdminDto> Relationships);
 
 /// <summary>Everything the semantic layer editor shows for one object.</summary>
 public sealed record SemanticObjectAdminDto(
@@ -51,7 +83,8 @@ public sealed record SemanticObjectAdminDto(
     IReadOnlyList<SemanticCuratedJoinDto> CuratedJoins,
     IReadOnlyList<SemanticDiscoveredJoinDto> DiscoveredJoins,
     IReadOnlyList<SemanticMeasureAdminDto> Measures,
-    IReadOnlyList<SemanticExampleAdminDto> Examples);
+    IReadOnlyList<SemanticExampleAdminDto> Examples,
+    IReadOnlyList<SemanticReportModelAdminDto> ReportModels);
 
 /// <summary>Replaces an object's table-level business context. Every field is written as given (a null or empty
 /// value clears it); when all are empty the annotation is removed.</summary>
@@ -230,12 +263,16 @@ public static class SemanticLayerAdminEndpoints
 
         var examples = (await SemanticLayer.EvaluateExamplesAsync(db, key, SemanticLayer.MaxAdminExamples, servableOnly: false, ct)
                 .ConfigureAwait(false))
-            .Select(e => new SemanticExampleAdminDto(e.Id, e.Question, e.Sql, e.Provenance, e.ConfirmedBy, e.ConfirmedUtc, e.Problem))
+            .Select(e => e.ToAdminDto())
+            .ToList();
+
+        var reportModels = (await SemanticLayer.EvaluateReportModelsAsync(db, key, ct).ConfigureAwait(false))
+            .Select(m => m.ToAdminDto())
             .ToList();
 
         return TypedResults.Ok(new SemanticObjectAdminDto(
             obj.Key, obj.ServerRef, obj.Database, obj.Schema, obj.Name, obj.Kind, obj.KeyColumns, obj.KeyOrigin,
-            ToAnnotationDto(annotation), columns, curated, discovered, measures, examples));
+            ToAnnotationDto(annotation), columns, curated, discovered, measures, examples, reportModels));
     }
 
     private static async Task<Results<Ok<SemanticAnnotationDto>, ProblemHttpResult>> SetAnnotationAsync(

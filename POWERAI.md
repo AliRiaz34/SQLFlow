@@ -61,7 +61,8 @@ Principle.
   data model"), `list_subscribers` / `describe_subscriber` (what a given report reads and the SQL it
   runs). **Extended** with `describe_subscriber_report` to surface the report/page/visual/field
   tables (Section 10); the model spec (measures, relationships, calculated columns, table sources)
-  is stored at sync and returned by the same tool as `models`.
+  is stored at sync and served by the semantic layer (`describe_semantic_table`'s `reportModels`) on the
+  warehouse table each model table loads from.
 - **The safety net.** Ad-hoc query execution
   ([docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md)) is read-only
   by construction (single `SELECT`, always run inside a rolled-back transaction) and gated behind
@@ -110,8 +111,8 @@ known limitations for what remains unproven.
 
 ## 6. The learning loop (question -> guess -> confirm -> remember)
 
-Built, including the confirmation moment (Section 10) and admin curation of saved answers on the GUI's
-Saved answers page. Separate from extraction: a live
+Built, including the confirmation moment (Section 10) and admin curation of saved answers in the semantic
+layer (the Semantic layer page's Saved answers tab). Separate from extraction: a live
 feedback loop that grows the example set from real usage, not just from PowerBI.
 
 - A user asks a question. The system searches confirmed question/query examples (from PowerBI
@@ -132,11 +133,12 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
   a mistake resurfacing as if it had been checked. Rejections are not recorded anywhere: only
   confirmations are. `confirm_question` accepts `outcome="rejected"` so saying no is not an error, but
   the endpoint writes nothing and says so in its response, and the assistants are told not to call it
-  for a rejection at all. Saved answers are curated by admins on the GUI's Saved answers page
-  (`/saved-answers`), where one can be corrected or deleted.
+  for a rejection at all. Saved answers are the semantic layer's example queries
+  (`CatalogSemanticExample`, table `SemanticExample`), curated by admins on the Semantic layer page's Saved
+  answers tab and on each table's Examples tab, where one can be corrected or deleted.
 - This makes the system self-improving under real usage. Auto-running a TRUSTED match directly
   (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
-  confirmation gate when it would not finish in that budget) reads `CatalogQuestionExample.SourceRef`
+  confirmation gate when it would not finish in that budget) reads `CatalogSemanticExample.SourceRef`
   (Section 8) to know which datasource to run a trusted match's SQL against. The GUI confirmation row
   sets it through a datasource picker, and when nobody picks one it is inferred from the tables the
   query reads (`DatasourceInference`).
@@ -161,7 +163,7 @@ this that genuinely is graph-shaped, table-to-table join relationships inferred 
 already stored as a graph today and already walked as one by `get_table_joins`; PowerBI's declared
 relationships are a second, clearly-labeled kind of fact, not a merge into that same graph.
 
-The confirmed-example store (Section 6) landed as `CatalogQuestionExample` and followed this same
+The confirmed-example store (Section 6) landed as `CatalogSemanticExample` and followed this same
 flat-table precedent exactly: one appendable table holding the question, the query, the objects it
 reads, the provenance and the confidence, searched by the same pass that searches the PowerBI-derived
 questions. No new storage shape was introduced.
@@ -179,8 +181,9 @@ Per the Catalog Schema Changes Require a Migration rule. Landed:
   columns, table sources/M expressions) is emitted by `tools/pbix-extract` on its standard output,
   read by `FlowSetCollector` during a sync, and stored in `CatalogSubscriberModelTable`,
   `CatalogSubscriberModelField`, and `CatalogSubscriberModelRelationship`, keyed by subscriber, report
-  file, and table name the same way the report structure is. `describe_subscriber_report` returns it
-  as `models`. It is never written to a YAML file: the only model-spec file in the repo is the
+  file, and table name the same way the report structure is. Each model table also records the
+  warehouse object its source resolved to (`ObjectKey`), and `describe_semantic_table` serves the model
+  there as `reportModels`, keeping only definitions whose every column is on the column allow-list. It is never written to a YAML file: the only model-spec file in the repo is the
   hand-committed sample under `samples/powerbi/`.
 - The YAML shape for that model spec, and for the report layer alongside it, is a flat `nodes:` and
   `edges:` graph rather than a name-keyed tree of `tables[].columns[]`, `measures[].table`,
@@ -212,7 +215,7 @@ Landed since:
 
 Landed since that:
 
-- `CatalogQuestionExample` (migration `AddQuestionExamples`, full-text index in
+- `CatalogSemanticExample` (migration `AddQuestionExamples`, full-text index in
   `AddQuestionExampleFullTextSearch`): the confirmed-example store this section called for, carrying
   the question text, the SQL, the source object keys, the provenance (`powerbi` | `user-confirmed`),
   the retrieval score the answer was built from, the timestamp, and the confirming user. Flat and
@@ -230,7 +233,7 @@ Landed since that:
 
 Landed since that:
 
-- `CatalogQuestionExample.SourceRef` (nullable, migration `AddQuestionExampleSourceRef`): the
+- `CatalogSemanticExample.SourceRef` (nullable, migration `AddQuestionExampleSourceRef`): the
   datasource a confirmed example's SQL runs against, in the same whole-reference shape
   (`${env:...}`/`${keyvault:...}`/`@alias`) the DataOps query surface already requires, and gated by
   the same known-reference check `PrepareQueryRequest.Reference` enforces (a caller cannot set it to
@@ -287,7 +290,7 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
 6. ~~**Build the confirmed-example store and the retrieval step.**~~ **Done.** A typed question is expanded by
    an LLM into related business vocabulary and the stored questions are ranked by how many of those terms they
    match, reachable as the `find_similar_questions` MCP tool; the `user-confirmed` half is
-   `CatalogQuestionExample` (Section 8), written through `POST /api/v1/powerai/questions/confirm` and the
+   `CatalogSemanticExample` (Section 8), written through `POST /api/v1/powerai/questions/confirm` and the
    `confirm_question` MCP tool, and searched by the SAME `QuestionSearch.FindSimilarAsync` pass rather than a
    second one. See
    [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) for the design and what
@@ -466,7 +469,7 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
   suite (73 checks, clean under ASan/UBSan).
 - **The model spec is stored only where the sync ran the extractor.** Measures (with their DAX),
   relationships, calculated columns, and table sources land in the catalog at sync and are served by
-  `describe_subscriber_report` as `models`, but the control plane container carries no
+  the semantic layer (`describe_semantic_table`'s `reportModels`), but the control plane container carries no
   `pbix-extract` binary (by design, see above), so a report's model appears only after a sync on a
   machine that has it. The DAX is stored verbatim and never evaluated.
 - **A visual can project a field the model spec never resolved to a node.** A visual names its
@@ -523,8 +526,9 @@ In roughly the order it would need to land, since each depends on groundwork the
 1. ~~Resolve the tool duplication.~~ **Done** (above): `tools/pbix-extract` is the single reader,
    `SqlFlow.PowerBi` is deleted, and `FlowSetCollector` consumes the tool's YAML.
 2. ~~An MCP surface over pages/visuals/fields.~~ **Done** (above): `describe_subscriber_report`. The
-   model spec (measures, relationships, calculated columns, table sources) is now exposed the same
-   way, as the tool's `models`, from the catalog tables a sync writes.
+   model spec (measures, relationships, calculated columns, table sources) is now exposed through
+   the semantic layer, on the warehouse table each model table loads from, as `describe_semantic_table`'s
+   `reportModels`.
 3. ~~The business-question field~~ **Done** (Section 8, Section 9 step 3): every extracted visual
    can now carry 1-3 LLM-generated questions (`CatalogSubscriberReportVisualQuestion`), generated by
    a control-plane-only post-sync step and regenerated only when the visual's content changed. This
@@ -547,7 +551,7 @@ In roughly the order it would need to land, since each depends on groundwork the
    and it adds no vendor beyond the Anthropic key: an embedding-based version was built first and removed
    for that reason, which
    [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) records along with
-   what the switch traded away. The store: `CatalogQuestionExample` (Section 8) holds the flat
+   what the switch traded away. The store: `CatalogSemanticExample` (Section 8) holds the flat
    question/query/objects/provenance/confidence/timestamp/user row, `POST /api/v1/powerai/questions/confirm`
    (`QuestionExampleEndpoints`, "operate" scope) writes it, and `confirm_question` exposes that to every
    assistant surface. The SAME search reads both halves and ranks them together, so a confirmed example

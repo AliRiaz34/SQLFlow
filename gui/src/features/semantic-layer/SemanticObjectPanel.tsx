@@ -15,7 +15,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { isApiError } from "../../api/client";
 import { columnPolicyApi, semanticLayerApi } from "../../api/endpoints";
 import type {
-  ColumnPolicyState, SemanticCuratedJoin, SemanticDiscoveredJoin, SemanticMeasureAdmin, SemanticObjectAdmin,
+  ColumnPolicyState, SemanticCuratedJoin, SemanticDiscoveredJoin, SemanticExampleAdmin, SemanticMeasureAdmin,
+  SemanticObjectAdmin,
 } from "../../api/types";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { CorrelationError } from "../../components/CorrelationError";
@@ -24,6 +25,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { Mono } from "../../components/Mono";
 import { RelativeTime } from "../../components/RelativeTime";
 import { encodeNodeId } from "../catalog/nodeIds";
+import { ExampleDialog } from "./ExampleDialog";
 import { JoinDialog, type JoinDraft } from "./JoinDialog";
 import type { PickedTable } from "./LayerTablePicker";
 import { MeasureDialog } from "./MeasureDialog";
@@ -31,7 +33,7 @@ import {
   errorText, formatList, parseList, qualifiedName, refreshSemanticLayer, SEMANTIC_ROOT, ServedBadge, textOrNull,
 } from "./shared";
 
-type ObjectTab = "about" | "columns" | "relationships" | "measures" | "examples";
+type ObjectTab = "about" | "columns" | "relationships" | "measures" | "examples" | "powerbi";
 
 // ---- About ---------------------------------------------------------------------------------------------------------
 
@@ -569,6 +571,20 @@ function MeasuresTab({ detail, table, inLayer }: { detail: SemanticObjectAdmin; 
 // ---- Examples ------------------------------------------------------------------------------------------------------
 
 function ExamplesTab({ detail }: { detail: SemanticObjectAdmin }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState<SemanticExampleAdmin | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SemanticExampleAdmin | null>(null);
+
+  const remove = useMutation({
+    mutationFn: (id: number) => semanticLayerApi.deleteExample(id),
+    onSuccess: () => {
+      toast.success("Saved answer deleted.");
+      setPendingDelete(null);
+      refreshSemanticLayer(queryClient);
+    },
+    onError: (error) => toast.error(errorText(error)),
+  });
+
   if (detail.examples.length === 0) {
     return (
       <EmptyState
@@ -590,6 +606,26 @@ function ExamplesTab({ detail }: { detail: SemanticObjectAdmin }) {
             <span className="mr-auto text-[13px] font-medium">{example.question}</span>
             <Badge variant="outline" className="text-[11px]">{example.provenance}</Badge>
             <ServedBadge problem={example.problem} />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              aria-label={`Edit the saved answer to "${example.question}"`}
+              onClick={() => setEditing(example)}
+              data-testid="semantic-example-edit"
+            >
+              <Pencil />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              aria-label={`Delete the saved answer to "${example.question}"`}
+              onClick={() => setPendingDelete(example)}
+              data-testid="semantic-example-delete"
+            >
+              <Trash2 />
+            </Button>
           </div>
           <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[12px]">{example.sql}</pre>
           <span className="text-xs text-muted-foreground">
@@ -597,6 +633,82 @@ function ExamplesTab({ detail }: { detail: SemanticObjectAdmin }) {
             <RelativeTime value={example.confirmedUtc} />
           </span>
         </div>
+      ))}
+      {editing !== null && <ExampleDialog example={editing} onClose={() => setEditing(null)} />}
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this saved answer?"
+        message="The assistant stops reusing this query, and questions that matched it are answered from scratch again."
+        confirmLabel="Delete"
+        danger
+        busy={remove.isPending}
+        onConfirm={() => pendingDelete !== null && remove.mutate(pendingDelete.id)}
+        onClose={() => setPendingDelete(null)}
+      />
+    </div>
+  );
+}
+
+// ---- Power BI ------------------------------------------------------------------------------------------------------
+
+/** What Power BI reports define on this table: read-only, since each report is the source of its definitions. */
+function PowerBiTab({ detail }: { detail: SemanticObjectAdmin }) {
+  if (detail.reportModels.length === 0) {
+    return (
+      <EmptyState
+        title="No Power BI report loads from this table"
+        description="A report's model appears here once a sync that ran pbix-extract has read it and one of its model tables resolved to this warehouse table."
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4" data-testid="semantic-report-models">
+      <p className="text-[13px] text-muted-foreground">
+        Measures, calculated columns, and relationships Power BI reports build on this table. The assistant is served only
+        those whose every column is allowed; a column the report renamed counts as not allowed.
+      </p>
+      {detail.reportModels.map((model) => (
+        <section
+          key={`${model.subscriberKey}#${model.reportFile}#${model.modelTable}`}
+          className="flex flex-col gap-3 rounded-md border p-3"
+          data-testid="semantic-report-model"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] font-medium">{model.subscriberName}</span>
+            <span className="font-mono text-[12px] text-muted-foreground">{model.reportFile}</span>
+            <Badge variant="outline" className="text-[11px]">{`model table ${model.modelTable}`}</Badge>
+          </div>
+          {model.fields.map((field) => (
+            <div key={`${field.kind}:${field.name}`} className="flex flex-col gap-1" data-testid="semantic-report-field">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="mr-auto font-mono text-[12px] font-medium">{field.name}</span>
+                <Badge variant="secondary" className="text-[11px]">
+                  {field.kind === "measure" ? "measure" : "calculated column"}
+                </Badge>
+                <ServedBadge problem={field.problem} />
+              </div>
+              {field.description !== null && <p className="text-xs text-muted-foreground">{field.description}</p>}
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted p-2 font-mono text-[12px]">{field.expression}</pre>
+            </div>
+          ))}
+          {model.relationships.map((relationship) => (
+            <div
+              key={`${relationship.ownColumn ?? ""}>${relationship.otherModelTable}.${relationship.otherColumn ?? ""}`}
+              className="flex flex-wrap items-center gap-2"
+              data-testid="semantic-report-relationship"
+            >
+              <span className="mr-auto font-mono text-[12px]">
+                {`${relationship.modelTable}[${relationship.ownColumn ?? "?"}] to ${relationship.otherModelTable}[${relationship.otherColumn ?? "?"}]`}
+              </span>
+              {relationship.cardinality !== null && (
+                <Badge variant="secondary" className="text-[11px]">{relationship.cardinality}</Badge>
+              )}
+              {!relationship.isActive && <Badge variant="outline" className="text-[11px]">inactive</Badge>}
+              <ServedBadge problem={relationship.problem} />
+            </div>
+          ))}
+        </section>
       ))}
     </div>
   );
@@ -675,12 +787,14 @@ export function SemanticObjectPanel({ objectKey }: { objectKey: string }) {
           </TabsTrigger>
           <TabsTrigger value="measures" data-testid="semantic-tab-measures">{`Measures (${detail.measures.length})`}</TabsTrigger>
           <TabsTrigger value="examples" data-testid="semantic-tab-examples">{`Examples (${detail.examples.length})`}</TabsTrigger>
+          <TabsTrigger value="powerbi" data-testid="semantic-tab-powerbi">{`Power BI (${detail.reportModels.length})`}</TabsTrigger>
         </TabsList>
         <TabsContent value="about"><AboutTab detail={detail} /></TabsContent>
         <TabsContent value="columns"><ColumnsTab detail={detail} /></TabsContent>
         <TabsContent value="relationships"><RelationshipsTab detail={detail} table={table} inLayer={inLayer} /></TabsContent>
         <TabsContent value="measures"><MeasuresTab detail={detail} table={table} inLayer={inLayer} /></TabsContent>
         <TabsContent value="examples"><ExamplesTab detail={detail} /></TabsContent>
+        <TabsContent value="powerbi"><PowerBiTab detail={detail} /></TabsContent>
       </Tabs>
     </div>
   );
