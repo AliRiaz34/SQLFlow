@@ -113,8 +113,10 @@ follow-ups chain server-side via `previous_response_id`, and the model must be R
 (for example `gpt-5-mini`). In the `Anthropic` mode the Claude MCP connector calls the same MCP server
 server-side; Claude keeps no server-side conversation state, so the bot replays the Slack thread transcript
 each turn (the Slack thread is the durable record either way). The bot's whole SQLFlow authority is one
-read-scoped personal access token, sent to the MCP server as the `Authorization` header;
-`trigger_run`/`cancel_run` are excluded from the tool allowlist. See the reference guide for the full contract.
+personal access token for a dedicated account, sent to the MCP server as the `Authorization` header; the
+tool allowlist is what bounds it: business questions (running a query the thread approves, saving an answer
+someone confirms) are allowed, and `trigger_run`/`cancel_run` are excluded. See the reference guide for the
+full contract.
 IDE assistants (Copilot, Claude, Cursor) keep using `sqlflow-mcp` locally over stdio; this deploys the same
 binary in `http` mode as a shared, remote tool source.
 

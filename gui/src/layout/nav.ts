@@ -1,6 +1,7 @@
 import {
   Activity,
   Bell,
+  BookmarkCheck,
   BookOpen,
   BotMessageSquare,
   Cable,
@@ -106,6 +107,7 @@ export const navGroups: NavGroup[] = [
     items: [
       { label: "Users", to: "/users", icon: Users, testId: "nav-users" },
       { label: "Semantic layer", to: "/semantic-layer", icon: Sparkles, testId: "nav-semantic-layer" },
+      { label: "Saved answers", to: "/saved-answers", icon: BookmarkCheck, testId: "nav-saved-answers" },
     ],
   },
   {

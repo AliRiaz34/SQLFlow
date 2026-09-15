@@ -138,7 +138,7 @@ param slackAppToken string = ''
 param slackBotToken string = ''
 
 @secure()
-@description('A READ-scoped SQLFlow personal access token (sqlf_...) the assistant presents to the MCP server. Mint it in the GUI or CLI after the estate is up, then redeploy with this set; empty skips the Slack assistant.')
+@description('A SQLFlow personal access token (sqlf_...) the assistant presents to the MCP server, minted for a dedicated account: every query the bot runs and every answer it saves is attributed to that account. Mint it in the GUI or CLI after the estate is up, then redeploy with this set; empty skips the Slack assistant.')
 param slackBotSqlflowToken string = ''
 
 @description('The Slack assistant model provider: AzureFoundry (the Foundry Responses API via managed identity, needs aiFoundryName + aiFoundryModelName), OpenAI (the OpenAI platform via API key), or Anthropic (the Claude API via API key). The two key-based modes have no Azure AI dependency.')

@@ -333,8 +333,9 @@ pub struct ConfirmQuestionInput {
     /// proposed: the store holds what worked, never what was fixed. Must be a single read-only SELECT; it is
     /// parsed and refused otherwise.
     pub sql: String,
-    /// What the person decided: "accepted" (the query answered the question), "corrected" (it answered it
-    /// after being edited), or "rejected" (it did not). A rejection stores nothing and says so.
+    /// What the person decided about the RESULT: "accepted" (they explicitly said the answer is right, or asked
+    /// to save it), "corrected" (it answered it after being edited), or "rejected" (it did not). Approving a
+    /// run is none of these. A rejection stores nothing and says so.
     pub outcome: String,
     /// The warehouse object keys the query reads, when you resolved them (from describe_object or the match
     /// you adapted). Omit rather than guessing: an example is still worth keeping without them.
@@ -700,6 +701,102 @@ fn done(result: anyhow::Result<String>) -> String {
 
 fn json_str(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+}
+
+/// How a query answer must be laid out. Carried IN the tool result rather than only in the server instructions,
+/// because a client may truncate those instructions long before the business-question section.
+const ANSWER_FORMAT: &str = "If your own instructions already define how to lay out a query answer (a chat \
+    that embeds the result, for example), follow those and ignore this field, `sqlIntro`, `sqlBlock`, and \
+    `chartLink`. Otherwise: reply with the finding in one or two plain sentences, then `sqlIntro` on its own \
+    line exactly as given, then `sqlBlock` copied exactly as given, as its own fenced code block on its own lines, \
+    then, only when `chartLink` is present, a last line reading [View this as a chart](chartLink) with that URL; \
+    nothing else goes before, between, or after these parts. Never put the SQL inline in a sentence or in single backticks, never \
+    paraphrase it, and beyond `sqlIntro` do not describe how the answer was found (matches, confirmations, \
+    datasources, tool names) unless asked. Running this query is NOT confirmation of the answer: do not call \
+    confirm_question now, and only call it later if the person, after seeing this result, explicitly says it \
+    is correct, corrects it, or asks you to save it.";
+
+/// How to behave between find_similar_questions and the answer. Carried in the result because the server
+/// instructions that say the same can be truncated by the client, and a model left to itself narrates its
+/// retrieval ("the only match is not trusted") in exactly the internal terms a business reader should never see.
+const RETRIEVAL_RULE: &str = "Say nothing to the person yet. Do not comment on these matches, whether any is \
+    trusted, their scores, saved answers or reports, or what you will look up next, and do not announce that you \
+    are building a query. Work silently until you have the answer or a query to offer, then reply once, laid out \
+    as your instructions describe or, when you have them, as auto_run_trusted_match, run_query, or prepare_query \
+    hands back.";
+
+/// Attaches the silent-retrieval rule to a find_similar_questions response; an error payload is left alone.
+fn attach_retrieval_rule(value: &mut Value) {
+    if value.get("matches").is_none() {
+        return;
+    }
+    if let Some(map) = value.as_object_mut() {
+        map.insert("responseRule".into(), json!(RETRIEVAL_RULE));
+    }
+}
+
+/// How to ask a person to approve a prepared query. A business reader cannot weigh retrieval internals, and
+/// hearing that an answer is "not trusted" reads as the assistant being unreliable, so the ask stays about what
+/// the query will show.
+const APPROVAL_FORMAT: &str = "If your own instructions already define how to offer a query (a chat with a Run \
+    button, for example), follow those and ignore this field. Otherwise: ask for approval in plain business \
+    language. Open with where the query comes \
+    from: when it is NOT a saved answer (you wrote it for this question, or adapted it from a similar one), say \
+    \"I don't have a saved answer for this question yet, so I've put together a query that should answer it.\"; \
+    when it reproduces a question one of the estate's reports already answers, say \"This question is already \
+    answered in one of our reports, so here's the query behind it.\" Then one sentence on what this query will \
+    show, then `sql` verbatim as its own ```sql fenced code block, then a short question such as \"Want me \
+    to run it?\". Never mention trust, trusted or untrusted, scores, thresholds, matches, confidence, or that \
+    an answer is unverified, and never ask the person to judge the data source, table, or datasource: they \
+    decide whether to run it, not how it was found.";
+
+/// Attaches the approval layout to a prepare_query response that minted a plan; an error payload is left alone.
+fn attach_approval_format(value: &mut Value) {
+    if value.get("planId").and_then(Value::as_str).is_none() {
+        return;
+    }
+    if let Some(map) = value.as_object_mut() {
+        map.insert("approvalFormat".into(), json!(APPROVAL_FORMAT));
+    }
+}
+
+/// The line that introduces the SQL block: a trusted auto-run replays a stored, person-confirmed query, while a
+/// run_query result ran a statement composed for this question.
+const SAVED_QUERY_INTRO: &str = "Here's the saved query I ran:";
+const QUERY_INTRO: &str = "Here's the query I ran:";
+
+/// Attaches the answer layout to a query result that actually produced rows: `sqlBlock` is the SQL that ran,
+/// already fenced, so the model copies a finished element instead of deciding how to render it. Both the
+/// auto-run response and a compute task carry the executed statement at `result.sql`; a result that did not
+/// run (or carries no SQL) is left untouched, so nothing suggests an answer exists.
+///
+/// `chartLink` opens the same result as a chart in the GUI, and is added only when links are absolute (a
+/// root-relative link is not clickable outside the GUI). This server cannot tell which client called it, since
+/// the GUI chat and Slack share one `surface=assistant` connection, so every layout field says it yields to the
+/// client's own instructions: the GUI chat, which draws the chart inline, is told to ignore them.
+fn attach_answer_format(value: &mut Value, links: &GuiLinks) {
+    let succeeded = value["ran"].as_bool() == Some(true) || value["status"].as_str() == Some("succeeded");
+    if !succeeded {
+        return;
+    }
+    let Some(sql) = value["result"]["sql"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let block = format!("```sql\n{sql}\n```");
+    // Only the auto-run response carries `ran`; a compute task from run_query never does.
+    let intro = if value.get("ran").is_some() { SAVED_QUERY_INTRO } else { QUERY_INTRO };
+    if let Some(map) = value.as_object_mut() {
+        map.insert("answerFormat".into(), json!(ANSWER_FORMAT));
+        map.insert("sqlIntro".into(), json!(intro));
+        map.insert("sqlBlock".into(), json!(block));
+    }
+    let chart = value["taskId"]
+        .as_str()
+        .filter(|_| !links.base().is_empty())
+        .map(|task_id| links.query_result(task_id));
+    if let (Some(chart), Some(map)) = (chart, value.as_object_mut()) {
+        map.insert("chartLink".into(), json!(chart));
+    }
 }
 
 /// Caps every string in a JSON document to `max` characters (marking the cut), recursively. The warehouse
@@ -2043,7 +2140,10 @@ and fix every finding first."
             search_semantic_layer, or any other lookup to confirm the table it reads is real before offering it. That verification is what \
             being trusted already means, and re-deriving it defeats the reason this store exists, which is \
             to reuse a checked answer instead of re-checking one. Only an UNTRUSTED match (or none at all) is \
-            a lead rather than an answer: say so plainly, and only then fall back to \
+            a lead rather than an answer. Do not narrate between tool calls: the response's `responseRule` \
+            says to work silently until you have a result or a query to approve. Treat that as your own working knowledge, never as something to tell \
+            the person: do not say a match is untrusted, low-scoring, or below a threshold, since to a business \
+            reader that sounds like the assistant is unreliable; just ask whether to run the query. Only then fall back to \
             search_semantic_layer/describe_semantic_table to compose or verify something yourself. A trusted confirmed match runs with \
             auto_run_trusted_match; anything else goes through prepare_query/run_query. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
@@ -2056,14 +2156,13 @@ and fix every finding first."
             skipping the prepare_query/run_query approval round trip entirely, because this exact SQL was \
             already confirmed by a person when it was stored; a trusted match without an `exampleId` (a \
             dashboard question) still needs prepare_query/run_query. \
-            When a person tells you your answer was \
+            When a person, after seeing the result, explicitly tells you your answer was \
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
-            finds it. An empty `matches` \
+            finds it; agreeing to run a query is not that. An empty `matches` \
             means nothing stored matched those terms (or no questions are stored yet), not that the question \
-            is unanswerable: fall back to search_semantic_layer/describe_semantic_table and say that is what you did. When a \
-            person tells you an answer was wrong, call confirm_question with outcome=\"rejected\" so the loop \
-            is recorded as having happened, but nothing about the wrong query is stored or returned by a later \
-            search: only correct, verified answers become precedent here."
+            is unanswerable: fall back to search_semantic_layer/describe_semantic_table without announcing it. When a \
+            person tells you an answer was wrong, nothing is saved, so do not call confirm_question for it: \
+            offer to fix the query instead. Only correct, verified answers become precedent here."
     )]
     async fn find_similar_questions(&self, Parameters(i): Parameters<SimilarQuestionsInput>) -> String {
         let mut q: Vec<(&str, String)> = vec![("question", i.question)];
@@ -2073,12 +2172,27 @@ and fix every finding first."
         if let Some(repo_id) = i.repo_id {
             q.push(("repoId", repo_id));
         }
-        self.get("/api/v1/lineage/subscribers/similar-questions", &q).await
+        done(
+            self.cp
+                .get("/api/v1/lineage/subscribers/similar-questions", &q)
+                .await
+                .map(|mut v| {
+                    self.links.decorate(&mut v);
+                    attach_retrieval_rule(&mut v);
+                    json_str(&v)
+                }),
+        )
     }
 
     #[tool(
         description = "Record what a person decided about an answer you gave, so the estate LEARNS from it: \
-            the question, the SQL, and whether they accepted it, corrected it, or rejected it. This is the \
+            the question, the SQL, and whether they accepted it, corrected it, or rejected it. \
+            APPROVING A RUN IS NEVER CONFIRMATION: \"yes\", \"go ahead\", \"run it\" in reply to a prepared \
+            query only lets it run, and says nothing about whether the result is right. Storing an example is a \
+            separate decision with lasting effect (every later similar question reuses it, and a trusted one \
+            auto-runs with no approval), so call this ONLY when the person, AFTER seeing the result, explicitly \
+            says the answer is correct, tells you how to fix it, or asks you to save it. \
+            Never call it in the same turn you present a result, and never on a run approval alone. This is the \
             other half of find_similar_questions, and it is what makes retrieval improve with use rather than \
             staying frozen at whatever the dashboards happened to ask. Call it AFTER a person has actually \
             told you the answer was right (or told you what to fix), never on your own judgement that a query \
@@ -2126,7 +2240,10 @@ and fix every finding first."
             409 means neither exists. The response carries a `taskId` identifying the stored result. The row cap \
             and timeout are fixed by the deployment, not by you: read `maxRows`/`timeoutSeconds` back from the \
             response rather than assuming defaults. Read `ran` first: true means `result` holds the answer and \
-            you can present it: state the answer once, in plain language, without preamble about the match. False \
+            you can present it: state the answer once, in plain language, without preamble about the match, \
+            then ALWAYS show the SQL: the response's `sqlIntro` line, then its `sqlBlock` copied exactly as its \
+            own fenced code block, following `answerFormat`; never inline it in a sentence and \
+            never leave it out, even for a one-line count. False \
             means the query did not finish inside the budget (or failed against the live source): do NOT retry \
             auto-run again for the same example, and do NOT tell the user it ran - instead call prepare_query \
             with the `sql` and `sourceRef` this response still carries, so a person approves it the normal way. \
@@ -2142,7 +2259,10 @@ and fix every finding first."
                     json!({}),
                 )
                 .await
-                .map(|v| json_str(&v)),
+                .map(|mut v| {
+                    attach_answer_format(&mut v, &self.links);
+                    json_str(&v)
+                }),
         )
     }
 
@@ -2361,7 +2481,10 @@ and fix every finding first."
             \
             After calling this you MUST show the returned `sql` to the user verbatim and get their agreement \
             BEFORE calling run_query with the planId. Do not paraphrase it, do not summarise it, and do not \
-            redeem the token on your own initiative: preparing is not permission to run. \
+            redeem the token on your own initiative: preparing is not permission to run. Phrase the ask as the \
+            response's `approvalFormat` says: a line saying there is no saved answer yet (or that a report \
+            already answers it), what the query will show, the SQL, and \"Want me to run it?\", \
+            never a word about trust, scores, or matches, and never a request to judge the data source. \
             \
             Compose the SQL from real metadata first (get_table_key for the grain, get_table_joins for the ON \
             clauses, describe_object for columns); never guess a join or a column name. This surface is behind \
@@ -2379,7 +2502,14 @@ and fix every finding first."
             \
             Read `truncated` in the result before describing the answer. A truncated result is a PAGE, not the \
             whole answer, and summing or counting one gives a confidently wrong total: say it was truncated, \
-            or re-prepare with a higher maxRows or an aggregate that answers the question directly."
+            or re-prepare with a higher maxRows or an aggregate that answers the question directly. \
+            \
+            Whenever you present the rows, ALWAYS include the SQL that ran: the result's `sqlIntro` line, then \
+            its `sqlBlock` copied exactly as its own fenced code block, following \
+            `answerFormat`, even though you already showed the statement before running it. \
+            \
+            The person's approval to run is approval to RUN, not a judgement that the answer is right: never \
+            call confirm_question because they agreed to run it."
     )]
     async fn run_query(&self, Parameters(i): Parameters<RunQueryInput>) -> String {
         done(self.run_prepared_query(i).await)
@@ -2852,7 +2982,8 @@ impl SqlFlowMcp {
             body["pool"] = json!(pool);
         }
 
-        let prepared = self.cp.post("/api/v1/dataops/queries/prepare", body).await?;
+        let mut prepared = self.cp.post("/api/v1/dataops/queries/prepare", body).await?;
+        attach_approval_format(&mut prepared);
         Ok(json_str(&prepared))
     }
 
@@ -2874,7 +3005,7 @@ impl SqlFlowMcp {
             .ok_or_else(|| anyhow::anyhow!("The control plane's accept response carried no taskId: {accepted}"))?;
 
         for _ in 0..12 {
-            let task = self
+            let mut task = self
                 .cp
                 .get(&format!("/api/v1/datasources/tasks/{task_id}"), &[("waitMs", "20000".to_string())])
                 .await?;
@@ -2883,6 +3014,7 @@ impl SqlFlowMcp {
                     // Deliberately NOT truncate_long_strings here: the caller asked for these values, and
                     // silently trimming a cell would report altered data as the answer. The runner already
                     // bounds rows and cell size at the source.
+                    attach_answer_format(&mut task, &self.links);
                     return Ok(json_str(&task));
                 }
                 _ => {}
@@ -3302,12 +3434,27 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   reads). Do not narrate between tool calls on this path (no \"found a trusted match\", no \"let me run
   it\"): say nothing until you have the result, then answer ONCE for a business reader, opening with the
   finding in a plain sentence (\"You have 4 customers.\"), without scores, matched terms, provenance, who
-  confirmed it, datasource references, or tool names unless asked. Only fall through to search_semantic_layer/describe_semantic_table when nothing
+  confirmed it, datasource references, or tool names unless asked. ALWAYS close that answer with the SQL
+  that actually ran: the result's `sqlIntro` line (\"Here's the saved query I ran:\"), then its `sqlBlock`
+  copied exactly as its own fenced code block (the result's `answerFormat` spells this out), so the person can check it, rerun
+  it, or confirm it. Never put it inline in a sentence, paraphrase it, or omit it, however obvious the
+  query looks. The same goes for every answer backed by run_query.
+  Only fall through to search_semantic_layer/describe_semantic_table when nothing
   matches, or every match is untrusted and you need to understand the schema to write a fresh query.
+  Whether a match is trusted, and its score, are for YOU: never tell the person a match is untrusted,
+  low-scoring, or below a threshold, and never ask them to judge the data source. When a query needs their
+  approval, open with \"I don't have a saved answer for this question yet, so I've put together a query that
+  should answer it.\" (or, for a question a report already answers, that a report already answers it), say
+  what it will show, give the SQL, and ask \"Want me to run it?\" (prepare_query's
+  `approvalFormat` spells this out).
   describe_subscriber_report then shows which report VISUAL a matched question came from, with the
   field ROLE (axis vs. value) a flattened column list cannot express. Once a person has judged an answer
-  right, wrong, or in need of a fix, call confirm_question so the next similar question finds it too; call
-  it only on an answer a human actually judged, never on your own sense that a query looks correct. A
+  right or in need of a fix, call confirm_question so the next similar question finds it too; call
+  it only on an answer a human actually judged, never on your own sense that a query looks correct.
+  Approving a run (\"yes\", \"go ahead\", \"run it\") is NOT judging the answer: running and saving are
+  separate decisions, so never call confirm_question on a run approval or in the same turn you present a
+  result; wait for the person to say, after seeing it, that it is right, needs a fix, or should be
+  saved. A
   message with NO `!cwd` prefix is never routed to find_similar_questions, no matter how much it reads
   like a business question in plain English: treat it as a normal schema/lookup question and work it
   through the semantic layer and the rest of this list instead.
@@ -3461,6 +3608,93 @@ mod tests {
         // A row that already resolved its own links keeps them: the rows know better than the caller.
         let own = json!({ "runId": "run-1", "links": { "page": "/runs/run-1" } });
         assert_eq!(with_subject(own.clone(), ("pipelineId", "p-1"), links), own);
+    }
+
+    #[test]
+    fn a_successful_auto_run_carries_the_sql_as_a_fenced_block() {
+        let mut value = json!({
+            "ran": true,
+            "status": "succeeded",
+            "sql": "SELECT COUNT(*) AS CustomerCount FROM demo.Customers",
+            "result": { "sql": "SELECT COUNT(*) AS CustomerCount FROM demo.Customers\n", "rows": [["4"]] }
+        });
+        attach_answer_format(&mut value, &GuiLinks::new(""));
+        assert_eq!(
+            value["sqlBlock"],
+            json!("```sql\nSELECT COUNT(*) AS CustomerCount FROM demo.Customers\n```")
+        );
+        assert_eq!(value["answerFormat"], json!(ANSWER_FORMAT));
+        assert_eq!(value["sqlIntro"], json!("Here's the saved query I ran:"));
+    }
+
+    #[test]
+    fn a_succeeded_query_task_carries_the_sql_as_a_fenced_block() {
+        let mut value = json!({ "status": "succeeded", "result": { "sql": "SELECT 1 AS One" } });
+        attach_answer_format(&mut value, &GuiLinks::new(""));
+        assert_eq!(value["sqlBlock"], json!("```sql\nSELECT 1 AS One\n```"));
+        assert_eq!(value["sqlIntro"], json!("Here's the query I ran:"));
+    }
+
+    #[test]
+    fn a_succeeded_result_links_its_chart_only_when_links_are_absolute() {
+        let task = json!({
+            "status": "succeeded",
+            "taskId": "01a0a5e7-18fa-71c1-a2b3-842b8df8dfd2",
+            "result": { "sql": "SELECT 1 AS One" }
+        });
+
+        let mut absolute = task.clone();
+        attach_answer_format(&mut absolute, &GuiLinks::new("http://localhost:8081"));
+        assert_eq!(
+            absolute["chartLink"],
+            json!("http://localhost:8081/query-results/01a0a5e7-18fa-71c1-a2b3-842b8df8dfd2")
+        );
+
+        let mut relative = task;
+        attach_answer_format(&mut relative, &GuiLinks::new(""));
+        assert!(relative.get("chartLink").is_none());
+        assert!(relative.get("sqlBlock").is_some());
+    }
+
+    #[test]
+    fn a_similar_questions_response_carries_the_silent_retrieval_rule_and_an_error_does_not() {
+        let mut found = json!({ "matches": [], "question": "how much have customers spent?" });
+        attach_retrieval_rule(&mut found);
+        assert_eq!(found["responseRule"], json!(RETRIEVAL_RULE));
+
+        let mut error = json!("Error: the control plane is unreachable");
+        attach_retrieval_rule(&mut error);
+        assert_eq!(error, json!("Error: the control plane is unreachable"));
+    }
+
+    #[test]
+    fn a_prepared_plan_carries_the_approval_format_and_an_error_does_not() {
+        let mut prepared = json!({ "planId": "efcca224", "sql": "SELECT 1 AS One" });
+        attach_approval_format(&mut prepared);
+        assert_eq!(prepared["approvalFormat"], json!(APPROVAL_FORMAT));
+
+        let mut refused = json!({ "error": "Only a single read-only SELECT is allowed." });
+        attach_approval_format(&mut refused);
+        assert!(refused.get("approvalFormat").is_none());
+    }
+
+    #[test]
+    fn a_result_that_did_not_run_gets_no_answer_format() {
+        let mut not_ran = json!({ "ran": false, "status": "cancelled", "sql": "SELECT 1", "result": null });
+        attach_answer_format(&mut not_ran, &GuiLinks::new("http://localhost:8081"));
+        assert!(
+            not_ran.get("sqlBlock").is_none()
+                && not_ran.get("answerFormat").is_none()
+                && not_ran.get("sqlIntro").is_none()
+        );
+
+        let mut failed = json!({ "status": "failed", "result": { "sql": "SELECT 1" } });
+        attach_answer_format(&mut failed, &GuiLinks::new("http://localhost:8081"));
+        assert!(failed.get("sqlBlock").is_none());
+
+        let mut error = json!("Error: the control plane is unreachable");
+        attach_answer_format(&mut error, &GuiLinks::new("http://localhost:8081"));
+        assert_eq!(error, json!("Error: the control plane is unreachable"));
     }
 
     #[test]

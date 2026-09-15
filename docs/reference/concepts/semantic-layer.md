@@ -74,7 +74,9 @@ long after something naming it was written (`SemanticLayer.cs`):
   to exactly one scalar select over the anchor (no second table, filter, grouping, or subquery; comments and `;`
   are refused outright) and passes `ReadOnlyQueryGuard` and `ColumnPolicyGuard`.
 - **Examples**: the newest `QuestionExample` rows whose `ObjectKeys` include the table, served only when their
-  SQL passes `ReadOnlyQueryGuard` and `ColumnPolicyGuard`; at most 10 per table.
+  SQL passes `ReadOnlyQueryGuard` and `ColumnPolicyGuard`; at most 10 per table. A confirmed example sent without
+  object keys gets them from the catalogued tables its SQL names, and admins correct or delete examples on the GUI's
+  Saved answers page (`/saved-answers`).
 
 The admin editor shows every annotation with its state: `served`, or `withheld` with the reason.
 

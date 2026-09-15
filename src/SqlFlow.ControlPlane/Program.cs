@@ -441,7 +441,9 @@ v1.MapGroup(string.Empty).RequireAuthorization("author")
 v1.MapGroup(string.Empty).RequireAuthorization("admin")
     .MapUserEndpoints()
     .MapColumnPolicyEndpoints()
-    .MapSemanticLayerAdminEndpoints();
+    .MapSemanticLayerAdminEndpoints()
+    // Curating the PowerAI saved answers: list, correct, and delete what confirming stored.
+    .MapQuestionExampleAdminEndpoints();
 
 app.Run();
 

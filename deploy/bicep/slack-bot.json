@@ -71,7 +71,7 @@
       "type": "string",
       "defaultValue": "sqlflow-slack-bot-access-token",
       "metadata": {
-        "description": "Key Vault secret name for the read-scoped SQLFlow personal access token the assistant presents to the MCP server."
+        "description": "Key Vault secret name for the SQLFlow personal access token the assistant presents to the MCP server."
       }
     },
     "modelApiKeySecretName": {

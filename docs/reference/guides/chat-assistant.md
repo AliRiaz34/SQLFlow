@@ -2,7 +2,7 @@
 id: guide-chat-assistant
 title: "The GUI chat assistant: the SQLFlow agent in the workbench, with per-user authority and voice input"
 type: guide
-summary: How the GUI's Assistant page answers questions - the same assistant core as the Slack bot, streamed over SSE from the control plane, with tool calls made under the signed-in user's own token, persisted conversations, image paste, and voice input via server-side transcription.
+summary: The GUI's Assistant page, the same assistant core as the Slack bot, streamed from the control plane with tool calls under the signed-in user's own token.
 keywords:
   - chat
   - assistant
@@ -25,6 +25,7 @@ keywords:
   - run query
   - dataops
   - chart
+  - saved answers
 related:
   - guide-slack-assistant
   - guide-deployment
@@ -42,6 +43,11 @@ sourceRefs:
   - gui/src/features/chat/chatAdapters.ts
   - gui/src/features/chat/AnswerConfirmation.tsx
   - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs
+  - gui/src/features/saved-answers/SavedAnswersPage.tsx
+  - gui/src/features/saved-answers/SavedAnswerDialog.tsx
+  - gui/src/features/chat/QueryResultPage.tsx
+  - tools/sqlflow-mcp/src/server.rs
   - gui/src/features/chat/SqlRunPanel.tsx
   - gui/src/features/chat/QueryResultView.tsx
   - gui/src/features/chat/QueryResultEmbed.tsx
@@ -63,7 +69,7 @@ The Slack bot and the GUI chat share one implementation: `SqlFlow.Assistant`, th
 
 ## Per-user authority (the difference from Slack)
 
-The Slack bot holds one shared read-scoped token, because everyone in a channel shares the bot's identity. The GUI chat has a signed-in user on every request, so the control plane forwards the caller's OWN bearer to the MCP server on every agent run: the assistant can read exactly what that user can read, and the control plane enforces the token's scopes per tool call exactly as it would for the user's own API calls. The tool allowlist still defaults to the read-only surface (`ControlPlane:Assistant:Mcp:AllowedTools`).
+The Slack bot holds one shared token, because everyone in a channel shares the bot's identity. The GUI chat has a signed-in user on every request, so the control plane forwards the caller's OWN bearer to the MCP server on every agent run: the assistant can do exactly what that user can do, and the control plane enforces the token's scopes per tool call exactly as it would for the user's own API calls. The tool allowlist defaults to `McpOptions.GuiDefaultTools` (`ControlPlane:Assistant:Mcp:AllowedTools`), which never includes a tool that starts work.
 
 ## The chain
 
@@ -99,13 +105,31 @@ Under every finished answer that hands back a SQL query, the thread shows one ro
 
 - **Yes** opens the query read-only for a last look, with an optional datasource picker, and stores it as a confirmed example.
 - **Not quite** opens the same query in an editable SQL editor. What is stored is the CORRECTED query, never the original proposal, so the example the estate learns from is the one that actually worked.
-- **No** records the decision and stores nothing. Only correct, verified answers become precedent, so a refuted query is discarded rather than kept as a "do not propose this again" row.
+- **No** stores nothing, and nothing records that it was pressed: only confirmations are kept. Only correct, verified answers become precedent, so a refuted query is discarded rather than kept as a "do not propose this again" row.
 
 The query being judged is read from the answer's own ```sql fenced blocks, which is exactly what the person read before deciding; an answer carrying several queries gets a numbered picker. Only `sql`-tagged fences count, since an untagged one is as likely to be YAML or a table of results. The question is the user turn the answer replies to, so an answer confirmed from a re-opened conversation records the same pair a live one would.
 
-The datasource is optional and must be a whole `${env:...}` / `${keyvault:...}` reference or an `@alias` that the catalog already declares. Without one, the confirm endpoint stores the datasource the query's objects live on (from the object keys when supplied, whose first segment is the connection reference, otherwise from the tables the SQL reads), and leaves it empty only when those do not point at exactly one declared datasource.
+The datasource is optional and must be a whole `${env:...}` / `${keyvault:...}` reference or an `@alias` that the catalog already declares. Without one, the confirm endpoint stores the datasource the query's objects live on (from the object keys when supplied, whose first segment is the connection reference, otherwise from the tables the SQL reads), and leaves it empty only when those do not point at exactly one declared datasource. The objects the example reads are resolved the same way when the caller sends none (the catalogued tables the SQL names), so an answer confirmed from this row is served as an example of those tables in the semantic layer.
 
 The row posts to `POST /api/v1/powerai/questions/confirm`, the same endpoint behind the `confirm_question` MCP tool, so a click and a tool call land the same row and nothing new is stored on this path. It appears only when the deployment has the example store turned on: `GET /api/v1/chat/capabilities` reports `questionConfirmation`, which is `ControlPlane:PowerAI:Retrieval:Enabled` read from the same options the confirm endpoint answers 501 on. Confirming the same question and query again refreshes the existing example rather than adding a duplicate, so reaffirming an answer does not give it extra weight in later searches.
+
+The assistant itself calls `confirm_question` only when the person, after seeing a result, says it is right, corrects it, or asks to save it. Approving a run ("yes", "go ahead") is never that, and a person saying an answer is wrong saves nothing, so the assistant does not call it then.
+
+## Managing saved answers
+
+Admins curate what confirming stored on the **Saved answers** page (`/saved-answers`, Admin in the navigation, `admin` scope). It lists every saved answer newest first, with a search over question and query text, the datasource it runs against, who last stood behind it, and whether the assistant is currently offered it (`served`, or `withheld` with the reason, when its SQL no longer passes the read-only guard or the column allow-list).
+
+- **Edit** changes the question, the query (edited as plain text, stored exactly as written), or the datasource. It is validated exactly as a confirmation is (the question length, `ReadOnlyQueryGuard`, `ColumnPolicyGuard`, the known-reference gate). The duplicate hash is recomputed, and an edit that would make the answer identical to another saved one answers 409. When the query changes, the tables it reads are resolved again; a blank datasource is worked out from them. The editor becomes `ConfirmedBy`, because a trusted answer auto-runs on the strength of someone having checked exactly that query.
+- **Delete** removes it: later questions stop finding it, and it can no longer be auto-run.
+
+Adding an answer is still only done by confirming one. The endpoints (`QuestionExampleAdminEndpoints`, admin scope):
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/powerai/questions?search=&page=&pageSize=` | Saved answers, newest first, each with its served/withheld `problem` |
+| `GET /api/v1/powerai/questions/{id}` | One saved answer |
+| `PUT /api/v1/powerai/questions/{id}` | Edit `question`, `sql`, and `sourceRef` (blank to infer); 400 when refused, 409 when it would duplicate another |
+| `DELETE /api/v1/powerai/questions/{id}` | Delete it; 404 when it does not exist |
 
 ## Running a query
 
@@ -118,6 +142,21 @@ The click names no datasource: the control plane works it out from the tables th
 A `!cwd` question is answered for a business reader: the answer opens with the plain finding in a sentence or two, without retrieval scores, matched terms, datasource references or tool names. A trusted confirmed match (`find_similar_questions` reports `trusted`, and the match carries an `exampleId`) is run immediately with `auto_run_trusted_match`, with no approval prompt and no datasource question; `auto_run_trusted_match` is on the GUI's default tool allowlist for exactly this. A match is trusted when it clears `RankThreshold` or is the same question as the one typed (the same meaningful words once stop words and plural or verb endings are ignored), so a short question's verbatim twin is not refused for having only one word to count.
 
 When a query actually ran, the answer carries a fenced `query-result` block holding the run's compute task id. `QueryResultEmbed.tsx` renders it by reading the stored task (`GET /api/v1/datasources/tasks/{id}`), as the same chart or table the Run button shows, so nothing executes again and a re-opened conversation shows the same result. The SQL behind the answer follows in a `sql` block, which keeps the Run button and the confirmation row available on it.
+
+When nothing has run yet, the answer opens with where the query comes from ("I don't have a saved answer for this question yet, so I've put together a query that should answer it.", or that one of the estate's reports already answers the question), says what the query will show, and gives the `sql` block to Run. It never tells the person a match is trusted, untrusted, or low-scoring: that is the assistant's working knowledge, not something a business reader can act on.
+
+## Answer layout for other MCP clients
+
+A client outside the GUI (Claude Code, a desktop app) has no layout of its own for these answers, and may truncate the MCP server's instructions, so the tool results carry the layout themselves:
+
+| Field | Returned by | What it says |
+| --- | --- | --- |
+| `responseRule` | `find_similar_questions` | Say nothing between tool calls; no remarks about matches, trust, or scores |
+| `approvalFormat` | `prepare_query` | The no-saved-answer opening, what the query will show, the SQL, then "Want me to run it?"; never a word about trust or scores, never a request to judge the data source |
+| `answerFormat`, `sqlIntro`, `sqlBlock` | `run_query`, `auto_run_trusted_match` (successful results only) | The finding, then `sqlIntro` ("Here's the saved query I ran:" for a trusted auto-run, "Here's the query I ran:" otherwise), then `sqlBlock`, the SQL already fenced; and that running is not confirming |
+| `chartLink` | the same, only when the MCP server has `SQLFLOW_GUI_URL` | `/query-results/<taskId>`, a GUI page that draws the stored result with `QueryResultEmbed` (the same chart as the chat) and shows its SQL, without running it again |
+
+Every layout field opens by yielding to the client's own instructions, which is how the GUI chat and the Slack bot keep their layouts: the GUI chat's instructions tell it to ignore them (it draws the chart inline), and the Slack instructions adopt `approvalFormat` and `answerFormat`. The MCP server cannot tell those clients apart, since both connect with `surface=assistant`.
 
 The affordance is gated by `dataOpsRunQuery` on `GET /api/v1/chat/capabilities` (`ControlPlane:DataOps:Enabled`, the same switch `prepare_query`/`run_query` answer 403 on), so it is absent, not merely disabled, on a deployment without the data-operations surface turned on.
 

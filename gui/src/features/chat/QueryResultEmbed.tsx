@@ -12,9 +12,9 @@ import { datasourceApi } from "../../api/endpoints";
 import type { RunQueryResult } from "../../api/types";
 import { QueryResultView } from "./QueryResultView";
 
-const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function isRunQueryResult(value: unknown): value is RunQueryResult {
+export function isRunQueryResult(value: unknown): value is RunQueryResult {
   if (typeof value !== "object" || value === null) {
     return false;
   }

@@ -128,9 +128,11 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
   back into the example store, with its provenance (`powerbi` vs `user-confirmed`) and an updated
   confidence. **A rejection is not stored.** Only correct, verified answers become precedent this
   estate learns from; a query a person told us was wrong is not knowledge, and keeping it around risks
-  a mistake resurfacing as if it had been checked. `confirm_question` still accepts and records
-  `outcome="rejected"` so the decision is not silently lost from the moment, but the endpoint writes
-  nothing to `CatalogQuestionExample` and says so in its response.
+  a mistake resurfacing as if it had been checked. Rejections are not recorded anywhere: only
+  confirmations are. `confirm_question` accepts `outcome="rejected"` so saying no is not an error, but
+  the endpoint writes nothing and says so in its response, and the assistants are told not to call it
+  for a rejection at all. Saved answers are curated by admins on the GUI's Saved answers page
+  (`/saved-answers`), where one can be corrected or deleted.
 - This makes the system self-improving under real usage. Auto-running a TRUSTED match directly
   (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
   confirmation gate when it would not finish in that budget) reads `CatalogQuestionExample.SourceRef`

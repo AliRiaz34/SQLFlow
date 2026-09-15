@@ -9,6 +9,7 @@ import { lazyRoute } from "./lib/lazyRoute";
 // Feature pages are lazy so heavy dependencies (Monaco, React Flow, Recharts) load with their page, not at boot.
 const DashboardPage = lazyRoute("DashboardPage", () => import("./features/dashboard/DashboardPage"));
 const ChatPage = lazyRoute("ChatPage", () => import("./features/chat/ChatPage"));
+const QueryResultPage = lazyRoute("QueryResultPage", () => import("./features/chat/QueryResultPage"));
 const InsightsPage = lazyRoute("InsightsPage", () => import("./features/insights/InsightsPage"));
 const DataStreamsPage = lazyRoute("DataStreamsPage", () => import("./features/datastreams/DataStreamsPage"));
 const RunsPage = lazyRoute("RunsPage", () => import("./features/runs/RunsPage"));
@@ -34,6 +35,7 @@ const LineageGraphPage = lazyRoute("LineageGraphPage", () => import("./features/
 const SearchPage = lazyRoute("SearchPage", () => import("./features/search/SearchPage"));
 const UsersPage = lazyRoute("UsersPage", () => import("./features/users/UsersPage"));
 const SemanticLayerPage = lazyRoute("SemanticLayerPage", () => import("./features/semantic-layer/SemanticLayerPage"));
+const SavedAnswersPage = lazyRoute("SavedAnswersPage", () => import("./features/saved-answers/SavedAnswersPage"));
 const AccessTokensPage = lazyRoute("AccessTokensPage", () => import("./features/tokens/AccessTokensPage"));
 const NotificationsPage = lazyRoute("NotificationsPage", () => import("./features/notifications/NotificationsPage"));
 const MaintenancePage = lazyRoute("MaintenancePage", () => import("./features/maintenance/MaintenancePage"));
@@ -59,6 +61,8 @@ export default function App() {
           <Route path="/" element={<DashboardPage />} />
           {/* The SQLFlow assistant: chat over the estate, tools served by the SQLFlow MCP server. */}
           <Route path="/chat" element={<ChatPage />} />
+          {/* One finished query drawn as a chart: where an answer given outside the GUI links to. */}
+          <Route path="/query-results/:taskId" element={<QueryResultPage />} />
           <Route path="/insights" element={<InsightsPage />} />
           {/* Which tables have stopped receiving data, from the run history's own write statistics. */}
           <Route path="/datastreams" element={<DataStreamsPage />} />
@@ -112,6 +116,14 @@ export default function App() {
             element={(
               <RequireScope scope="admin">
                 <SemanticLayerPage />
+              </RequireScope>
+            )}
+          />
+          <Route
+            path="/saved-answers"
+            element={(
+              <RequireScope scope="admin">
+                <SavedAnswersPage />
               </RequireScope>
             )}
           />

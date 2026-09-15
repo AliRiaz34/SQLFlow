@@ -22,7 +22,7 @@ import type {
   SemanticAnnotation, SemanticCuratedJoin, SemanticInstructions, SemanticMeasureAdmin, SemanticObjectAdmin,
   SemanticObjectCoverage, SemanticOverview, SemanticSchemaCoverage, SetSemanticAnnotationRequest,
   UpsertSemanticJoinRequest, UpsertSemanticMeasureRequest,
-  ConfirmQuestionRequest, ConfirmedQuestion,
+  ConfirmQuestionRequest, ConfirmedQuestion, QuestionExampleAdmin, UpdateQuestionExampleRequest,
   PrepareQueryRequest, PreparedQuery,
   FlowParameters,
   PipelineColumn, PipelineDetail, PipelineFile, PipelineFileStats, PipelineSummary, RegisterRepoSourceRequest, Repo, RepoDeletionResult, RepoSource, RepoSourceRegistered, RepoSyncResult, RepoTree, Role,
@@ -636,7 +636,19 @@ export const questionExampleApi = {
    * signal to hide the affordance rather than an error worth toasting. */
   confirm: (request: ConfirmQuestionRequest) =>
     post<ConfirmedQuestion>("/api/v1/powerai/questions/confirm", request),
+  /** Saved answers, newest first, narrowed to those whose question or query contains every search word (admin). */
+  list: (query: QuestionExampleQuery = {}) =>
+    get<PagedResult<QuestionExampleAdmin>>("/api/v1/powerai/questions", query as QueryParams),
+  /** Corrects a saved answer, validated exactly as a confirmation is; 409 when it would duplicate another (admin). */
+  update: (id: number, request: UpdateQuestionExampleRequest) =>
+    put<QuestionExampleAdmin>(`/api/v1/powerai/questions/${id}`, request),
+  /** Deletes a saved answer: later questions stop finding it and it can no longer be auto-run (admin). */
+  remove: (id: number) => del<void>(`/api/v1/powerai/questions/${id}`),
 };
+
+export interface QuestionExampleQuery extends PageQuery {
+  search?: string;
+}
 
 // ---- Personal access tokens (self-service: the caller's own tokens) ----------------------------------------------
 

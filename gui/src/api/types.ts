@@ -1604,6 +1604,31 @@ export interface ConfirmedQuestion {
   message: string;
 }
 
+/** A saved answer as the management page shows it. `problem` says why the assistant is not offered it (its SQL no
+ * longer passes the read-only guard or the column allow-list), null when it is served. `confirmedBy` is whoever
+ * last stood behind it: the person who confirmed it, or the admin who last edited it. */
+export interface QuestionExampleAdmin {
+  id: number;
+  question: string;
+  sql: string;
+  sourceRef: string | null;
+  objectKeys: string[];
+  provenance: string;
+  confidence: number | null;
+  repoId: string | null;
+  confirmedBy: string | null;
+  confirmedUtc: string;
+  problem: string | null;
+}
+
+/** An edit to a saved answer. The SQL is validated exactly as a confirmation is; a null `sourceRef` is worked out
+ * from the tables the query reads. */
+export interface UpdateQuestionExampleRequest {
+  question: string;
+  sql: string;
+  sourceRef: string | null;
+}
+
 // ---- Personal access tokens -------------------------------------------------------------------------------------
 
 export interface AccessToken {

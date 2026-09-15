@@ -63,8 +63,27 @@ public static class DatasourceInference
             return new DatasourceInferenceResult(null, []);
         }
 
-        var servers = await ServersFromSqlAsync(db, sql, ct).ConfigureAwait(false);
-        return Result(Resolve(declared, servers));
+        var objects = await ObjectsFromSqlAsync(db, sql, ct).ConfigureAwait(false);
+        return Result(Resolve(declared, objects.Select(o => o.ServerRef)));
+    }
+
+    /// <summary>The keys of the catalog objects <paramref name="sql"/>'s tables resolve to, by the same schema/name
+    /// lookup inference uses, so a question example stored without caller-supplied keys is still tied to the tables
+    /// it reads. Empty when the statement is not one SELECT or names no catalogued table.</summary>
+    /// <param name="db">The catalog.</param>
+    /// <param name="sql">The query.</param>
+    /// <param name="ct">Cancels the lookup.</param>
+    public static async Task<IReadOnlyList<string>> ObjectKeysFromSqlAsync(
+        CatalogDbContext db, string sql, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        if (string.IsNullOrWhiteSpace(sql))
+        {
+            return [];
+        }
+
+        var objects = await ObjectsFromSqlAsync(db, sql, ct).ConfigureAwait(false);
+        return objects.Select(o => o.Key).Distinct(StringComparer.Ordinal).ToList();
     }
 
     private static DatasourceInferenceResult Result(IReadOnlyList<string> candidates)
@@ -99,9 +118,13 @@ public static class DatasourceInference
             .Select(key => key.IndexOf('|', StringComparison.Ordinal) is var bar and > 0 ? key[..bar] : string.Empty)
             .Where(server => server.Length > 0);
 
-    /// <summary>The connection references of the catalog objects a query's tables resolve to. A statement that
-    /// does not parse as one SELECT yields nothing, since there is then no table list to trust.</summary>
-    private static async Task<IReadOnlyList<string>> ServersFromSqlAsync(
+    /// <summary>A catalog object a query's table resolved to: its node key and the connection reference it was
+    /// reached through.</summary>
+    private sealed record ResolvedObject(string Key, string ServerRef);
+
+    /// <summary>The catalog objects a query's tables resolve to. A statement that does not parse as one SELECT
+    /// yields nothing, since there is then no table list to trust.</summary>
+    private static async Task<IReadOnlyList<ResolvedObject>> ObjectsFromSqlAsync(
         CatalogDbContext db, string sql, CancellationToken ct)
     {
         var select = ColumnPolicyGuard.ParseSingleSelect(sql);
@@ -124,12 +147,12 @@ public static class DatasourceInference
         var names = tables.Select(t => t.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var objects = await db.Objects.AsNoTracking()
             .Where(o => names.Contains(o.Name))
-            .Select(o => new { o.ServerRef, o.Schema, o.Name })
+            .Select(o => new { o.Key, o.ServerRef, o.Schema, o.Name })
             .ToListAsync(ct).ConfigureAwait(false);
 
         return objects
             .Where(o => tables.Exists(t => t.Matches(o.Schema, o.Name)))
-            .Select(o => o.ServerRef)
+            .Select(o => new ResolvedObject(o.Key, o.ServerRef))
             .ToList();
     }
 

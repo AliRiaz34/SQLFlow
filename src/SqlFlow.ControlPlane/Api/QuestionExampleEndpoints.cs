@@ -16,8 +16,7 @@ namespace SqlFlow.ControlPlane.Api;
 
 /// <summary>
 /// What a person decided about a proposed answer. POWERAI.md Section 6's loop is accept/correct/reject, and all
-/// three arrive here: the first two are knowledge worth keeping, and the third is recorded as having happened
-/// without being kept as fact.
+/// three arrive here: the first two are knowledge worth keeping, and the third is accepted and stores nothing.
 /// </summary>
 public static class QuestionConfirmationOutcome
 {
@@ -29,8 +28,7 @@ public static class QuestionConfirmationOutcome
     public const string Corrected = "corrected";
 
     /// <summary>The query did not answer the question. Nothing is stored: POWERAI.md Section 6 is explicit that
-    /// only correct, verified answers become precedent, so a rejection is recorded as having happened without
-    /// being kept as fact.</summary>
+    /// only correct, verified answers become precedent, so a rejection leaves no trace in the store.</summary>
     public const string Rejected = "rejected";
 
     /// <summary>Whether <paramref name="value"/> is one of the three outcomes, case-insensitively.</summary>
@@ -171,43 +169,27 @@ public static class QuestionExampleEndpoints
 
         var outcome = request.Outcome!.Trim().ToLowerInvariant();
         var question = request.Question?.Trim() ?? string.Empty;
-        if (question.Length == 0)
+        if (QuestionProblem(question) is { } questionProblem)
         {
-            return Problem("The question being confirmed must not be empty.", StatusCodes.Status400BadRequest);
+            return Problem(questionProblem, StatusCodes.Status400BadRequest);
         }
 
-        if (question.Length > MaxQuestionLength)
-        {
-            return Problem(
-                $"The question is {question.Length} characters, over the {MaxQuestionLength}-character limit.",
-                StatusCodes.Status400BadRequest);
-        }
-
-        // A rejection is answered before the SQL is validated: the caller is telling us the query was WRONG,
-        // and refusing their report because the wrong query also failed to parse would lose the one signal the
-        // exchange carried. Nothing is stored either way, so nothing depends on the text being well-formed.
-        // POWERAI.md Section 6 is explicit that only correct, verified answers become precedent: a rejected
-        // query is not knowledge the estate should keep, so it is discarded rather than remembered as a
-        // "do not propose this again" row.
+        // A rejection is answered before the SQL is validated: nothing is stored either way, so refusing it because
+        // the wrong query also failed to parse would only turn a person's "no" into an error. POWERAI.md Section 6
+        // is explicit that only correct, verified answers become precedent: a rejected query is not knowledge the
+        // estate keeps, so it is neither stored nor remembered as a "do not propose this again" row.
         if (string.Equals(outcome, QuestionConfirmationOutcome.Rejected, StringComparison.Ordinal))
         {
             return TypedResults.Ok(new ConfirmedQuestionDto(
                 Stored: false, ExampleId: null, outcome, Provenance: null,
-                "The rejection was recorded and nothing was stored: a refuted query is not knowledge, so it "
-                + "never becomes an example later answers are grounded in."));
+                "Nothing was stored: only accepted and corrected answers are kept, so a refuted query never "
+                + "becomes an example later answers are grounded in."));
         }
 
         string sql;
         try
         {
-            // Parsed, not pattern-matched, and for the same reason the prepare step parses: an example is a
-            // query later answers get adapted from, so one that would write if it ran must never enter the
-            // store, however it was labelled on the way in.
-            sql = ReadOnlyQueryGuard.Validate(request.Sql ?? string.Empty);
-
-            // A confirmed example is precedent for every future similar question, so a restricted column must be
-            // refused here too, not only when the example is later auto-run.
-            await ColumnPolicyGuard.EnsureAllowedAsync(db, sql, ct).ConfigureAwait(false);
+            sql = await ValidateSqlAsync(db, request.Sql, ct).ConfigureAwait(false);
         }
         catch (SqlFlowException ex)
         {
@@ -226,33 +208,19 @@ public static class QuestionExampleEndpoints
         // A good example carries a datasource only when the caller supplied it, since a confirmation made
         // before a datasource was chosen (or one confirmed from a PowerBI-derived question, which names a
         // model entity rather than a connection) is still worth storing without it.
-        string? sourceRef = null;
-        if (!string.IsNullOrWhiteSpace(request.SourceRef))
+        var sourceRef = SemanticLayer.TrimToNull(request.SourceRef);
+        if (sourceRef is not null
+            && await SourceRefProblemAsync(db, sourceRef, ct).ConfigureAwait(false) is { } sourceRefProblem)
         {
-            sourceRef = request.SourceRef.Trim();
-            if (!ComputeTaskPayload.IsWholeReference(sourceRef))
-            {
-                return Problem(
-                    "The datasource must be a whole ${env:...} / ${keyvault:...} reference or an @alias. "
-                    + "Inline connection strings are not accepted here.",
-                    StatusCodes.Status400BadRequest);
-            }
-
-            // The same known-reference gate the DataOps prepare step enforces: an auto-run path must never be
-            // able to point a stored example at a connection the reviewed git estate never declared.
-            if (!sourceRef.StartsWith('@'))
-            {
-                var known = await db.Pipelines.AsNoTracking()
-                    .AnyAsync(p => p.SourceServer == sourceRef || p.TargetServer == sourceRef, ct)
-                    .ConfigureAwait(false);
-                if (!known)
-                {
-                    return Problem(
-                        $"No pipeline in the catalog declares the datasource reference '{sourceRef}'.",
-                        StatusCodes.Status404NotFound);
-                }
-            }
+            return sourceRefProblem;
         }
+
+        // The objects the query reads: the caller's when it resolved them, otherwise the catalogued tables the SQL
+        // names, so an example confirmed without keys (every GUI confirmation) is still tied to the tables it reads
+        // and served as one of their examples.
+        var objectKeys = request.ObjectKeys is { Count: > 0 }
+            ? request.ObjectKeys
+            : await DatasourceInference.ObjectKeysFromSqlAsync(db, sql, ct).ConfigureAwait(false);
 
         // Named by nobody: the objects the query reads decide it, so an example is runnable later without a
         // person picking a connection the catalog already knows. An inferred value never replaces one a person
@@ -260,7 +228,7 @@ public static class QuestionExampleEndpoints
         var sourceRefInferred = false;
         if (sourceRef is null)
         {
-            sourceRef = (await DatasourceInference.InferAsync(db, sql, request.ObjectKeys, ct).ConfigureAwait(false))
+            sourceRef = (await DatasourceInference.InferAsync(db, sql, objectKeys, ct).ConfigureAwait(false))
                 .Reference;
             sourceRefInferred = sourceRef is not null;
         }
@@ -286,9 +254,9 @@ public static class QuestionExampleEndpoints
             existing.ConfirmedBy = confirmedBy;
             existing.Provenance = QuestionExampleProvenance.UserConfirmed;
             existing.Confidence = request.Confidence ?? existing.Confidence;
-            if (request.ObjectKeys is { Count: > 0 })
+            if (request.ObjectKeys is { Count: > 0 } || (existing.ObjectKeys.Length == 0 && objectKeys.Count > 0))
             {
-                existing.ObjectKeys = JoinObjectKeys(request.ObjectKeys);
+                existing.ObjectKeys = JoinObjectKeys(objectKeys);
             }
 
             if (sourceRef is not null && (!sourceRefInferred || string.IsNullOrWhiteSpace(existing.SourceRef)))
@@ -313,7 +281,7 @@ public static class QuestionExampleEndpoints
             RepoId = request.RepoId,
             Question = question,
             Sql = sql,
-            ObjectKeys = JoinObjectKeys(request.ObjectKeys),
+            ObjectKeys = JoinObjectKeys(objectKeys),
             Provenance = QuestionExampleProvenance.UserConfirmed,
             Confidence = request.Confidence,
             ConfirmedUtc = now,
@@ -512,16 +480,82 @@ public static class QuestionExampleEndpoints
 
     /// <summary>Joins the object keys the way the catalog stores them everywhere else (newline-separated, blanks
     /// dropped), so a confirmed example's keys read back exactly like a subscriber query's.</summary>
-    private static string JoinObjectKeys(IReadOnlyList<string>? objectKeys)
+    internal static string JoinObjectKeys(IReadOnlyList<string>? objectKeys)
         => objectKeys is null
             ? string.Empty
             : string.Join('\n', objectKeys
                 .Where(k => !string.IsNullOrWhiteSpace(k))
                 .Select(k => k.Trim()));
 
+    /// <summary>A stored example's object keys as a list, the inverse of <see cref="JoinObjectKeys"/>.</summary>
+    internal static IReadOnlyList<string> SplitObjectKeys(string objectKeys)
+        => objectKeys.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
     /// <summary>The longest question stored, matching the column's own length so an over-long question is
     /// refused with a stated reason rather than truncated into a different question.</summary>
-    private const int MaxQuestionLength = 1000;
+    internal const int MaxQuestionLength = 1000;
+
+    /// <summary>Why a trimmed question cannot be stored, or null when it can. Shared by confirming an example and
+    /// editing one, so the two can never disagree about what a storable question is.</summary>
+    internal static string? QuestionProblem(string question)
+    {
+        if (question.Length == 0)
+        {
+            return "The question must not be empty.";
+        }
+
+        return question.Length > MaxQuestionLength
+            ? $"The question is {question.Length} characters, over the {MaxQuestionLength}-character limit."
+            : null;
+    }
+
+    /// <summary>
+    /// Proves <paramref name="sql"/> can be stored as an example and returns it trimmed, throwing the refusal
+    /// otherwise. Parsed, not pattern-matched, for the same reason the prepare step parses: an example is a query
+    /// later answers get adapted from, so one that would write if it ran must never enter the store, however it
+    /// was labelled on the way in. The column allow-list is checked too, because an example is precedent for every
+    /// future similar question, not only a query run once. Shared by confirming and editing.
+    /// </summary>
+    /// <exception cref="SqlFlowException">The statement is not a single read-only SELECT over allow-listed
+    /// columns.</exception>
+    internal static async Task<string> ValidateSqlAsync(CatalogDbContext db, string? sql, CancellationToken ct)
+    {
+        var validated = ReadOnlyQueryGuard.Validate(sql ?? string.Empty);
+        await ColumnPolicyGuard.EnsureAllowedAsync(db, validated, ct).ConfigureAwait(false);
+        return validated;
+    }
+
+    /// <summary>
+    /// Why an explicitly chosen datasource cannot be attached to an example, or null when it can: it must be a whole
+    /// <c>${env:...}</c>/<c>${keyvault:...}</c> reference or an <c>@alias</c>, and a reference must be one some
+    /// pipeline declares. That is the same known-reference gate the DataOps prepare step enforces, so an auto-run
+    /// can never be pointed at a connection the reviewed git estate never declared. Shared by confirming and editing.
+    /// </summary>
+    internal static async Task<ProblemHttpResult?> SourceRefProblemAsync(
+        CatalogDbContext db, string sourceRef, CancellationToken ct)
+    {
+        if (!ComputeTaskPayload.IsWholeReference(sourceRef))
+        {
+            return Problem(
+                "The datasource must be a whole ${env:...} / ${keyvault:...} reference or an @alias. "
+                + "Inline connection strings are not accepted here.",
+                StatusCodes.Status400BadRequest);
+        }
+
+        if (sourceRef.StartsWith('@'))
+        {
+            return null;
+        }
+
+        var known = await db.Pipelines.AsNoTracking()
+            .AnyAsync(p => p.SourceServer == sourceRef || p.TargetServer == sourceRef, ct)
+            .ConfigureAwait(false);
+        return known
+            ? null
+            : Problem(
+                $"No pipeline in the catalog declares the datasource reference '{sourceRef}'.",
+                StatusCodes.Status404NotFound);
+    }
 
     private static ProblemHttpResult Problem(string detail, int statusCode, string title = "Invalid request")
         => TypedResults.Problem(detail: detail, statusCode: statusCode, title: title);

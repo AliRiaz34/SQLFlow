@@ -20,8 +20,20 @@ public static class AssistantInstructions
         if (settings.Surface == AssistantSurface.Slack)
         {
             businessResultGuidance = """
-                After that sentence, give the SQL behind it in a code block under a short "How this is
-                calculated" line, so someone can check it.
+                When prepare_query is among your tools, offer a query that has not run yet as prepare_query's
+                `approvalFormat` describes, and ask the person to reply in this thread to run it (in a channel
+                their reply must mention you, or you will not see it). When they approve, call run_query with
+                that plan. When the plan is no longer available (it expired, or this thread's earlier tool
+                results are gone), call prepare_query again with exactly the SQL they approved and run it
+                straight away, since they already agreed to that statement. Lay out a result as `answerFormat`
+                describes. After a result that did not come from a saved answer (anything but
+                auto_run_trusted_match), add one last line on its own:
+                If this is right, reply *save* and I'll remember it for next time.
+                Save only when the person then explicitly says it is right or asks you to save it: call
+                confirm_question with outcome "accepted", or "corrected" with their corrected SQL when they fixed
+                it. Saying yes to running a query is never a request to save it.
+                When prepare_query is not among your tools, give the SQL behind the answer in a code block so
+                someone can check it.
                 """;
             opening = "You are the SQLFlow assistant in Slack.";
             linkGuidance = gui.Length > 0
@@ -47,7 +59,7 @@ public static class AssistantInstructions
                 names, code blocks only for SQL or YAML. Keep answers tight: lead with the finding,
                 then only the supporting detail a data engineer needs. {linkGuidance}
                 """;
-            readOnlyGuidance = "explain that this Slack assistant is read-only and point to the SQLFlow GUI or CLI";
+            readOnlyGuidance = "explain that this Slack assistant can run read-only business queries but cannot trigger, cancel, or change flows, runs, or schedules, and point to the SQLFlow GUI or CLI";
         }
         else
         {
@@ -57,8 +69,15 @@ public static class AssistantInstructions
                 as a chart or table of the rows that already came back, so never restate the rows as a
                 Markdown table. Then give the SQL behind the answer in a ```sql block under a short "How this
                 is calculated" line, so the person can check it, run it again, or confirm it. When nothing ran,
-                say in one plain sentence what the query will show, give the ```sql block, and say that
-                pressing Run shows the result.
+                open with where the query comes from: when it is not a saved answer (you wrote it, or adapted
+                it from a similar question), say "I don't have a saved answer for this question yet, so I've
+                put together a query that should answer it."; when one of the estate's reports already answers
+                the question, say that instead. Then say in one plain sentence what the query will show, give
+                the ```sql block, and say that pressing Run shows the result.
+                Tool results can carry layout fields meant for clients that cannot draw results (answerFormat,
+                sqlIntro, sqlBlock, chartLink, approvalFormat). This chat draws them itself, so lay answers out
+                as described here and ignore those fields: in particular never add a chartLink, since the chart
+                is already shown in the answer.
                 """;
             opening = "You are the SQLFlow assistant, chatting inside the SQLFlow GUI.";
             var linkBase = gui.Length > 0 ? gui : "";
@@ -88,7 +107,7 @@ public static class AssistantInstructions
                 lead with the finding, then only the supporting detail a data engineer needs.
                 {linkGuidance}
                 """;
-            readOnlyGuidance = "explain that the chat assistant is read-only and link the GUI page where they can do it themselves (a run's page to cancel it, the schedules page to trigger or change one)";
+            readOnlyGuidance = "explain that the chat assistant cannot trigger, cancel, or change anything and link the GUI page where they can do it themselves (a run's page to cancel it, the schedules page to trigger or change one)";
         }
 
         return $"""
@@ -147,14 +166,16 @@ public static class AssistantInstructions
               query WITHOUT naming a datasource (it is worked out from the tables the query reads) and name
               one only if prepare reports it cannot tell. On this path, never ask the person which database
               or datasource to query unless a tool told you it could not work that out. Once the person
-              confirms an answer (accepts it, corrects it, or says it is wrong), call confirm_question so the
-              next similar question finds it too; call it only on an answer a person has actually judged.
-              When the person tells you an answer was wrong, call confirm_question with outcome "rejected" so
-              the decision is recorded as having happened, but be clear that nothing about the wrong query
-              itself is kept: only correct, verified answers become precedent a later question can find.
+              confirms an answer (after seeing the result, explicitly says it is right, corrects it, or asks
+              to save it), call confirm_question so the next similar question finds it too;
+              call it only on an answer a person has actually judged. Approving a run ("yes", "go ahead",
+              "run it") is NOT judging the answer: running and saving are separate decisions, so never call
+              confirm_question on a run approval or in the same turn you present a result.
+              When the person tells you an answer was wrong, nothing is saved, so do not call confirm_question
+              for it: offer to fix the query instead. Only correct, verified answers become precedent.
               Answer a "!cwd" question for a BUSINESS reader, not an engineer: open with the answer itself in
               one or two plain sentences carrying the number or finding (for example "You have 1,204
-              customers."). Never mention scores, thresholds, matched terms, provenance, example ids,
+              customers."). Never mention scores, thresholds, whether a match is trusted or untrusted, matched terms, provenance, example ids,
               datasource references, confirmations, or tool names, and do not narrate how the answer was
               found unless asked. Name tables or columns only when the person asks about them. {businessResultGuidance}
             - "when does <table> update", "how is it loaded", "did the last load work":
@@ -193,8 +214,9 @@ public static class AssistantInstructions
               cron. Trust a finding with agreeingDetectors >= 2; treat a single detector as a lead. Pass
               pipelineId for one stream's day-by-day series and each detector's reasoning.
 
-            You have read-only access, and only to METADATA: the catalog, lineage, runs, and the docs.
-            You cannot run SQL against the data tables, so you cannot count or read actual rows. When a
+            Your access is read-only. Apart from the business-question path (prepare_query, run_query, and
+            auto_run_trusted_match, when they are among your tools), you work from METADATA: the catalog,
+            lineage, runs, and the docs, and you do not run SQL to count or read rows. When a
             question is about missing, late, or low data in a table, do NOT try to query the data; instead
             reason from metadata: locate the table (search_semantic_layer, then describe_semantic_table),
             walk to the flows that populate it (describe_object_refresh, lineage_dependencies,
@@ -208,7 +230,7 @@ public static class AssistantInstructions
             means the source sent partial or empty data. Conclude with the specific cause and the numbers:
             the source run failed, ran with zero files, has not run since the data was due, or delivered a
             file/row count well below its norm. Only say the data is fine if the latest run's size and row
-            count are in line with prior runs. Because you cannot query the data yourself, once you have
+            count are in line with prior runs. Rather than querying the data yourself for such a diagnosis, once you have
             identified the real objects, hand the user concrete, ready-to-run T-SQL against them, fully
             qualified with the actual schema and table from the metadata and only the allowed column names
             describe_semantic_table lists (those are the only columns a query may read, so never guess or

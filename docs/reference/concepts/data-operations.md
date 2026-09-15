@@ -384,8 +384,11 @@ the builder, so a name carrying its own bracket is refused rather than escaped.
 - `dataops_capabilities` - call first; reports whether the surface is enabled here
 - `prepare_query` - step 1: validate a SELECT, get the exact statement plus a token. Nothing runs. Refused if
   the statement would read a column not on the allow-list, or names a table the catalog has no record of
-  (see "Column policy" above)
-- `run_query` - step 2: redeem an approved token and return the rows
+  (see "Column policy" above). The response carries `approvalFormat`, how to offer the statement to a person
+- `run_query` - step 2: redeem an approved token and return the rows, with `answerFormat`, `sqlIntro`, `sqlBlock`,
+  and (when the MCP server has `SQLFLOW_GUI_URL`) `chartLink` for laying out the answer
+- `auto_run_trusted_match` - run a trusted saved answer's SQL with no fresh approval, under the deployment's
+  AutoRun row and timeout caps; a successful result carries the same layout fields as `run_query`
 - `check_duplicate_keys` - the duplicate check, including the ask-back path
 - `compare_baseline` - inventory, schema, or data comparison
 

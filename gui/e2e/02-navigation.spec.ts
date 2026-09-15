@@ -16,6 +16,7 @@ const navTargets: Array<{ nav: string; page: string }> = [
   { nav: "nav-lineage", page: "page-lineage-graph" },
   { nav: "nav-search", page: "page-search" },
   { nav: "nav-users", page: "page-users" },
+  { nav: "nav-saved-answers", page: "page-saved-answers" },
 ];
 
 test.describe("navigation", () => {

@@ -45,6 +45,11 @@ public sealed class AssistantSettings
     public AssistantSurface Surface { get; set; } = AssistantSurface.Slack;
 
     public McpOptions Mcp { get; set; } = new();
+
+    /// <summary>The MCP tools this surface offers the model: the deployment's configured list, or the surface's
+    /// default when it configured none.</summary>
+    public IReadOnlyList<string> AllowedTools => Mcp.EffectiveTools(Surface);
+
     public FoundryOptions Foundry { get; set; } = new();
     public OpenAIOptions OpenAI { get; set; } = new();
     public AnthropicOptions Anthropic { get; set; } = new();
@@ -165,22 +170,6 @@ public sealed class McpOptions
     public string ServerLabel { get; set; } = "sqlflow";
 
     /// <summary>
-    /// The MCP tools the assistant may call. The default is the WHOLE read-only surface: everything that only
-    /// reads belongs here, because a missing reader is an answer the assistant cannot give. A tool absent from
-    /// this list does not look restricted to the model, it looks ABSENT: the assistant reports the product
-    /// cannot do the thing, which is worse than refusing, because it is wrong.
-    ///
-    /// That failure mode is why <see cref="ExcludedTools"/> exists beside this list and why a test asserts the
-    /// two together cover every tool the MCP server ships. Adding a tool without deciding which side it falls
-    /// on fails that test rather than silently making the assistant deny a capability it has.
-    ///
-    /// Excluded on purpose: the operate tools that TRIGGER work (trigger_run, cancel_run), the authoring tool
-    /// (propose_pipelines), and the stdio-only or sign-in tools (inert over HTTP anyway). The data-operations
-    /// tools ARE included: they are read-only by construction, they sit behind their own deployment switch,
-    /// and running a query is gated by a human approving the exact statement first. An empty list means all
-    /// tools, so leave this populated unless the MCP server itself is restricted.
-    /// </summary>
-    /// <summary>
     /// The read surface every host gets: catalog, lineage, runs, search, schedules, insights, docs. Nothing
     /// here touches a datasource, so it is safe on any surface however public.
     /// </summary>
@@ -229,34 +218,47 @@ public sealed class McpOptions
     ];
 
     /// <summary>
-    /// Slack's surface: the shared read tools, and nothing that reaches a datasource.
+    /// Slack's surface: the shared read tools, plus answering a business question end to end: running a query a
+    /// person approved in the thread, running a trusted saved answer, and saving an answer a person said is right.
     ///
-    /// Slack is a SHARED, semi-public channel rather than a signed-in per-user session, so the trust model is
-    /// different from the GUI's: a message is visible to a room, and the two-step confirmation the query
-    /// surface relies on ("show the SQL, get agreement, then run") is a much weaker guarantee when the person
-    /// who approves it need not be the person who asked. Answering "how do I join these tables" is a metadata
-    /// question with no such property, and describe_semantic_table (a shared read tool) already answers it.
+    /// Slack is a SHARED channel with one bot identity rather than a signed-in per-user session, so anyone in a
+    /// thread can approve a query and every query and saved answer is attributed to the bot token's owner. What
+    /// makes that acceptable holds whoever approves: a query is only ever a single read-only SELECT over
+    /// allow-listed columns (ReadOnlyQueryGuard and ColumnPolicyGuard run on prepare, run, confirm, and auto-run),
+    /// a prepared plan is single-use, and saved answers are curated by admins on the GUI's Saved answers page. The
+    /// rest of the data-operations surface (the duplicate-key and baseline checks) stays GUI-only, since those are an
+    /// engineer's diagnostics rather than a business answer, and nothing that starts work is allowed anywhere.
     /// </summary>
     public static readonly IReadOnlyList<string> SlackDefaultTools =
     [
         .. SharedReadTools,
+        "prepare_query", "run_query", "auto_run_trusted_match", "confirm_question",
     ];
 
-    public List<string> AllowedTools { get; set; } = [.. GuiDefaultTools];
+    /// <summary>
+    /// The MCP tools a deployment configured for its assistant (<c>Mcp:AllowedTools</c>), or empty when it configured
+    /// none, in which case the surface's own default applies (<see cref="EffectiveTools"/>).
+    ///
+    /// The default deliberately does NOT live in this property. The configuration binder adds configured items to a
+    /// list that already holds values rather than replacing it, so a pre-filled default here turned a deployment's
+    /// narrower list into the whole default plus that list: silently the opposite of what was configured.
+    /// </summary>
+    public List<string> AllowedTools { get; set; } = [];
 
     /// <summary>
-    /// Narrows the allowed tools to a surface's default, but ONLY when the list is still the shipped default:
-    /// a deployment that configured its own list keeps it. Called by a host whose surface is not the GUI, so
-    /// the per-surface decision lives beside the list rather than in each host's binding code.
+    /// The tools a surface actually offers the model: the configured list when there is one, otherwise the surface's
+    /// default (<see cref="SlackDefaultTools"/> or <see cref="GuiDefaultTools"/>). Never empty, so no gateway can offer
+    /// every tool the MCP server ships by omission.
+    ///
+    /// A tool absent from this list does not look restricted to the model, it looks ABSENT: the assistant reports the
+    /// product cannot do the thing, which is worse than refusing, because it is wrong. That is why
+    /// <see cref="ExcludedTools"/> exists beside the defaults and why a test asserts the two together cover every tool
+    /// the MCP server ships.
     /// </summary>
-    public void ApplySurfaceDefault(IReadOnlyList<string> surfaceDefault)
-    {
-        ArgumentNullException.ThrowIfNull(surfaceDefault);
-        if (AllowedTools.SequenceEqual(GuiDefaultTools, StringComparer.Ordinal))
-        {
-            AllowedTools = [.. surfaceDefault];
-        }
-    }
+    public IReadOnlyList<string> EffectiveTools(AssistantSurface surface)
+        => AllowedTools.Count > 0
+            ? AllowedTools
+            : surface == AssistantSurface.Slack ? SlackDefaultTools : GuiDefaultTools;
 
     /// <summary>
     /// The tools deliberately kept from the assistant, listed rather than merely absent so the omission is a

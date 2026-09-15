@@ -449,15 +449,13 @@ public sealed class ResponsesApiGateway : IAssistantGateway, IDisposable
                 ["Authorization"] = "Bearer " + mcpBearer,
             },
         };
-        if (_settings.Mcp.AllowedTools.Count > 0)
+        // Always sent: the surface's list is never empty, so the model never sees every tool the MCP server ships.
+        var allowed = new JsonArray();
+        foreach (var tool in _settings.AllowedTools)
         {
-            var allowed = new JsonArray();
-            foreach (var tool in _settings.Mcp.AllowedTools)
-            {
-                allowed.Add(tool);
-            }
-            mcpTool["allowed_tools"] = allowed;
+            allowed.Add(tool);
         }
+        mcpTool["allowed_tools"] = allowed;
 
         var body = new JsonObject
         {
