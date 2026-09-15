@@ -2114,7 +2114,15 @@ and fix every finding first."
             list means the subscriber has no extracted report (a hand-authored subscriber, or one whose \
             report has not synced yet), not that one failed to load; an empty `questions` on a visual means \
             question generation is disabled or has not run for it yet, not that the visual answers nothing. \
-            Takes the `key` from list_subscribers."
+            `models` is the semantic model behind each report file, which is how the report COMPUTES its \
+            numbers: every model table with the Power Query (M) expression that loads it and, when it resolved, \
+            the warehouse `sourceDatabase`/`sourceSchema`/`sourceName` it reads; each table's columns (with \
+            `dataType`), calculated columns, and measures (with their DAX `expression` and author \
+            `description`); and the relationships between tables with their columns, `cardinality`, and \
+            `isActive` (an inactive relationship applies only where a measure invokes USERELATIONSHIP). Use it \
+            to answer \"how is this number calculated in the report\" and to mirror a measure when writing SQL. \
+            An empty `models` list means no model was extracted (a hand-authored subscriber, or a report \
+            connected live to a published dataset). Takes the `key` from list_subscribers."
     )]
     async fn describe_subscriber_report(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/subscribers/report", &[("key", i.key)]).await

@@ -217,7 +217,7 @@ edges:
 
 Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
 
-Only the report layer (pages, visuals, projected fields, and each visual's rendered SQL) is read back into dedicated catalog tables: the model layer (columns, measures, relationships) travels in the YAML for a person or an LLM to read directly, and has no catalog tables of its own. `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
+The collector reads this specification from the tool's standard output during a sync (it is not written to a file) and both halves are stored in the catalog: the report layer (pages, visuals, projected fields, and each visual's rendered SQL) and the model layer (tables with their Power Query source, columns, calculated columns, measures, and relationships). See [What lands in the catalog](#what-lands-in-the-catalog). `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
 
 ### Resolving a model table to a warehouse object
 
@@ -243,6 +243,16 @@ The server string in `sourceServer` is reported for a reader but is **not** used
 
 The consumption itself is not stored twice: the read edges are ordinary `catalog.LineageEdge` rows, so "what consumes table X" is the same edge query as "what writes table X".
 
+A subscriber whose `pbix:` report was extracted also stores the report's structure (`catalog.SubscriberReportPage`, `SubscriberReportVisual`, `SubscriberReportField`) and its semantic model, one per report file:
+
+| Table | One row per |
+| --- | --- |
+| `catalog.SubscriberModelTable` | Model table: its name, its Power Query (M) expression, and the warehouse database, schema, and table that expression resolved to (null when it did not resolve) |
+| `catalog.SubscriberModelField` | Column (with its data type), calculated column, or measure (with its DAX expression and description) on a model table |
+| `catalog.SubscriberModelRelationship` | Relationship between two model tables: their columns, the cardinality, and whether it is active |
+
+They are keyed by subscriber, report file, and table name, and replaced wholesale with the rest of the repo's subscriber rows. Power Query and DAX text is redacted on the same path query text takes. DAX is stored verbatim and never evaluated. The model is only present when the sync ran on a machine with `pbix-extract`.
+
 ## Business questions per visual
 
 When `ControlPlane:PowerAI:QuestionGeneration:Enabled` is on, a control-plane-only step runs after each sync that touches subscriber report rows: it turns every extracted visual's title, chart type, and projected fields into 1-3 natural-language business questions the visual answers (`catalog.SubscriberReportVisualQuestion`), the text-to-query training material POWERAI.md's learning loop needs. This is deliberately not part of `tools/pbix-extract` or `CatalogSync`: the tool stays a pure parser with no network access, and the sync itself stays shared code the bare CLI also runs with no LLM wiring at all.
@@ -257,7 +267,7 @@ The feature is off by default and independent of `ControlPlane:Assistant:Enabled
 | --- | --- |
 | `GET /lineage/subscribers` | What consumes the warehouse. Filter by `type` (the tool) or `search` (name, owner, description). Each row carries how many queries it runs and how many distinct objects those queries read. |
 | `GET /lineage/subscribers/dossier?key=<node key>` | What one subscriber consumes: its queries, and every object they read, named and located from the object registry, with the queries that reference each one. |
-| `GET /lineage/subscribers/report?key=<node key>` | The Power BI report structure behind one subscriber: every page, the visuals on it, and each field's role, plus each visual's `questions` (1-3 business questions it answers, empty when question generation is disabled or has not run for it yet). |
+| `GET /lineage/subscribers/report?key=<node key>` | The Power BI report structure behind one subscriber: every page, the visuals on it, and each field's role, plus each visual's `questions` (1-3 business questions it answers, empty when question generation is disabled or has not run for it yet), and `models`: the semantic model behind each report file (tables with their Power Query source and resolved warehouse object, columns with data types, calculated columns and measures with their DAX, and relationships with cardinality and whether each is active). Served to the assistants by the `describe_subscriber_report` MCP tool. |
 | `GET /lineage/objects/dossier?key=<node key>` | Now also returns `subscribers`: who consumes THIS object, with the specific queries that name it. |
 | `GET /search/subscribers`, and the `subscribers` category of `GET /search/all` | Subscribers as a surface of the GLOBAL search, matched on name, type, owner, description, notes, location, or declaring file. It is the LAST category, deliberately: the warehouse is the subject and consumption is a convention on top of it, so a bare term is far more often a table or a column than the name of a report. A subscriber is neither a database object nor a flow, so without this a report searched for by name returned nothing and looked absent rather than unsearched. |
 

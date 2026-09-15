@@ -1417,6 +1417,11 @@ public sealed class CatalogSync
         await context.SubscriberReportFields.Where(f => f.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.SubscriberReportVisuals.Where(v => v.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.SubscriberReportPages.Where(p => p.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        // The semantic model behind each report goes the same way: a measure or relationship removed from the report
+        // must stop being served.
+        await context.SubscriberModelFields.Where(f => f.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await context.SubscriberModelRelationships.Where(r => r.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        await context.SubscriberModelTables.Where(t => t.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         await context.Subscribers.Where(s => s.RepoId == repoId).ExecuteDeleteAsync(ct).ConfigureAwait(false);
         foreach (var subscriber in report.Subscribers)
         {
@@ -1506,6 +1511,61 @@ public sealed class CatalogSync
                             IsMeasure = field.IsMeasure,
                         });
                     }
+                }
+            }
+
+            // The semantic model behind each report file: how the report computes its numbers, which its visuals only
+            // name. Flat rows keyed by (subscriber key, report file, table name), for the same one-SaveChanges reason
+            // as the pages above.
+            foreach (var model in subscriber.Models)
+            {
+                foreach (var table in model.Tables)
+                {
+                    context.SubscriberModelTables.Add(new CatalogSubscriberModelTable
+                    {
+                        RepoId = repoId,
+                        SubscriberKey = subscriber.ObjectKey,
+                        ReportFile = model.ReportFile,
+                        Name = table.Name,
+                        // An M source can embed a literal connection string exactly as authored SQL can, so it is
+                        // redacted on the same path subscriber queries take.
+                        PowerQuery = table.PowerQuery is null ? null : SecretHygiene.RedactedMessage(table.PowerQuery),
+                        SourceDatabase = table.SourceDatabase,
+                        SourceSchema = table.SourceSchema,
+                        SourceName = table.SourceName,
+                    });
+
+                    foreach (var field in table.Fields)
+                    {
+                        context.SubscriberModelFields.Add(new CatalogSubscriberModelField
+                        {
+                            RepoId = repoId,
+                            SubscriberKey = subscriber.ObjectKey,
+                            ReportFile = model.ReportFile,
+                            TableName = table.Name,
+                            Name = field.Name,
+                            Kind = field.Kind,
+                            DataType = field.DataType,
+                            Expression = field.Expression is null ? null : SecretHygiene.RedactedMessage(field.Expression),
+                            Description = field.Description,
+                        });
+                    }
+                }
+
+                foreach (var relationship in model.Relationships)
+                {
+                    context.SubscriberModelRelationships.Add(new CatalogSubscriberModelRelationship
+                    {
+                        RepoId = repoId,
+                        SubscriberKey = subscriber.ObjectKey,
+                        ReportFile = model.ReportFile,
+                        FromTable = relationship.FromTable,
+                        FromColumn = relationship.FromColumn,
+                        ToTable = relationship.ToTable,
+                        ToColumn = relationship.ToColumn,
+                        Cardinality = relationship.Cardinality,
+                        IsActive = relationship.IsActive,
+                    });
                 }
             }
         }

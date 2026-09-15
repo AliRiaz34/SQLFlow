@@ -254,6 +254,7 @@ public sealed class FlowSetCollector
             File = file,
             Queries = queries,
             Pages = extracted.Pages,
+            Models = extracted.Models,
         };
     }
 
@@ -347,6 +348,7 @@ public sealed class FlowSetCollector
 
         var queries = new List<Core.Subscribers.SubscriberQuery>();
         var pages = new List<Core.Lineage.LineageSubscriberPage>();
+        var models = new List<Core.Lineage.LineageSubscriberModel>();
 
         // More than one report can legitimately share a page's display name and a visual's title (two files in
         // the same directory both starting from the same report template, say), so a query name that would be
@@ -357,10 +359,10 @@ public sealed class FlowSetCollector
         {
             ExtractOneReport(
                 result, subscriber, file, server, connections, executable, reportFile, path,
-                qualifyWithReportFile, queries, pages);
+                qualifyWithReportFile, queries, pages, models);
         }
 
-        return new ExtractedReport(queries, pages);
+        return new ExtractedReport(queries, pages, models);
     }
 
     /// <summary>
@@ -415,9 +417,10 @@ public sealed class FlowSetCollector
         }
     }
 
-    /// <summary>Extracts one <c>.pbix</c> file's pages/visuals into <paramref name="pages"/> and its visuals'
-    /// synthesized queries into <paramref name="queries"/>, both accumulated across every file when the
-    /// subscriber's <c>pbix:</c> names a directory. See <see cref="ExtractReport"/> for the directory case.</summary>
+    /// <summary>Extracts one <c>.pbix</c> file's pages/visuals into <paramref name="pages"/>, its visuals'
+    /// synthesized queries into <paramref name="queries"/>, and its semantic model into <paramref name="models"/>,
+    /// all accumulated across every file when the subscriber's <c>pbix:</c> names a directory. See
+    /// <see cref="ExtractReport"/> for the directory case.</summary>
     private static void ExtractOneReport(
         CollectionResult result,
         Core.Subscribers.DataSubscriber subscriber,
@@ -429,7 +432,8 @@ public sealed class FlowSetCollector
         string path,
         bool qualifyWithReportFile,
         List<Core.Subscribers.SubscriberQuery> queries,
-        List<Core.Lineage.LineageSubscriberPage> pages)
+        List<Core.Lineage.LineageSubscriberPage> pages,
+        List<Core.Lineage.LineageSubscriberModel> models)
     {
         PbixExtractResult extracted;
         try
@@ -515,14 +519,58 @@ public sealed class FlowSetCollector
                 Visuals = visuals,
             });
         }
+
+        // The semantic model behind this report file: how it computes its numbers, which its visuals only name. A
+        // report connected live to a published dataset carries none, and then contributes nothing here.
+        var model = extracted.Model;
+        if (model.Tables.Count > 0 || model.Relationships.Count > 0)
+        {
+            models.Add(new Core.Lineage.LineageSubscriberModel
+            {
+                ReportFile = reportFile,
+                Tables = model.Tables
+                    .Select(t => new Core.Lineage.LineageSubscriberModelTable
+                    {
+                        Name = t.Name,
+                        PowerQuery = t.PowerQuery,
+                        SourceDatabase = t.SourceDatabase,
+                        SourceSchema = t.SourceSchema,
+                        SourceName = t.SourceName,
+                        Fields = t.Fields
+                            .Select(f => new Core.Lineage.LineageSubscriberModelField
+                            {
+                                Name = f.Name,
+                                Kind = f.Kind,
+                                DataType = f.DataType,
+                                Expression = f.Expression,
+                                Description = f.Description,
+                            })
+                            .ToList(),
+                    })
+                    .ToList(),
+                Relationships = model.Relationships
+                    .Select(r => new Core.Lineage.LineageSubscriberModelRelationship
+                    {
+                        FromTable = r.FromTable,
+                        FromColumn = r.FromColumn,
+                        ToTable = r.ToTable,
+                        ToColumn = r.ToColumn,
+                        Cardinality = r.Cardinality,
+                        IsActive = r.IsActive,
+                    })
+                    .ToList(),
+            });
+        }
     }
 
-    /// <summary>What reading a subscriber's report produced: its visuals as queries, and its own structure.</summary>
+    /// <summary>What reading a subscriber's report produced: its visuals as queries, its own structure, and the
+    /// semantic model behind each report file.</summary>
     private sealed record ExtractedReport(
         IReadOnlyList<Core.Subscribers.SubscriberQuery> Queries,
-        IReadOnlyList<Core.Lineage.LineageSubscriberPage> Pages)
+        IReadOnlyList<Core.Lineage.LineageSubscriberPage> Pages,
+        IReadOnlyList<Core.Lineage.LineageSubscriberModel> Models)
     {
-        public static ExtractedReport Empty { get; } = new([], []);
+        public static ExtractedReport Empty { get; } = new([], [], []);
     }
 
     /// <summary>

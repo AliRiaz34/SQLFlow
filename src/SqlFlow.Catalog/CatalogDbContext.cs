@@ -45,6 +45,13 @@ public sealed class CatalogDbContext : DbContext
     public DbSet<CatalogSubscriberReportVisualQuestion> SubscriberReportVisualQuestions
         => Set<CatalogSubscriberReportVisualQuestion>();
 
+    public DbSet<CatalogSubscriberModelTable> SubscriberModelTables => Set<CatalogSubscriberModelTable>();
+
+    public DbSet<CatalogSubscriberModelField> SubscriberModelFields => Set<CatalogSubscriberModelField>();
+
+    public DbSet<CatalogSubscriberModelRelationship> SubscriberModelRelationships
+        => Set<CatalogSubscriberModelRelationship>();
+
     public DbSet<CatalogQuestionExample> QuestionExamples => Set<CatalogQuestionExample>();
 
     public DbSet<CatalogFlowDependency> FlowDependencies => Set<CatalogFlowDependency>();
@@ -378,6 +385,49 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(q => q.Question).HasMaxLength(400).IsRequired();
             entity.HasIndex(q => q.VisualKey);
             entity.HasIndex(q => q.RepoId);
+        });
+
+        modelBuilder.Entity<CatalogSubscriberModelTable>(entity =>
+        {
+            entity.ToTable("SubscriberModelTable");
+            entity.HasKey(t => t.Id);
+            entity.Property(t => t.SubscriberKey).HasMaxLength(900).IsRequired();
+            entity.Property(t => t.ReportFile).HasMaxLength(260).IsRequired();
+            entity.Property(t => t.Name).HasMaxLength(250).IsRequired();
+            entity.Property(t => t.SourceDatabase).HasMaxLength(128);
+            entity.Property(t => t.SourceSchema).HasMaxLength(128);
+            entity.Property(t => t.SourceName).HasMaxLength(128);
+            entity.HasIndex(t => t.SubscriberKey);
+            entity.HasIndex(t => t.RepoId);
+        });
+
+        modelBuilder.Entity<CatalogSubscriberModelField>(entity =>
+        {
+            entity.ToTable("SubscriberModelField");
+            entity.HasKey(f => f.Id);
+            entity.Property(f => f.SubscriberKey).HasMaxLength(900).IsRequired();
+            entity.Property(f => f.ReportFile).HasMaxLength(260).IsRequired();
+            entity.Property(f => f.TableName).HasMaxLength(250).IsRequired();
+            entity.Property(f => f.Name).HasMaxLength(250).IsRequired();
+            entity.Property(f => f.Kind).HasMaxLength(40).IsRequired();
+            entity.Property(f => f.DataType).HasMaxLength(100);
+            entity.HasIndex(f => f.SubscriberKey);
+            entity.HasIndex(f => f.RepoId);
+        });
+
+        modelBuilder.Entity<CatalogSubscriberModelRelationship>(entity =>
+        {
+            entity.ToTable("SubscriberModelRelationship");
+            entity.HasKey(r => r.Id);
+            entity.Property(r => r.SubscriberKey).HasMaxLength(900).IsRequired();
+            entity.Property(r => r.ReportFile).HasMaxLength(260).IsRequired();
+            entity.Property(r => r.FromTable).HasMaxLength(250).IsRequired();
+            entity.Property(r => r.FromColumn).HasMaxLength(250);
+            entity.Property(r => r.ToTable).HasMaxLength(250).IsRequired();
+            entity.Property(r => r.ToColumn).HasMaxLength(250);
+            entity.Property(r => r.Cardinality).HasMaxLength(10);
+            entity.HasIndex(r => r.SubscriberKey);
+            entity.HasIndex(r => r.RepoId);
         });
 
         modelBuilder.Entity<CatalogQuestionExample>(entity =>

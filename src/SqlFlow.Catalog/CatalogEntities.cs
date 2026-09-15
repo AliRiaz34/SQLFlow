@@ -794,6 +794,114 @@ public class CatalogSubscriberReportField
 }
 
 /// <summary>
+/// One table of the semantic model behind a PowerBI subscriber's report file: the entity its visuals and DAX name,
+/// the Power Query (M) expression that loads it, and the warehouse object that expression resolved to. Repo-scoped
+/// and replaced wholesale alongside its owning subscriber on each sync, keyed by string (subscriber key, report file,
+/// table name) for the same one-SaveChanges reason as <see cref="CatalogSubscriberReportPage"/>.
+/// </summary>
+public class CatalogSubscriberModelTable
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning subscriber's <see cref="CatalogSubscriber.ObjectKey"/>.</summary>
+    public string SubscriberKey { get; set; } = string.Empty;
+
+    /// <summary>The report file the model came from, the same value its pages carry.</summary>
+    public string ReportFile { get; set; } = string.Empty;
+
+    /// <summary>The model entity name (empty for fields the model declared without a home table).</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The Power Query (M) expression that loads the table, redacted on the same path subscriber SQL takes
+    /// since an M source can embed a literal connection string. Null when the model declares none.</summary>
+    public string? PowerQuery { get; set; }
+
+    /// <summary>The warehouse database the expression resolved to, when it resolved.</summary>
+    public string? SourceDatabase { get; set; }
+
+    /// <summary>The warehouse schema the expression resolved to, when it resolved.</summary>
+    public string? SourceSchema { get; set; }
+
+    /// <summary>The warehouse table the expression resolved to, when it resolved.</summary>
+    public string? SourceName { get; set; }
+}
+
+/// <summary>
+/// One column, calculated column, or measure defined on a <see cref="CatalogSubscriberModelTable"/>: how a report
+/// computes its numbers (a measure's DAX), which its visuals only name. Keyed to its table by (subscriber key, report
+/// file, table name).
+/// </summary>
+public class CatalogSubscriberModelField
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning subscriber's <see cref="CatalogSubscriber.ObjectKey"/>.</summary>
+    public string SubscriberKey { get; set; } = string.Empty;
+
+    /// <summary>The report file the model came from.</summary>
+    public string ReportFile { get; set; } = string.Empty;
+
+    /// <summary>The owning table's <see cref="CatalogSubscriberModelTable.Name"/>.</summary>
+    public string TableName { get; set; } = string.Empty;
+
+    /// <summary>The field's name within its table.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary><c>column</c>, <c>calculatedColumn</c>, or <c>measure</c>.</summary>
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>A column's data type as the model declares it (<c>string</c>, <c>int64</c>, and so on).</summary>
+    public string? DataType { get; set; }
+
+    /// <summary>A calculated column's or measure's DAX expression, redacted on the same path subscriber SQL takes.
+    /// Stored verbatim otherwise: nothing evaluates or type-checks it.</summary>
+    public string? Expression { get; set; }
+
+    /// <summary>A measure's author-written description.</summary>
+    public string? Description { get; set; }
+}
+
+/// <summary>
+/// One relationship between two tables of a report's semantic model, with its cardinality and whether it is active.
+/// Kept apart from <see cref="CatalogObjectRelationship"/>, which records joins the warehouse's own code exhibits:
+/// these join MODEL entities, and an inactive one applies only where a measure invokes it.
+/// </summary>
+public class CatalogSubscriberModelRelationship
+{
+    public long Id { get; set; }
+
+    public Guid RepoId { get; set; }
+
+    /// <summary>The owning subscriber's <see cref="CatalogSubscriber.ObjectKey"/>.</summary>
+    public string SubscriberKey { get; set; } = string.Empty;
+
+    /// <summary>The report file the model came from.</summary>
+    public string ReportFile { get; set; } = string.Empty;
+
+    /// <summary>The table on the many (or first) side.</summary>
+    public string FromTable { get; set; } = string.Empty;
+
+    /// <summary>Its joining column.</summary>
+    public string? FromColumn { get; set; }
+
+    /// <summary>The other table.</summary>
+    public string ToTable { get; set; } = string.Empty;
+
+    /// <summary>Its joining column.</summary>
+    public string? ToColumn { get; set; }
+
+    /// <summary><c>1:1</c>, <c>M:1</c>, <c>1:M</c>, or <c>M:M</c>.</summary>
+    public string? Cardinality { get; set; }
+
+    /// <summary>False when the relationship applies only where a measure invokes it with USERELATIONSHIP.</summary>
+    public bool IsActive { get; set; }
+}
+
+/// <summary>
 /// Computes <see cref="CatalogSubscriberReportVisual.ContentHash"/> from a visual's question-relevant content, so
 /// both the writer (<c>CatalogSync</c>, hashing from the freshly extracted <c>LineageSubscriberVisual</c>/
 /// <c>LineageSubscriberField</c>) and the control-plane question-generation enrichment step (hashing from the

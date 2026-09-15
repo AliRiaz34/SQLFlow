@@ -120,6 +120,53 @@ public sealed class LineageSubscriberReportApiTests
                     IsMeasure = true,
                 });
 
+                // The semantic model behind sales-a.pbix: one table with its source, a column and a measure on it,
+                // and an inactive relationship.
+                db.SubscriberModelTables.Add(new CatalogSubscriberModelTable
+                {
+                    RepoId = repoId,
+                    SubscriberKey = subscriberKey,
+                    ReportFile = "sales-a.pbix",
+                    Name = "Sales",
+                    PowerQuery = "let Source = Sql.Database(\"<redacted>\", \"Dw\") in Source",
+                    SourceDatabase = "Dw",
+                    SourceSchema = "arc",
+                    SourceName = "FactSales",
+                });
+                db.SubscriberModelFields.Add(new CatalogSubscriberModelField
+                {
+                    RepoId = repoId,
+                    SubscriberKey = subscriberKey,
+                    ReportFile = "sales-a.pbix",
+                    TableName = "Sales",
+                    Name = "Amount",
+                    Kind = "column",
+                    DataType = "decimal",
+                });
+                db.SubscriberModelFields.Add(new CatalogSubscriberModelField
+                {
+                    RepoId = repoId,
+                    SubscriberKey = subscriberKey,
+                    ReportFile = "sales-a.pbix",
+                    TableName = "Sales",
+                    Name = "Sales Amount",
+                    Kind = "measure",
+                    Expression = "SUM(Sales[Amount])",
+                    Description = "Net sales",
+                });
+                db.SubscriberModelRelationships.Add(new CatalogSubscriberModelRelationship
+                {
+                    RepoId = repoId,
+                    SubscriberKey = subscriberKey,
+                    ReportFile = "sales-a.pbix",
+                    FromTable = "Sales",
+                    FromColumn = "DueDateKey",
+                    ToTable = "Date",
+                    ToColumn = "DateKey",
+                    Cardinality = "M:1",
+                    IsActive = false,
+                });
+
                 await db.SaveChangesAsync();
             }
 
@@ -163,10 +210,38 @@ public sealed class LineageSubscriberReportApiTests
                     Assert.True(f.IsMeasure);
                 });
 
-            // A subscriber with no extracted report resolves with an empty list, not a 404.
+            // The semantic model rides along: how the report computes its numbers, per report file.
+            var model = Assert.Single(report.Models);
+            Assert.Equal("sales-a.pbix", model.ReportFile);
+            var table = Assert.Single(model.Tables);
+            Assert.Equal("Sales", table.Name);
+            Assert.Equal("FactSales", table.SourceName);
+            Assert.Contains("Sql.Database", table.PowerQuery, StringComparison.Ordinal);
+            Assert.Collection(
+                table.Fields,
+                f =>
+                {
+                    Assert.Equal("Amount", f.Name);
+                    Assert.Equal("column", f.Kind);
+                    Assert.Equal("decimal", f.DataType);
+                },
+                f =>
+                {
+                    Assert.Equal("Sales Amount", f.Name);
+                    Assert.Equal("measure", f.Kind);
+                    Assert.Equal("SUM(Sales[Amount])", f.Expression);
+                    Assert.Equal("Net sales", f.Description);
+                });
+            var relationship = Assert.Single(model.Relationships);
+            Assert.Equal("Date", relationship.ToTable);
+            Assert.Equal("M:1", relationship.Cardinality);
+            Assert.False(relationship.IsActive);
+
+            // A subscriber with no extracted report resolves with empty lists, not a 404.
             var barehand = await GetJsonAsync<SubscriberReportDto>(
                 client, token, $"/api/v1/lineage/subscribers/report?key={Uri.EscapeDataString(barehandKey)}");
             Assert.Empty(barehand.Pages);
+            Assert.Empty(barehand.Models);
 
             // An unknown key is a 404, not an empty answer that reads as "no report exists".
             using var missing = await SendAsync(
@@ -176,6 +251,9 @@ public sealed class LineageSubscriberReportApiTests
         finally
         {
             await using var db = CatalogDatabase.Create(cs);
+            await db.SubscriberModelFields.Where(f => f.RepoId == repoId).ExecuteDeleteAsync();
+            await db.SubscriberModelRelationships.Where(r => r.RepoId == repoId).ExecuteDeleteAsync();
+            await db.SubscriberModelTables.Where(t => t.RepoId == repoId).ExecuteDeleteAsync();
             await db.SubscriberReportFields.Where(f => f.RepoId == repoId).ExecuteDeleteAsync();
             await db.SubscriberReportVisuals.Where(v => v.RepoId == repoId).ExecuteDeleteAsync();
             await db.SubscriberReportPages.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();

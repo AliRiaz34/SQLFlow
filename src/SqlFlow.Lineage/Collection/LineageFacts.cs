@@ -120,6 +120,10 @@ public sealed record CollectedSubscriber
     /// <summary>The report's internal structure, when the subscriber declared a report file the collector could
     /// read. Empty for a hand-authored subscriber.</summary>
     public IReadOnlyList<Core.Lineage.LineageSubscriberPage> Pages { get; init; } = [];
+
+    /// <summary>The semantic model behind each report file the collector read. Empty for a hand-authored subscriber
+    /// and for a report connected live to a published dataset.</summary>
+    public IReadOnlyList<Core.Lineage.LineageSubscriberModel> Models { get; init; } = [];
 }
 
 /// <summary>One subscriber query as collected: its text and the raw identities parsing it proved it reads.</summary>

@@ -139,7 +139,11 @@ internal static class PbixExtractTool
         return Parse(output, executable);
     }
 
-    private static PbixExtractResult Parse(string yaml, string executable)
+    /// <summary>Maps the tool's YAML specification onto the typed result: the report layer, the model layer, the
+    /// resolved model sources, and the tool's warnings.</summary>
+    /// <exception cref="PbixExtractException">The text is not valid YAML, or holds no single report
+    /// specification.</exception>
+    internal static PbixExtractResult Parse(string yaml, string executable)
     {
         SpecDocument? document;
         try
@@ -162,7 +166,9 @@ internal static class PbixExtractTool
 
         var spec = document.Subscribers.Values.First();
         var pages = SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], executable);
-        return new PbixExtractResult(pages, spec.ReportWarnings ?? [], SpecGraph.ModelSources(spec.Nodes ?? []));
+        return new PbixExtractResult(
+            pages, spec.ReportWarnings ?? [], SpecGraph.ModelSources(spec.Nodes ?? []),
+            SpecGraph.Model(spec.Nodes ?? [], spec.Edges ?? []));
     }
 
     private static void TryKill(Process process)
@@ -200,9 +206,9 @@ internal static class PbixExtractTool
     /// The subscriber body the tool emits: a flat node/edge graph (<see cref="Nodes"/>/<see cref="Edges"/>)
     /// covering both the semantic model (tables, columns, measures, calculated columns, relationships) and the
     /// report layer (pages, visuals, projected fields), plus <see cref="ReportWarnings"/> as a flat diagnostics
-    /// list. Only the report layer is reconstructed into typed records below (<see cref="SpecGraph"/>): the
-    /// model half (tables/columns/measures/relationships) is not consumed anywhere in .NET today, so it is left
-    /// as ungrouped nodes/edges rather than given POCOs nothing reads yet.
+    /// list. Both halves are reconstructed into typed records below (<see cref="SpecGraph"/>): the report layer
+    /// into pages and visuals, and the model half into tables, the fields defined on them, and the relationships
+    /// between them.
     /// </summary>
     private sealed class SpecSubscriber
     {
@@ -216,11 +222,9 @@ internal static class PbixExtractTool
     /// <summary>
     /// One YAML graph node. This one type models every node kind the tool can emit (table, column, measure,
     /// calculatedColumn, report, page, visual), since YamlDotNet has no polymorphic-by-discriminator mapping for
-    /// a plain sequence item; a property a given <see cref="Kind"/> does not use is simply left null. Only the
-    /// report-layer kinds (<c>report</c>/<c>page</c>/<c>visual</c>) and their properties are read back out today
-    /// (see <see cref="SpecGraph"/>); the model-layer kinds parse into this same shape but nothing yet builds
-    /// typed records from them, matching what <see cref="Collection.FlowSetCollector"/> consumed before this
-    /// type existed.
+    /// a plain sequence item; a property a given <see cref="Kind"/> does not use is simply left null. Both the
+    /// report-layer kinds and the model-layer kinds are read back out into typed records (see
+    /// <see cref="SpecGraph"/>).
     /// </summary>
     internal sealed class SpecNode
     {
@@ -254,9 +258,23 @@ internal static class PbixExtractTool
         /// <summary>The physical table the model entity was loaded from. Present only alongside the other
         /// three: a partial resolution is reported as unresolved rather than half-applied.</summary>
         public string? SourceName { get; set; }
+
+        /// <summary>On a <c>table</c> node: the Power Query (M) expression that loads it, as the tool emits it
+        /// (with the server literal already redacted).</summary>
+        public string? PowerQuery { get; set; }
+
+        /// <summary>On a <c>column</c> node: the model's data type (<c>string</c>, <c>int64</c>, and so on).</summary>
+        public string? DataType { get; set; }
+
+        /// <summary>On a <c>measure</c> or <c>calculatedColumn</c> node: its DAX expression.</summary>
+        public string? Dax { get; set; }
+
+        /// <summary>On a <c>measure</c> node: the description its author wrote, when there is one.</summary>
+        public string? Description { get; set; }
     }
 
-    /// <summary>One YAML graph edge. <c>Role</c> is read only off a <c>projects</c> edge.</summary>
+    /// <summary>One YAML graph edge. <c>Role</c> is read only off a <c>projects</c> edge; the column, cardinality,
+    /// and active properties only off a <c>relationship</c> edge.</summary>
     internal sealed class SpecEdge
     {
         public string From { get; set; } = string.Empty;
@@ -266,6 +284,19 @@ internal static class PbixExtractTool
         public string Kind { get; set; } = string.Empty;
 
         public string? Role { get; set; }
+
+        /// <summary>On a <c>relationship</c> edge: the column on the <see cref="From"/> table.</summary>
+        public string? FromColumn { get; set; }
+
+        /// <summary>On a <c>relationship</c> edge: the column on the <see cref="To"/> table.</summary>
+        public string? ToColumn { get; set; }
+
+        /// <summary>On a <c>relationship</c> edge: <c>1:1</c>, <c>M:1</c>, <c>1:M</c>, or <c>M:M</c>.</summary>
+        public string? Cardinality { get; set; }
+
+        /// <summary>On a <c>relationship</c> edge: false when the relationship exists but applies only where a
+        /// measure invokes it (USERELATIONSHIP).</summary>
+        public bool? Active { get; set; }
     }
 }
 
@@ -433,6 +464,130 @@ file static class SpecGraph
     }
 
     /// <summary>
+    /// The semantic model the report was built on: each model table with the Power Query expression that loads it
+    /// and its resolved warehouse source, the columns, calculated columns, and measures defined on it, and the
+    /// relationships between tables with their columns, cardinality, and whether each is active.
+    /// <para>
+    /// A field's table is read off the graph's own <c>hasColumn</c> and <c>definedOn</c> edges rather than by
+    /// splitting the field's id on a dot, since a model table's name can itself contain one. A field no edge ties
+    /// to a table (a measure the model declared without a home table) is kept under an empty table name rather
+    /// than dropped. A report connected live to a published dataset carries no model, so the result is then empty.
+    /// </para>
+    /// </summary>
+    public static PbixModel Model(
+        IReadOnlyList<PbixExtractTool.SpecNode> nodes, IReadOnlyList<PbixExtractTool.SpecEdge> edges)
+    {
+        var tableOfField = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var edge in edges)
+        {
+            if (edge.Kind == "hasColumn" && ModelQualifier(edge.From, "table") is { } owner)
+            {
+                tableOfField[edge.To] = owner;
+            }
+            else if (edge.Kind == "definedOn" && ModelQualifier(edge.To, "table") is { } home)
+            {
+                tableOfField[edge.From] = home;
+            }
+        }
+
+        var tableNodes = new SortedDictionary<string, PbixExtractTool.SpecNode?>(StringComparer.Ordinal);
+        var fieldsByTable = new Dictionary<string, List<PbixModelField>>(StringComparer.Ordinal);
+        foreach (var node in nodes.Where(n => n.Kind == "table"))
+        {
+            if (ModelQualifier(node.Id, "table") is { Length: > 0 } name)
+            {
+                tableNodes[name] = node;
+            }
+        }
+
+        foreach (var node in nodes)
+        {
+            var tag = node.Kind switch
+            {
+                "column" => "col",
+                "calculatedColumn" => "calc",
+                "measure" => "measure",
+                _ => null,
+            };
+            if (tag is null || ModelQualifier(node.Id, tag) is not { Length: > 0 } qualifier)
+            {
+                continue;
+            }
+
+            var table = tableOfField.TryGetValue(node.Id, out var owner) ? owner : string.Empty;
+            string name;
+            if (table.Length > 0 && qualifier.StartsWith(table + ".", StringComparison.Ordinal))
+            {
+                name = qualifier[(table.Length + 1)..];
+            }
+            else
+            {
+                name = table.Length == 0 && qualifier.StartsWith('.') ? qualifier[1..] : qualifier;
+            }
+
+            if (name.Length == 0)
+            {
+                continue;
+            }
+
+            tableNodes.TryAdd(table, null);
+            if (!fieldsByTable.TryGetValue(table, out var fields))
+            {
+                fields = [];
+                fieldsByTable[table] = fields;
+            }
+
+            fields.Add(new PbixModelField(name, node.Kind, node.DataType, node.Dax, node.Description));
+        }
+
+        var tables = tableNodes
+            .Select(entry => new PbixModelTable(
+                entry.Key,
+                entry.Value?.PowerQuery,
+                entry.Value?.SourceDatabase,
+                entry.Value?.SourceSchema,
+                entry.Value?.SourceName,
+                (fieldsByTable.TryGetValue(entry.Key, out var fields) ? fields : [])
+                    .OrderBy(f => FieldKindRank(f.Kind))
+                    .ThenBy(f => f.Name, StringComparer.Ordinal)
+                    .ToList()))
+            .ToList();
+
+        var relationships = new List<PbixModelRelationship>();
+        foreach (var edge in edges.Where(e => e.Kind == "relationship"))
+        {
+            if (ModelQualifier(edge.From, "table") is { Length: > 0 } fromTable
+                && ModelQualifier(edge.To, "table") is { Length: > 0 } toTable)
+            {
+                relationships.Add(new PbixModelRelationship(
+                    fromTable, edge.FromColumn, toTable, edge.ToColumn, edge.Cardinality, edge.Active ?? true));
+            }
+        }
+
+        return new PbixModel(tables, relationships);
+    }
+
+    /// <summary>Lists a table's plain columns first, then its calculated columns, then its measures.</summary>
+    private static int FieldKindRank(string kind) => kind switch
+    {
+        "column" => 0,
+        "calculatedColumn" => 1,
+        _ => 2,
+    };
+
+    /// <summary>
+    /// The qualifier after a model node id's <c>#tag:</c> marker (<c>table:Sales</c> gives <c>Sales</c>,
+    /// <c>col:Sales.Amount</c> gives <c>Sales.Amount</c>), or null when the id carries no such marker. Searched for
+    /// as a whole marker rather than by the last '#', because a model name can contain '#' while the tag cannot.
+    /// </summary>
+    private static string? ModelQualifier(string id, string tag)
+    {
+        var marker = "#" + tag + ":";
+        var at = id.IndexOf(marker, StringComparison.Ordinal);
+        return at < 0 ? null : id[(at + marker.Length)..];
+    }
+
+    /// <summary>
     /// Resolves a <c>projects</c> edge's target into (table, field, isMeasure). Table and field always come
     /// from the target id itself: the C tool derives every column/measure id as
     /// <c>&lt;subscriber&gt;#&lt;reportFile&gt;#(col|measure):&lt;table&gt;.&lt;field&gt;</c> regardless of
@@ -459,11 +614,46 @@ file static class SpecGraph
     }
 }
 
-/// <summary>What extracting one report produced: its pages, and what the tool declined to extract.</summary>
+/// <summary>What extracting one report produced: its pages, what the tool declined to extract, the model tables it
+/// resolved to warehouse objects, and the semantic model itself.</summary>
 internal sealed record PbixExtractResult(
     IReadOnlyList<PbixPage> Pages,
     IReadOnlyList<string> Warnings,
-    IReadOnlyList<PbixModelSource> ModelSources);
+    IReadOnlyList<PbixModelSource> ModelSources,
+    PbixModel Model);
+
+/// <summary>A report's semantic model: its tables (with the fields defined on each) and the relationships between
+/// them. Empty for a report connected live to a published dataset, which carries no model of its own.</summary>
+internal sealed record PbixModel(IReadOnlyList<PbixModelTable> Tables, IReadOnlyList<PbixModelRelationship> Relationships);
+
+/// <summary>One model table.</summary>
+/// <param name="Name">The model entity name, as a visual and a DAX expression refer to it.</param>
+/// <param name="PowerQuery">The Power Query (M) expression that loads it, or null when the model declares none.</param>
+/// <param name="SourceDatabase">The warehouse database the expression resolved to, when it resolved.</param>
+/// <param name="SourceSchema">The warehouse schema the expression resolved to, when it resolved.</param>
+/// <param name="SourceName">The warehouse table the expression resolved to, when it resolved.</param>
+/// <param name="Fields">Its columns, calculated columns, and measures, in that order.</param>
+internal sealed record PbixModelTable(
+    string Name, string? PowerQuery, string? SourceDatabase, string? SourceSchema, string? SourceName,
+    IReadOnlyList<PbixModelField> Fields);
+
+/// <summary>One field defined on a model table.</summary>
+/// <param name="Name">The field's name within its table.</param>
+/// <param name="Kind"><c>column</c>, <c>calculatedColumn</c>, or <c>measure</c>, as the tool names the node kind.</param>
+/// <param name="DataType">A column's data type.</param>
+/// <param name="Expression">A calculated column's or measure's DAX expression.</param>
+/// <param name="Description">A measure's author-written description.</param>
+internal sealed record PbixModelField(string Name, string Kind, string? DataType, string? Expression, string? Description);
+
+/// <summary>One relationship between two model tables.</summary>
+/// <param name="FromTable">The table on the many (or first) side.</param>
+/// <param name="FromColumn">Its joining column.</param>
+/// <param name="ToTable">The other table.</param>
+/// <param name="ToColumn">Its joining column.</param>
+/// <param name="Cardinality"><c>1:1</c>, <c>M:1</c>, <c>1:M</c>, or <c>M:M</c>.</param>
+/// <param name="IsActive">False when it applies only where a measure invokes it with USERELATIONSHIP.</param>
+internal sealed record PbixModelRelationship(
+    string FromTable, string? FromColumn, string ToTable, string? ToColumn, string? Cardinality, bool IsActive);
 
 /// <summary>
 /// One model table resolved to the physical warehouse object its Power Query expression loads from. This is

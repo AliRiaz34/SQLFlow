@@ -115,6 +115,84 @@ public sealed record LineageSubscriberNode
     /// for any consumer whose file is not a readable report.
     /// </summary>
     public IReadOnlyList<LineageSubscriberPage> Pages { get; init; } = [];
+
+    /// <summary>
+    /// The semantic model behind each report file the collector read: its tables with the Power Query that loads
+    /// them, the columns, calculated columns, and measures defined on each, and the relationships between tables.
+    /// This is how a report computes its numbers, which its pages and visuals alone do not say. Empty for a
+    /// hand-authored subscriber and for a report connected live to a published dataset.
+    /// </summary>
+    public IReadOnlyList<LineageSubscriberModel> Models { get; init; } = [];
+}
+
+/// <summary>The semantic model of one report file.</summary>
+public sealed record LineageSubscriberModel
+{
+    /// <summary>The report file the model came from, the same value its pages carry.</summary>
+    public required string ReportFile { get; init; }
+
+    public required IReadOnlyList<LineageSubscriberModelTable> Tables { get; init; }
+
+    public required IReadOnlyList<LineageSubscriberModelRelationship> Relationships { get; init; }
+}
+
+/// <summary>One table of a report's semantic model.</summary>
+public sealed record LineageSubscriberModelTable
+{
+    /// <summary>The model entity name, as visuals and DAX refer to it (empty for fields the model declared without a
+    /// home table).</summary>
+    public required string Name { get; init; }
+
+    /// <summary>The Power Query (M) expression that loads the table, when the model declares one.</summary>
+    public string? PowerQuery { get; init; }
+
+    /// <summary>The warehouse database the expression resolved to, when it resolved.</summary>
+    public string? SourceDatabase { get; init; }
+
+    /// <summary>The warehouse schema the expression resolved to, when it resolved.</summary>
+    public string? SourceSchema { get; init; }
+
+    /// <summary>The warehouse table the expression resolved to, when it resolved.</summary>
+    public string? SourceName { get; init; }
+
+    /// <summary>Its columns, calculated columns, and measures, in that order.</summary>
+    public required IReadOnlyList<LineageSubscriberModelField> Fields { get; init; }
+}
+
+/// <summary>One column, calculated column, or measure defined on a model table.</summary>
+public sealed record LineageSubscriberModelField
+{
+    public required string Name { get; init; }
+
+    /// <summary><c>column</c>, <c>calculatedColumn</c>, or <c>measure</c>.</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>A column's data type.</summary>
+    public string? DataType { get; init; }
+
+    /// <summary>A calculated column's or measure's DAX expression.</summary>
+    public string? Expression { get; init; }
+
+    /// <summary>A measure's author-written description.</summary>
+    public string? Description { get; init; }
+}
+
+/// <summary>One relationship between two tables of a report's semantic model.</summary>
+public sealed record LineageSubscriberModelRelationship
+{
+    public required string FromTable { get; init; }
+
+    public string? FromColumn { get; init; }
+
+    public required string ToTable { get; init; }
+
+    public string? ToColumn { get; init; }
+
+    /// <summary><c>1:1</c>, <c>M:1</c>, <c>1:M</c>, or <c>M:M</c>.</summary>
+    public string? Cardinality { get; init; }
+
+    /// <summary>False when the relationship applies only where a measure invokes it with USERELATIONSHIP.</summary>
+    public required bool IsActive { get; init; }
 }
 
 /// <summary>
