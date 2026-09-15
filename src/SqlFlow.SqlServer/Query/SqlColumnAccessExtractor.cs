@@ -41,6 +41,19 @@ public static class SqlColumnAccessExtractor
         return collector.Resolve();
     }
 
+    /// <summary>Every table a parsed SELECT reads, whether or not any column of it is referenced. A statement
+    /// like <c>SELECT COUNT(*) FROM demo.Customers</c> names no column at all, so <see cref="Extract"/> reports
+    /// nothing for it; a caller asking WHERE a query reads from, rather than which columns it exposes, needs
+    /// this instead.</summary>
+    public static IReadOnlyList<AccessedTable> ExtractTables(SelectStatement select)
+    {
+        ArgumentNullException.ThrowIfNull(select);
+
+        var collector = new Collector();
+        select.Accept(collector);
+        return collector.Tables;
+    }
+
     private sealed class Collector : TSqlFragmentVisitor
     {
         private readonly List<AccessedTable> _tables = [];
@@ -84,6 +97,8 @@ public static class SqlColumnAccessExtractor
             var qualifier = node?.Qualifier?.Identifiers is { Count: > 0 } parts ? parts[^1].Value : null;
             _references.Add((qualifier, null));
         }
+
+        public IReadOnlyList<AccessedTable> Tables => _tables.Distinct().ToList();
 
         public IReadOnlyList<AccessedColumn> Resolve()
         {

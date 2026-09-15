@@ -233,14 +233,23 @@ Landed since that:
   auto-run step needed: without it a stored example carried no fact about which connection its SQL
   runs against, so auto-running a trusted match had nothing to prepare the query with. Null on a
   confirmed example stored before a datasource was chosen for it, and always null for a PowerBI-derived
-  question (which names a model entity, not a live connection). Populating it today means passing
-  `sourceRef` to `confirm_question` by hand; the intended source is a datasource-selection control in
-  the GUI's confirm/correct/reject affordance (Section 10), not built yet.
+  question (which names a model entity, not a live connection). A person is no longer asked for it:
+  `DatasourceInference` (`src/SqlFlow.ControlPlane/Api/DatasourceInference.cs`) works it out from what
+  the catalog already knows, first from the lineage object keys (a node key's first segment is the
+  connection reference the object was reached through, which is also where a PowerBI visual's resolved
+  model entities land), then from the tables the SQL reads, and answers only when that points at
+  exactly one datasource an active pipeline declares. Confirm stores the inferred value when none was
+  supplied, `find_similar_questions` fills it on matches stored without one, auto-run uses it for an
+  example with none, and `prepare_query` uses it when no reference is passed (422 naming the
+  candidates otherwise).
 - The auto-run step itself (`POST /api/v1/powerai/questions/{id}/auto-run`, `auto_run_trusted_match`):
   runs a TRUSTED match's SQL directly, capped to the deployment's own row limit and timeout, with no
   separate prepare/approve round trip, since the SQL was already shown to and confirmed by a person
   when it was stored. Falls back cleanly to the existing manual confirmation gate when the match has
-  no `exampleId`/`SourceRef`, or when the run does not finish inside its budget.
+  no `exampleId`, when no datasource can be stored or inferred for it, or when the run does not finish
+  inside its budget. A match is `trusted` when its score clears `RankThreshold` OR it is the same
+  question as the one typed (equal sets of meaningful words, stop words dropped and inflections folded):
+  a threshold on term count alone could never trust a short question, whose verbatim twin scores 1.
 
 Still needed, not started:
 

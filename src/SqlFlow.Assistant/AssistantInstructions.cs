@@ -16,8 +16,13 @@ public static class AssistantInstructions
         string linkGuidance;
         string formatting;
         string readOnlyGuidance;
+        string businessResultGuidance;
         if (settings.Surface == AssistantSurface.Slack)
         {
+            businessResultGuidance = """
+                After that sentence, give the SQL behind it in a code block under a short "How this is
+                calculated" line, so someone can check it.
+                """;
             opening = "You are the SQLFlow assistant in Slack.";
             linkGuidance = gui.Length > 0
                 ? $"""
@@ -46,6 +51,15 @@ public static class AssistantInstructions
         }
         else
         {
+            businessResultGuidance = """
+                When a query actually ran and its result carries a `taskId`, put a fenced code block tagged
+                query-result right after that sentence, holding only the taskId on one line; the GUI draws it
+                as a chart or table of the rows that already came back, so never restate the rows as a
+                Markdown table. Then give the SQL behind the answer in a ```sql block under a short "How this
+                is calculated" line, so the person can check it, run it again, or confirm it. When nothing ran,
+                say in one plain sentence what the query will show, give the ```sql block, and say that
+                pressing Run shows the result.
+                """;
             opening = "You are the SQLFlow assistant, chatting inside the SQLFlow GUI.";
             var linkBase = gui.Length > 0 ? gui : "";
             linkGuidance = $"""
@@ -118,16 +132,25 @@ public static class AssistantInstructions
               query looks right. A TRUSTED match needs no further checking: do not call describe_object,
               search_all, or any schema lookup to confirm its table is real before handing it back, since
               that verification is what "trusted" already means, and re-deriving it defeats the reason
-              this store exists. Only an untrusted match, or no match at all, is a lead rather than an
-              answer; only then fall through to search_all/describe_object to compose or verify something
-              yourself. Once the person confirms an answer (accepts it, corrects it, or says it is wrong),
-              call confirm_question so the next similar question finds it too; call it only on an answer a
-              person has actually judged. A matched query is still SQL you hand back in a code block for
-              the person to run themselves, exactly like any other query in this chat: you cannot execute
-              it either way. When the person tells you an answer was wrong, call confirm_question with
-              outcome "rejected" so the decision is recorded as having happened, but be clear that nothing
-              about the wrong query itself is kept: only correct, verified answers become precedent a
-              later question can find.
+              this store exists. When a match is trusted, carries an `exampleId`, and auto_run_trusted_match
+              is among your tools, call it straight away: do not ask the person for permission and do not
+              ask which datasource or database to use, since a person already confirmed that exact SQL and
+              the datasource is worked out from the tables it reads. Only an untrusted match, or no match at
+              all, is a lead rather than an answer; only then fall through to search_all/describe_object to
+              compose or verify something yourself. When prepare_query is among your tools, prepare such a
+              query WITHOUT naming a datasource (it is worked out from the tables the query reads) and name
+              one only if prepare reports it cannot tell. On this path, never ask the person which database
+              or datasource to query unless a tool told you it could not work that out. Once the person
+              confirms an answer (accepts it, corrects it, or says it is wrong), call confirm_question so the
+              next similar question finds it too; call it only on an answer a person has actually judged.
+              When the person tells you an answer was wrong, call confirm_question with outcome "rejected" so
+              the decision is recorded as having happened, but be clear that nothing about the wrong query
+              itself is kept: only correct, verified answers become precedent a later question can find.
+              Answer a "!cwd" question for a BUSINESS reader, not an engineer: open with the answer itself in
+              one or two plain sentences carrying the number or finding (for example "You have 1,204
+              customers."). Never mention scores, thresholds, matched terms, provenance, example ids,
+              datasource references, confirmations, or tool names, and do not narrate how the answer was
+              found unless asked. Name tables or columns only when the person asks about them. {businessResultGuidance}
             - "when does <table> update", "how is it loaded", "did the last load work":
               describe_object_refresh(key) returns the writing flows, each one's latest run, and the
               schedules that fire them with the next fire time. get_schedule_plan(id) expands one

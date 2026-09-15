@@ -29,11 +29,12 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
   const [sourceRef, setSourceRef] = useState<string | null>(null);
   const [result, setResult] = useState<RunQueryResult | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pickReason, setPickReason] = useState<string | null>(null);
 
   const datasources = useQuery({
     queryKey: ["datasources"],
     queryFn: () => datasourceApi.list(),
-    enabled: phase !== "idle",
+    enabled: phase === "picking",
   });
 
   // Only a datasource a worker can actually reach is offered: preparing against one that cannot resolve
@@ -43,23 +44,32 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
     [datasources.data],
   );
 
+  // Run first WITHOUT a datasource: the control plane works it out from the tables the query reads. Only when
+  // it cannot tell (422: none of the tables is known, or they live on several datasources) does the picker
+  // appear, carrying the server's explanation of why.
   const run = useMutation({
-    mutationFn: async (reference: string) => {
-      const task = await executeQueryRun({ sql, reference });
+    mutationFn: async (reference: string | null) => {
+      const task = await executeQueryRun(reference === null ? { sql } : { sql, reference });
       if (task.status !== "succeeded") {
         throw new Error(task.error ?? `The query did not complete (status: ${task.status}).`);
       }
-      return task.result as RunQueryResult;
+      return { result: task.result as RunQueryResult, sourceRef: task.sourceRef };
     },
     onMutate: () => {
       setPhase("running");
       setErrorMessage(null);
     },
     onSuccess: (data) => {
-      setResult(data);
+      setSourceRef(data.sourceRef);
+      setResult(data.result);
       setPhase("done");
     },
     onError: (error) => {
+      if (isApiError(error) && error.status === 422) {
+        setPickReason(error.message);
+        setPhase("picking");
+        return;
+      }
       setErrorMessage(isApiError(error) ? error.message : error instanceof Error ? error.message : String(error));
       setPhase("failed");
     },
@@ -74,7 +84,7 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
       variant="ghost"
       size="icon-xs"
       aria-label="Run query"
-      onClick={() => setPhase("picking")}
+      onClick={() => run.mutate(null)}
       disabled={phase === "running"}
       data-testid="sql-run-button"
     >
@@ -88,6 +98,9 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
 
   const panel = (
     <div className="rounded-md border border-border bg-muted/30 p-3" data-testid="sql-run-panel">
+      {phase === "picking" && pickReason !== null && (
+        <p className="mb-2 text-xs text-muted-foreground" data-testid="sql-run-pick-reason">{pickReason}</p>
+      )}
       {phase === "picking" && (
         <div className="flex flex-wrap items-end gap-2">
           <ComboBoxField<Datasource>
@@ -119,7 +132,9 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
       )}
       {phase === "running" && (
         <div className="flex flex-col gap-2">
-          <span className="text-xs text-muted-foreground">Running against {sourceRef}...</span>
+          <span className="text-xs text-muted-foreground">
+            {run.variables ? `Running against ${run.variables}...` : "Running..."}
+          </span>
           <Skeleton className="h-[160px] w-full rounded-md" />
         </div>
       )}
@@ -129,7 +144,7 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
             ? <CorrelationError error={run.error} />
             : <p className="text-xs text-destructive" data-testid="sql-run-error">{errorMessage}</p>}
           <div>
-            <Button variant="ghost" size="sm" onClick={() => setPhase("picking")}>Try again</Button>
+            <Button variant="ghost" size="sm" onClick={() => run.mutate(sourceRef)}>Try again</Button>
           </div>
         </div>
       )}
@@ -140,7 +155,7 @@ export function useSqlRun(sql: string): { button: ReactNode; panel: ReactNode } 
               {result.rowCount} row{result.rowCount === 1 ? "" : "s"}
               {result.truncated && " (truncated)"} from {sourceRef}
             </span>
-            <Button variant="ghost" size="xs" onClick={() => setPhase("picking")}>Run again</Button>
+            <Button variant="ghost" size="xs" onClick={() => run.mutate(sourceRef)}>Run again</Button>
           </div>
           <QueryResultView columns={result.columns} rows={result.rows} />
         </div>

@@ -138,7 +138,9 @@ public static class ColumnPolicyGuard
         }
     }
 
-    private static SelectStatement? ParseSingleSelect(string sql)
+    /// <summary>Parses <paramref name="sql"/> as exactly one SELECT, or null when it is anything else. Shared with
+    /// <see cref="DatasourceInference"/> so both read a statement's tables from the same parse.</summary>
+    internal static SelectStatement? ParseSingleSelect(string sql)
     {
         var parser = new TSql160Parser(initialQuotedIdentifiers: true);
         using var reader = new StringReader(sql);

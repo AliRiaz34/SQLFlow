@@ -230,7 +230,9 @@ public sealed record SubscriberReportPageDto(
 /// <summary>One stored question matched against a typed one, with what already answers it. <c>Score</c> is how
 /// many searched terms it matched (unbounded, relative to the other matches in the same search) and is the
 /// trustworthy confidence signal; <c>Trusted</c> reports whether it cleared the deployment's configured
-/// threshold, so a caller does not have to know what that threshold is to act on it. <c>MatchedTerms</c> says
+/// threshold OR is the same question as the one typed (the same meaningful words), so a caller does not have to
+/// know what that threshold is to act on it, and a short question's verbatim twin is not refused for having too
+/// few words to count. <c>MatchedTerms</c> says
 /// WHICH terms hit, so an answer can explain why this question was considered relevant.
 /// <para>
 /// <c>Provenance</c> says which half of the store it came from: <c>powerbi</c> for a question derived from a
@@ -241,10 +243,10 @@ public sealed record SubscriberReportPageDto(
 /// <para>
 /// <c>SourceRef</c> is the datasource <c>Sql</c> runs against, in the same reference shape
 /// <c>prepare_query</c> takes: a whole <c>${env:...}</c>/<c>${keyvault:...}</c> token or an <c>@alias</c>.
-/// Null when the confirmed example was stored without one (including every PowerBI-derived question, which
-/// names a model entity rather than a live connection). A caller auto-running a trusted match reads this to
-/// know which connection to prepare the query against; without it, the match is still precedent but nothing
-/// says where to run it.
+/// When the match was stored without one (every PowerBI-derived question, and any example confirmed before a
+/// datasource was chosen) it is worked out from the objects the SQL reads (<see cref="DatasourceInference"/>),
+/// and is null only when those objects do not point at exactly one declared datasource. A caller reads this to
+/// know which connection the query runs against instead of asking a person.
 /// </para>
 /// <para>
 /// <c>ExampleId</c> is the <c>CatalogQuestionExample.Id</c> behind this match, present only for a
@@ -1662,14 +1664,27 @@ public static class LineageEndpoints
                     repoId, ct)
                 .ConfigureAwait(false);
 
+        var matches = new List<SimilarQuestionDto>(result.Matches.Count);
+        foreach (var m in result.Matches)
+        {
+            // A match stored without a datasource (every PowerBI-derived question, and any example confirmed
+            // before one was chosen) still says where it runs through the objects it reads, so a caller is not
+            // left to ask a person for a connection the catalog already knows.
+            var sourceRef = m.SourceRef;
+            if (string.IsNullOrWhiteSpace(sourceRef) && m.Sql.Length > 0)
+            {
+                sourceRef = (await DatasourceInference.InferAsync(db, m.Sql, m.ObjectKeys, ct).ConfigureAwait(false))
+                    .Reference;
+            }
+
+            matches.Add(new SimilarQuestionDto(
+                m.Question, m.Score, m.Score >= retrieval.RankThreshold || m.SameQuestion, m.MatchedTerms,
+                m.Provenance, m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy, sourceRef,
+                m.ExampleId));
+        }
+
         return TypedResults.Ok(new SimilarQuestionsDto(
-            question.Trim(),
-            result.SearchedTerms,
-            retrieval.RankThreshold,
-            result.Matches.Select(m => new SimilarQuestionDto(
-                m.Question, m.Score, m.Score >= retrieval.RankThreshold, m.MatchedTerms, m.Provenance,
-                m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy, m.SourceRef, m.ExampleId))
-                .ToList()));
+            question.Trim(), result.SearchedTerms, retrieval.RankThreshold, matches));
     }
 
     /// <summary>The most matches one search will return however many a caller asks for. Past a handful, extra

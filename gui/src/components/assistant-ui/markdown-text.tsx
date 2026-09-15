@@ -18,6 +18,7 @@ import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button
 import { CodeView } from "@/components/CodeView";
 import { cn } from "@/lib/utils";
 import { useSqlRun } from "../../features/chat/SqlRunPanel";
+import { QueryResultEmbed } from "../../features/chat/QueryResultEmbed";
 
 const MarkdownTextImpl = () => {
   return (
@@ -93,8 +94,19 @@ const SqlCodeViewHighlighter: FC<SyntaxHighlighterProps> = ({ components, code }
   );
 };
 
+/**
+ * A `query-result` block carries only the compute task id of a query that already ran; once the answer has
+ * finished streaming it renders that task's stored rows as a chart or table (QueryResultEmbed). While
+ * streaming, nothing is drawn, since a half-written id is not an id.
+ */
+const QueryResultHighlighter: FC<SyntaxHighlighterProps> = ({ code }) => {
+  const isStreaming = useAuiState((s) => s.message.status?.type === "running");
+  return isStreaming ? null : <QueryResultEmbed code={code} />;
+};
+
 const componentsByLanguage = {
   sql: { SyntaxHighlighter: SqlCodeViewHighlighter },
+  "query-result": { SyntaxHighlighter: QueryResultHighlighter },
   yaml: { SyntaxHighlighter: makeCodeViewHighlighter("yaml") },
   yml: { SyntaxHighlighter: makeCodeViewHighlighter("yaml") },
   json: { SyntaxHighlighter: makeCodeViewHighlighter("json") },
@@ -111,7 +123,8 @@ const CodeHeader: FC<CodeHeaderProps> = ({ language, code }) => {
   // While still streaming, a graduating language renders as the plain <pre>/<code> block below
   // (see makeCodeViewHighlighter), which has no toolbar of its own, so this header is the only
   // label/copy affordance and must stay; once finished, CodeView's own toolbar takes over.
-  if (language !== undefined && CODE_VIEW_LANGUAGES.has(language) && !isStreaming) {
+  // A query-result block is a chart, never code: it has no header to label or copy, streaming or not.
+  if (language === "query-result" || (language !== undefined && CODE_VIEW_LANGUAGES.has(language) && !isStreaming)) {
     return null;
   }
   const onCopy = () => {

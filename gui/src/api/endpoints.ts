@@ -403,9 +403,11 @@ export const dataOpsApi = {
  * Runs one ad-hoc SELECT end to end: prepare (mints the token), run (redeems it and enqueues the compute
  * task), then long-poll until the task reaches a terminal state: the same three-call sequence
  * prepare_query/run_query/task-polling perform over MCP, so a GUI "Run" click is exactly that sequence, not a
- * second execution path. There is no one-step variant: PrepareQueryRequest.reference is required, and a plan
- * is redeemed as-is, so the caller always shows the prepared SQL (identical to what it sent, since the
- * control plane echoes back what it parsed) before redeeming.
+ * second execution path. There is no one-step variant: a plan is redeemed as-is, so the caller always shows the
+ * prepared SQL (identical to what it sent, since the control plane echoes back what it parsed) before redeeming.
+ * PrepareQueryRequest.reference may be omitted, in which case the control plane infers the datasource from the
+ * tables the query reads and rejects the prepare with a 422 when it cannot tell; the resolved datasource comes
+ * back on the task's sourceRef.
  */
 export async function executeQueryRun(request: PrepareQueryRequest, signal?: AbortSignal): Promise<ComputeTask> {
   const prepared = await dataOpsApi.prepare(request);

@@ -2256,8 +2256,10 @@ export interface TopQueriesResult {
 
 export interface PrepareQueryRequest {
   sql: string;
-  /** A whole ${env:...}/${keyvault:...} reference or an @alias; inline connection strings are refused. */
-  reference: string;
+  /** A whole ${env:...}/${keyvault:...} reference or an @alias; inline connection strings are refused. Omit it to
+   * let the control plane work the datasource out from the tables the query reads; it answers 422 naming the
+   * candidates when it cannot tell. */
+  reference?: string;
   maxRows?: number;
   timeoutSeconds?: number;
 }

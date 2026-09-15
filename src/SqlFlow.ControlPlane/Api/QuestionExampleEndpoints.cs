@@ -57,8 +57,8 @@ public static class QuestionConfirmationOutcome
 /// <param name="SourceRef">The datasource <paramref name="Sql"/> runs against: a whole <c>${env:...}</c>/
 /// <c>${keyvault:...}</c> reference or an <c>@alias</c>, matching a datasource the catalog already declares
 /// (the same shape and the same known-reference gate <c>PrepareQueryRequest.Reference</c> enforces). Optional:
-/// an example is still worth keeping without one, but auto-run cannot pick a connection for it until a person
-/// (today, via the GUI's datasource picker) supplies it. Ignored on <see cref="QuestionConfirmationOutcome.Rejected"/>,
+/// omitted, it is worked out from the objects the query reads (<see cref="DatasourceInference"/>), and the
+/// example is stored without one only when those objects do not point at exactly one declared datasource. Ignored on <see cref="QuestionConfirmationOutcome.Rejected"/>,
 /// which is never stored at all.</param>
 public sealed record ConfirmQuestionRequest(
     string? Question, string? Sql, string? Outcome, IReadOnlyList<string>? ObjectKeys = null,
@@ -254,6 +254,17 @@ public static class QuestionExampleEndpoints
             }
         }
 
+        // Named by nobody: the objects the query reads decide it, so an example is runnable later without a
+        // person picking a connection the catalog already knows. An inferred value never replaces one a person
+        // chose on an earlier confirmation of the same example.
+        var sourceRefInferred = false;
+        if (sourceRef is null)
+        {
+            sourceRef = (await DatasourceInference.InferAsync(db, sql, request.ObjectKeys, ct).ConfigureAwait(false))
+                .Reference;
+            sourceRefInferred = sourceRef is not null;
+        }
+
         var now = clock.GetUtcNow().UtcDateTime;
         var confirmedBy = user.FindFirst("sub")?.Value ?? user.Identity?.Name;
         var hash = QuestionExampleHash.Compute(question, sql);
@@ -280,7 +291,7 @@ public static class QuestionExampleEndpoints
                 existing.ObjectKeys = JoinObjectKeys(request.ObjectKeys);
             }
 
-            if (sourceRef is not null)
+            if (sourceRef is not null && (!sourceRefInferred || string.IsNullOrWhiteSpace(existing.SourceRef)))
             {
                 existing.SourceRef = sourceRef;
             }
@@ -382,12 +393,23 @@ public static class QuestionExampleEndpoints
             return Problem($"No confirmed example '{exampleId}' exists.", StatusCodes.Status404NotFound);
         }
 
-        if (string.IsNullOrWhiteSpace(example.SourceRef))
+        // An example stored without a datasource still says where it runs through the objects it reads; only when
+        // those do not point at exactly one declared datasource is there nothing to run it against.
+        var sourceRef = example.SourceRef;
+        if (string.IsNullOrWhiteSpace(sourceRef))
+        {
+            var objectKeys = example.ObjectKeys.Split(
+                '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            sourceRef = (await DatasourceInference.InferAsync(db, example.Sql, objectKeys, ct).ConfigureAwait(false))
+                .Reference;
+        }
+
+        if (string.IsNullOrWhiteSpace(sourceRef))
         {
             return Problem(
-                "This confirmed example has no datasource attached (SourceRef is empty), so there is nothing "
-                + "to run its SQL against. Confirm it again with a sourceRef, or use prepare_query/run_query "
-                + "with the datasource named by hand.",
+                "This confirmed example has no datasource attached, and the tables its SQL reads do not point at "
+                + "exactly one datasource the estate declares, so there is nothing to run it against. Use "
+                + "prepare_query/run_query with the datasource named.",
                 StatusCodes.Status409Conflict, "No datasource");
         }
 
@@ -412,7 +434,7 @@ public static class QuestionExampleEndpoints
         var payload = new ComputeTaskPayload
         {
             Operation = ComputeOperations.RunQuery,
-            SourceRef = example.SourceRef,
+            SourceRef = sourceRef,
             Sql = sql,
             MaxRows = autoRun.MaxRows,
             TimeoutSeconds = autoRun.TimeoutSeconds,
@@ -456,7 +478,7 @@ public static class QuestionExampleEndpoints
             {
                 var result = task.ResultJson is null ? (JsonElement?)null : JsonSerializer.Deserialize<JsonElement>(task.ResultJson);
                 return TypedResults.Ok(new AutoRunResultDto(
-                    Ran: true, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+                    Ran: true, example.Id, example.Question, sql, sourceRef, autoRun.MaxRows,
                     autoRun.TimeoutSeconds, taskId, task.Status, result,
                     "Ran the trusted match directly, capped to "
                     + $"{autoRun.MaxRows} rows and a {autoRun.TimeoutSeconds}s timeout, with no separate "
@@ -464,7 +486,7 @@ public static class QuestionExampleEndpoints
             }
 
             return TypedResults.Ok(new AutoRunResultDto(
-                Ran: false, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+                Ran: false, example.Id, example.Question, sql, sourceRef, autoRun.MaxRows,
                 autoRun.TimeoutSeconds, taskId, task.Status, Result: null,
                 $"Auto-run did not produce a result: the task ended '{task.Status}'"
                 + (string.IsNullOrWhiteSpace(task.Error) ? "." : $" ({task.Error}).")
@@ -477,7 +499,7 @@ public static class QuestionExampleEndpoints
         // human decision on it (via prepare_query/run_query) is the right outcome, not a longer wait here.
         await dispatcher.CancelComputeTaskAsync(db, taskId, ct).ConfigureAwait(false);
         return TypedResults.Ok(new AutoRunResultDto(
-            Ran: false, example.Id, example.Question, sql, example.SourceRef, autoRun.MaxRows,
+            Ran: false, example.Id, example.Question, sql, sourceRef, autoRun.MaxRows,
             autoRun.TimeoutSeconds, taskId, "cancelled", Result: null,
             $"Auto-run did not finish within its {budget.TotalSeconds:0}s budget and was cancelled. Fall back "
             + "to prepare_query/run_query, which has no such budget, so a person can approve this query "

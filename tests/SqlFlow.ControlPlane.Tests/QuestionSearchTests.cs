@@ -206,6 +206,51 @@ public sealed class QuestionSearchTests
         }
     }
 
+    /// <summary>
+    /// A short question has too few meaningful words for a term count to ever trust it: "how many customers do
+    /// we have?" is one word ("customers") once stop words go, so even its verbatim twin scores 1. Identity is
+    /// what closes that gap, and it must stay identity: a different question sharing the same word is not the
+    /// same question, however it scores.
+    /// </summary>
+    [SkippableFact]
+    public async Task AShortQuestionsTwin_IsTheSameQuestion_ButAQuestionSharingItsWordIsNot()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|same_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("How many customers do we have?", "SELECT COUNT(*) FROM Customer", "[Dw].[arc].[Customer]",
+                    "Customer Count"),
+                ("How many customers churned?", "SELECT 1", "[Dw].[arc].[Customer]", "Churn"),
+            ]);
+
+            // The typed question in the singular: inflection must not break identity.
+            var result = await FindWhenIndexedAsync(
+                db, "how many customer do we have", ["customer"], repoId, r => r.Matches.Count == 2);
+
+            var twin = Assert.Single(result.Matches, m => m.Question == "How many customers do we have?");
+            Assert.Equal(1, twin.Score);
+            Assert.True(twin.SameQuestion);
+
+            var other = Assert.Single(result.Matches, m => m.Question == "How many customers churned?");
+            Assert.Equal(1, other.Score);
+            Assert.False(other.SameQuestion);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
     [SkippableFact]
     public async Task AWordIsMatchedWhole_SoSaleDoesNotMatchWholesale()
     {

@@ -44,6 +44,10 @@ sourceRefs:
   - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
   - gui/src/features/chat/SqlRunPanel.tsx
   - gui/src/features/chat/QueryResultView.tsx
+  - gui/src/features/chat/QueryResultEmbed.tsx
+  - src/SqlFlow.ControlPlane/Api/DatasourceInference.cs
+  - src/SqlFlow.Assistant/AssistantInstructions.cs
+  - src/SqlFlow.Assistant/AssistantSettings.cs
   - src/SqlFlow.ControlPlane/Api/QueryEndpoints.cs
   - deploy/bicep/control-plane.bicep
   - deploy/bicep/ai-foundry.bicep
@@ -99,7 +103,7 @@ Under every finished answer that hands back a SQL query, the thread shows one ro
 
 The query being judged is read from the answer's own ```sql fenced blocks, which is exactly what the person read before deciding; an answer carrying several queries gets a numbered picker. Only `sql`-tagged fences count, since an untagged one is as likely to be YAML or a table of results. The question is the user turn the answer replies to, so an answer confirmed from a re-opened conversation records the same pair a live one would.
 
-The datasource is optional and must be a whole `${env:...}` / `${keyvault:...}` reference or an `@alias` that the catalog already declares. Without one the example is still stored and still found by later questions; only `auto_run_trusted_match` needs it, since nothing else says which connection the query belongs to.
+The datasource is optional and must be a whole `${env:...}` / `${keyvault:...}` reference or an `@alias` that the catalog already declares. Without one, the confirm endpoint stores the datasource the query's objects live on (from the object keys when supplied, whose first segment is the connection reference, otherwise from the tables the SQL reads), and leaves it empty only when those do not point at exactly one declared datasource.
 
 The row posts to `POST /api/v1/powerai/questions/confirm`, the same endpoint behind the `confirm_question` MCP tool, so a click and a tool call land the same row and nothing new is stored on this path. It appears only when the deployment has the example store turned on: `GET /api/v1/chat/capabilities` reports `questionConfirmation`, which is `ControlPlane:PowerAI:Retrieval:Enabled` read from the same options the confirm endpoint answers 501 on. Confirming the same question and query again refreshes the existing example rather than adding a duplicate, so reaffirming an answer does not give it extra weight in later searches.
 
@@ -107,7 +111,13 @@ The row posts to `POST /api/v1/powerai/questions/confirm`, the same endpoint beh
 
 Every finished `sql`-fenced block in the thread carries a Run (play) button in its own toolbar row, beside the format/copy buttons `CodeView` already draws. Clicking it runs the query through the *same* two-step DataOps path (`docs/reference/concepts/data-operations.md`, "Running a query from the chat GUI") `prepare_query`/`run_query` use over MCP: prepare mints a token, run redeems it. The SQL is already fully visible in the block, so the click itself is the person's approval; there is no second confirmation dialog, matching how a confirmed example needs no re-approval before `auto_run_trusted_match`.
 
-Running requires a datasource: a picker (filtered to datasources the estate can actually reach) sits between the click and the run, since `PrepareQueryRequest.reference` has no optional case here the way a confirmed example's does. The result renders as a fitting chart, never a fixed one: a single row of one to four numbers becomes stat tiles, one category column against one measure becomes a bar chart, a date column against up to four measures becomes a line chart (splitting into small multiples rather than sharing an axis when those measures' scales are far apart, since a shared axis would flatten the smaller one to the floor), and any other shape falls back to a table. A Chart/Table toggle is always available next to a rendered chart. `gui/src/features/chat/SqlRunPanel.tsx` owns the run state; `QueryResultView.tsx` is the classifier and renderer.
+The click names no datasource: the control plane works it out from the tables the query reads (`DatasourceInference`, the same resolver retrieval, confirmation and auto-run use). Only when it cannot tell, because none of the tables is on a datasource the estate declares or they exist on several, does prepare answer 422 and a picker (filtered to datasources the estate can actually reach) appear with that explanation. The result renders as a fitting chart, never a fixed one: a single row of one to four numbers becomes stat tiles, one category column against one measure becomes a bar chart, a date column against up to four measures becomes a line chart (splitting into small multiples rather than sharing an axis when those measures' scales are far apart, since a shared axis would flatten the smaller one to the floor), and any other shape falls back to a table. A Chart/Table toggle is always available next to a rendered chart. `gui/src/features/chat/SqlRunPanel.tsx` owns the run state; `QueryResultView.tsx` is the classifier and renderer.
+
+## Business questions (`!cwd`)
+
+A `!cwd` question is answered for a business reader: the answer opens with the plain finding in a sentence or two, without retrieval scores, matched terms, datasource references or tool names. A trusted confirmed match (`find_similar_questions` reports `trusted`, and the match carries an `exampleId`) is run immediately with `auto_run_trusted_match`, with no approval prompt and no datasource question; `auto_run_trusted_match` is on the GUI's default tool allowlist for exactly this. A match is trusted when it clears `RankThreshold` or is the same question as the one typed (the same meaningful words once stop words and plural or verb endings are ignored), so a short question's verbatim twin is not refused for having only one word to count.
+
+When a query actually ran, the answer carries a fenced `query-result` block holding the run's compute task id. `QueryResultEmbed.tsx` renders it by reading the stored task (`GET /api/v1/datasources/tasks/{id}`), as the same chart or table the Run button shows, so nothing executes again and a re-opened conversation shows the same result. The SQL behind the answer follows in a `sql` block, which keeps the Run button and the confirmation row available on it.
 
 The affordance is gated by `dataOpsRunQuery` on `GET /api/v1/chat/capabilities` (`ControlPlane:DataOps:Enabled`, the same switch `prepare_query`/`run_query` answer 403 on), so it is absent, not merely disabled, on a deployment without the data-operations surface turned on.
 

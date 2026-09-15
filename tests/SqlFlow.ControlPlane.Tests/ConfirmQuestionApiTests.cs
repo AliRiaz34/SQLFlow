@@ -121,6 +121,83 @@ public sealed class ConfirmQuestionApiTests
         }
     }
 
+    /// <summary>
+    /// An example confirmed without a datasource is stored with the one its data lives on, so a later auto-run
+    /// needs nobody to pick a connection: from the object keys when the caller supplies them (the lineage
+    /// identity, whose first segment is the connection reference), otherwise from the tables the SQL reads.
+    /// </summary>
+    [SkippableFact]
+    public async Task AnExampleConfirmedWithoutADatasource_IsStoredWithTheOneItsDataLivesOn()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var reference = "${env:SQLFLOW_CONFIRM_INFER_" + suffix + "}";
+        var table = "Parcels_" + suffix;
+        var objectKey = $"{reference}|dw|edw|{table}".ToLowerInvariant();
+        var repoId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+
+        var fromSqlQuestion = $"How many parcels are there ({suffix})?";
+        var fromSql = $"SELECT COUNT(*) AS N FROM edw.{table}";
+        var fromKeysQuestion = $"How many parcels did the report count ({suffix})?";
+        const string FromKeysSql = "SELECT COUNT(*) AS N FROM ReportModelParcels";
+        var hashes = new[]
+        {
+            QuestionExampleHash.Compute(fromSqlQuestion, fromSql),
+            QuestionExampleHash.Compute(fromKeysQuestion, FromKeysSql),
+        };
+
+        await using var factory = Enabled(cs);
+        using var client = factory.CreateClient();
+        var token = await IssueOperateTokenAsync(client);
+        await using var db = CatalogDatabase.Create(cs);
+
+        try
+        {
+            db.Repos.Add(new CatalogRepo { Id = repoId, Name = "confirm_infer_" + suffix, FirstSeenUtc = now, LastSyncUtc = now });
+            db.Pipelines.Add(new CatalogPipeline
+            {
+                Id = Guid.NewGuid(), RepoId = repoId, Name = "confirm_infer_flow_" + suffix, Kind = "ing",
+                RelativePath = "infer/flow.yaml", Active = true, SourceServer = reference, TargetServer = reference,
+                DefinitionJson = "{}", FirstSeenUtc = now, LastSeenUtc = now,
+            });
+            db.Objects.Add(new CatalogObject
+            {
+                Key = objectKey, ServerRef = reference, Database = "dw", Schema = "edw", Name = table, Kind = "Table",
+                FirstSeenUtc = now, LastSeenUtc = now,
+            });
+            await db.SaveChangesAsync();
+
+            using (var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
+                fromSqlQuestion, fromSql, QuestionConfirmationOutcome.Accepted)))
+            {
+                response.EnsureSuccessStatusCode();
+            }
+
+            // The SQL names a model entity the catalog does not know; the object keys still carry the reference.
+            using (var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
+                fromKeysQuestion, FromKeysSql, QuestionConfirmationOutcome.Accepted, [objectKey])))
+            {
+                response.EnsureSuccessStatusCode();
+            }
+
+            var stored = await db.QuestionExamples.AsNoTracking()
+                .Where(e => hashes.Contains(e.ContentHash))
+                .ToDictionaryAsync(e => e.Question, e => e.SourceRef);
+            Assert.Equal(reference, stored[fromSqlQuestion]);
+            Assert.Equal(reference, stored[fromKeysQuestion]);
+        }
+        finally
+        {
+            await db.QuestionExamples.Where(e => hashes.Contains(e.ContentHash)).ExecuteDeleteAsync();
+            await db.Objects.Where(o => o.Key == objectKey).ExecuteDeleteAsync();
+            await db.Pipelines.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();
+            await db.Repos.Where(r => r.Id == repoId).ExecuteDeleteAsync();
+        }
+    }
+
     [SkippableFact]
     public async Task AQueryThatWouldWrite_IsRefused_RatherThanStoredAsPrecedent()
     {

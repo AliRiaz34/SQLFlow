@@ -16,7 +16,9 @@ using SqlFlow.SqlServer.Query;
 namespace SqlFlow.ControlPlane.Api;
 
 /// <summary>The statement to prepare, and where it would run. No token exists yet; this is the ask that mints
-/// one.</summary>
+/// one. <c>Reference</c> is optional: omitted, it is worked out from the tables the statement reads
+/// (<see cref="DatasourceInference"/>), and the prepare answers 422 naming the candidates when that is not
+/// unambiguous.</summary>
 public sealed record PrepareQueryRequest(
     string? Sql, string? Reference, string? Kind = null, string? Database = null, string? Pool = null,
     int? MaxRows = null, int? TimeoutSeconds = null);
@@ -102,27 +104,12 @@ public static class QueryEndpoints
         }
 
         var reference = request.Reference?.Trim() ?? string.Empty;
-        if (!ComputeTaskPayload.IsWholeReference(reference))
+        if (reference.Length > 0 && !ComputeTaskPayload.IsWholeReference(reference))
         {
             return Problem(
                 "The datasource must be a whole ${env:...} / ${keyvault:...} reference or an @alias. Inline " +
                 "connection strings are not accepted here.",
                 StatusCodes.Status400BadRequest, "Invalid request");
-        }
-
-        // The same reference gate the compute path uses: a query may only reach a datasource the reviewed git
-        // estate already declares, so this surface can never be pointed at a novel connection.
-        if (!reference.StartsWith('@'))
-        {
-            var known = await db.Pipelines.AsNoTracking()
-                .AnyAsync(p => p.SourceServer == reference || p.TargetServer == reference, ct)
-                .ConfigureAwait(false);
-            if (!known)
-            {
-                return Problem(
-                    $"No pipeline in the catalog declares the datasource reference '{reference}'.",
-                    StatusCodes.Status404NotFound, "Not found");
-            }
         }
 
         string sql;
@@ -147,6 +134,40 @@ public static class QueryEndpoints
         catch (SqlFlowException ex)
         {
             return Problem(ex.Message, StatusCodes.Status400BadRequest, "Query refused");
+        }
+
+        // No datasource named: the tables the statement reads decide it, so a person is asked to pick only when
+        // the catalog genuinely cannot tell (none of them is known, or they live on several datasources).
+        if (reference.Length == 0)
+        {
+            var inferred = await DatasourceInference.InferAsync(db, sql, null, ct).ConfigureAwait(false);
+            if (inferred.Reference is null)
+            {
+                return Problem(
+                    inferred.Candidates.Count == 0
+                        ? "No datasource was named, and none could be worked out from the query: none of the " +
+                          "tables it reads is on a datasource the estate declares. Name the datasource to run against."
+                        : "No datasource was named, and the tables this query reads exist on several datasources (" +
+                          string.Join(", ", inferred.Candidates) + "). Name the one to run against.",
+                    StatusCodes.Status422UnprocessableEntity, "Datasource needed");
+            }
+
+            reference = inferred.Reference;
+        }
+
+        // The same reference gate the compute path uses: a query may only reach a datasource the reviewed git
+        // estate already declares, so this surface can never be pointed at a novel connection.
+        if (!reference.StartsWith('@'))
+        {
+            var known = await db.Pipelines.AsNoTracking()
+                .AnyAsync(p => p.SourceServer == reference || p.TargetServer == reference, ct)
+                .ConfigureAwait(false);
+            if (!known)
+            {
+                return Problem(
+                    $"No pipeline in the catalog declares the datasource reference '{reference}'.",
+                    StatusCodes.Status404NotFound, "Not found");
+            }
         }
 
         var now = clock.GetUtcNow().UtcDateTime;

@@ -193,6 +193,13 @@ public sealed class McpOptions
         // Running a business question. prepare_query executes nothing, and run_query only redeems a single-use
         // token minted by a prepare whose exact SQL was shown to a person.
         "prepare_query", "run_query",
+        // Running a TRUSTED retrieval match with no fresh approval: its exact SQL was confirmed by a person when
+        // it was stored, and it runs under the deployment's own row/timeout caps behind its own AutoRun switch.
+        "auto_run_trusted_match",
+        // Recording a person's verdict on an answer into the PowerAI example store, which the instructions tell
+        // the assistant to do once someone has actually judged it. Behind the operate scope the caller's own
+        // bearer carries; it runs nothing.
+        "confirm_question",
     ];
 
     /// <summary>

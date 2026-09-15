@@ -36,6 +36,10 @@ namespace SqlFlow.ControlPlane.Background;
 /// <param name="ExampleId">The <c>CatalogQuestionExample.Id</c> behind this match, for an auto-run caller to
 /// name (<c>POST /api/v1/powerai/questions/{id}/auto-run</c>). Null for a PowerBI-derived question, which has
 /// no confirmed-example row and so nothing an auto-run endpoint could address.</param>
+/// <param name="SameQuestion">Whether the stored question carries exactly the typed question's meaningful words
+/// (stop words dropped, inflections folded), i.e. it is the same question reworded at most trivially. A term-count
+/// threshold alone can never trust a short question: "how many customers do we have?" has one meaningful word, so
+/// even its verbatim twin scores 1. This is what lets such a match be trusted on identity rather than on count.</param>
 public sealed record QuestionMatch(
     string Question,
     string Sql,
@@ -47,7 +51,8 @@ public sealed record QuestionMatch(
     string? VisualTitle,
     string? ConfirmedBy = null,
     string? SourceRef = null,
-    long? ExampleId = null);
+    long? ExampleId = null,
+    bool SameQuestion = false);
 
 /// <summary>The outcome of one search: the terms actually searched for (the expansion, or the question's own
 /// words when expansion is off or unavailable) and the trustworthy matches. The terms travel with the result
@@ -171,12 +176,16 @@ public static class QuestionSearch
         var visuals = await ResolveVisualsAsync(db, ranked.Select(r => r.Row), ct).ConfigureAwait(false);
         var examples = await ResolveExamplesAsync(db, ranked.Select(r => r.Row), ct).ConfigureAwait(false);
 
+        // Identity is judged on the TYPED question's own words, never on the expansion: the expansion adds
+        // synonyms no stored question is expected to carry all of, so comparing against it would never match.
+        var typedWords = MeaningfulStems(question);
         var matches = new List<QuestionMatch>(ranked.Count);
         foreach (var (row, matched, score) in ranked)
         {
+            var sameQuestion = typedWords.Count > 0 && typedWords.SetEquals(MeaningfulStems(row.Question));
             matches.Add(row.ExampleId > 0
-                ? ExampleMatch(row, matched, score, examples)
-                : VisualMatch(row, matched, score, visuals));
+                ? ExampleMatch(row, matched, score, sameQuestion, examples)
+                : VisualMatch(row, matched, score, sameQuestion, visuals));
         }
 
         return new QuestionSearchResult(terms, matches);
@@ -249,7 +258,7 @@ public static class QuestionSearch
 
     /// <summary>Builds the match for a report-derived question, from the visual and the query behind it.</summary>
     private static QuestionMatch VisualMatch(
-        QuestionRow row, IReadOnlyList<string> matched, int score, VisualLookup lookup)
+        QuestionRow row, IReadOnlyList<string> matched, int score, bool sameQuestion, VisualLookup lookup)
     {
         var visualKey = row.VisualKey ?? string.Empty;
         lookup.Visuals.TryGetValue(visualKey, out var visual);
@@ -265,12 +274,13 @@ public static class QuestionSearch
             score,
             matched,
             query?.SubscriberKey ?? SubscriberKeyFromVisualKey(visualKey),
-            visual?.Title);
+            visual?.Title,
+            SameQuestion: sameQuestion);
     }
 
     /// <summary>Builds the match for a confirmed example, whose answer lives on its own row.</summary>
     private static QuestionMatch ExampleMatch(
-        QuestionRow row, IReadOnlyList<string> matched, int score,
+        QuestionRow row, IReadOnlyList<string> matched, int score, bool sameQuestion,
         IReadOnlyDictionary<long, ResolvedExample> lookup)
     {
         lookup.TryGetValue(row.ExampleId, out var example);
@@ -286,8 +296,17 @@ public static class QuestionSearch
             null,
             example?.ConfirmedBy,
             example?.SourceRef,
-            row.ExampleId);
+            row.ExampleId,
+            sameQuestion);
     }
+
+    /// <summary>A question reduced to its meaningful words: split, stop words and one-character tokens dropped
+    /// (the same <see cref="Normalize"/> the search terms go through), and each word stemmed so "customer" and
+    /// "customers" count as one. Two questions with equal sets ask the same thing.</summary>
+    private static HashSet<string> MeaningfulStems(string question)
+        => Normalize(question.Split(WordSeparators, StringSplitOptions.RemoveEmptyEntries))
+            .Select(Stem)
+            .ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
     /// Loads the stored questions containing any of <paramref name="terms"/> from BOTH stores, using each

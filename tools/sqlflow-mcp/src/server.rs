@@ -549,7 +549,9 @@ pub struct PrepareQueryInput {
     /// The single read-only SELECT to prepare. Compose it from real metadata (get_table_key,
     /// get_table_joins, describe_object), never from guessed column or join names.
     pub sql: String,
-    /// The datasource connection reference. Omit to use the estate's busiest target datasource (the warehouse).
+    /// The datasource connection reference. Omit it: the control plane works out the datasource from the tables
+    /// the query reads, and answers naming the candidates when it cannot tell. Pass one only then, or when the
+    /// person named it.
     pub reference: Option<String>,
     /// The database to run in; omit for the connection's default.
     pub database: Option<String>,
@@ -1937,7 +1939,8 @@ and fix every finding first."
             adapting it beats composing one from the schema, and beats searching the schema for the words in \
             the question. \
             `score` (how many searched terms the question matched) is the ONLY trustworthy confidence signal \
-            here, and `trusted` reports whether it cleared this deployment's threshold. Do not substitute \
+            here, and `trusted` reports whether it cleared this deployment's threshold or is the same \
+            question as the one typed (the same meaningful words). Do not substitute \
             your own confidence for it: a query you wrote from a 1-term match can read exactly as \
             convincingly as one from a 4-term match and still be wrong. `searchedTerms` shows what was \
             actually looked for (the question expanded into business vocabulary) and `matchedTerms` which of \
@@ -1947,17 +1950,18 @@ and fix every finding first."
             being trusted already means, and re-deriving it defeats the reason this store exists, which is \
             to reuse a checked answer instead of re-checking one. Only an UNTRUSTED match (or none at all) is \
             a lead rather than an answer: say so plainly, and only then fall back to describe_object/search_all \
-            to compose or verify something yourself. Running anything, matched or composed, still \
-            goes through prepare_query/run_query and their human confirmation, unchanged. Each match also \
+            to compose or verify something yourself. A trusted confirmed match runs with \
+            auto_run_trusted_match; anything else goes through prepare_query/run_query. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
             a person accepted or corrected this exact answer before (and `confirmedBy` names them), which is \
             the stronger precedent of the two at the same score. `sourceRef` names the datasource that match's \
-            sql was confirmed against (the reference prepare_query needs); it is null on many rows today, \
-            since not every confirmed example has one yet - when it is present, prefer it over asking the \
-            person which datasource to use. A match that is `trusted` AND carries both `exampleId` and \
-            `sourceRef` can be run immediately with auto_run_trusted_match, skipping the prepare_query/ \
-            run_query approval round trip entirely, because this exact SQL was already confirmed by a person \
-            when it was stored; a trusted match missing either field still needs prepare_query/run_query. \
+            sql runs against: the one it was confirmed with, or else the one worked out from the tables it \
+            reads. It is null only when those tables do not point at exactly one datasource; never ask the \
+            person which datasource to use while it is present. A match that is `trusted` AND carries an \
+            `exampleId` should be run immediately with auto_run_trusted_match, without asking the person, \
+            skipping the prepare_query/run_query approval round trip entirely, because this exact SQL was \
+            already confirmed by a person when it was stored; a trusted match without an `exampleId` (a \
+            dashboard question) still needs prepare_query/run_query. \
             When a person tells you your answer was \
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
             finds it. An empty `matches` \
@@ -2022,9 +2026,10 @@ and fix every finding first."
             separate approval step - the whole point being that this exact SQL was already shown to and \
             confirmed by a person when it was stored, so re-asking for the same confirmation on every later \
             match adds friction without adding safety. Use it ONLY on a match whose `trusted` is true AND that \
-            carries both an `exampleId` and a `sourceRef`; a match missing either (no exampleId means it came \
-            from a dashboard, not a confirmed example; no sourceRef means nobody attached a datasource to it \
-            yet) cannot be auto-run - fall back to prepare_query/run_query for those, unchanged. The row cap \
+            carries an `exampleId` (a match without one came from a dashboard, not a confirmed example, and \
+            goes through prepare_query/run_query instead). Do not ask the person for a datasource: the one \
+            stored with the example is used, or else the one worked out from the tables its SQL reads, and a \
+            409 means neither exists. The response carries a `taskId` identifying the stored result. The row cap \
             and timeout are fixed by the deployment, not by you: read `maxRows`/`timeoutSeconds` back from the \
             response rather than assuming defaults. Read `ran` first: true means `result` holds the answer and \
             you can present it, prefixed as a confirmed answer (since it is one) rather than a guess. False \
@@ -2734,8 +2739,12 @@ impl SqlFlowMcp {
     }
 
     async fn run_prepare_query(&self, input: PrepareQueryInput) -> anyhow::Result<String> {
-        let reference = self.resolve_reference(input.reference).await?;
-        let mut body = json!({ "sql": input.sql, "reference": reference });
+        // No local default: the control plane infers the datasource from the tables the query reads, which a
+        // "busiest datasource" guess here would silently override with a connection the query may not live on.
+        let mut body = json!({ "sql": input.sql });
+        if let Some(reference) = input.reference.filter(|r| !r.trim().is_empty()) {
+            body["reference"] = json!(reference.trim());
+        }
         if let Some(database) = input.database.filter(|d| !d.trim().is_empty()) {
             body["database"] = json!(database.trim());
         }

@@ -108,8 +108,8 @@ A question like "what were the daily boarding totals on route 5200 last month" n
 paste elsewhere. That runs here, in **two steps**, and the split is the whole design:
 
 ```
-1. POST /api/v1/dataops/queries/prepare   { sql, reference }
-   -> { planId, sql, expiresUtc }      NOTHING HAS RUN
+1. POST /api/v1/dataops/queries/prepare   { sql, reference? }
+   -> { planId, sql, reference, expiresUtc }      NOTHING HAS RUN
 
 2. (the caller shows that exact sql to a person and gets agreement)
 
@@ -144,7 +144,19 @@ because the queue row is data from the database. On top of that, the query runs 
 **always rolled back**, so even a statement that somehow passed the parser leaves nothing behind. Belt and
 braces is warranted where the cost of being wrong is data.
 
-Being read-only says nothing about *which* data a SELECT may read - that is a separate check, described next.
+Being read-only says nothing about *which* data a SELECT may read - that is a separate check, described below.
+
+### Which datasource a query runs against
+
+`reference` is optional on prepare. Omitted, `DatasourceInference` (`src/SqlFlow.ControlPlane/Api/DatasourceInference.cs`)
+parses the statement, takes every table in its FROM clauses (a `COUNT(*)` that names no column still counts),
+looks those tables up in the catalog by schema and name, and maps the connection references they were reached
+through onto the references active pipelines declare. Exactly one match is used and echoed back as
+`reference`; none, or several (the same table known under two datasources), answers **422** naming the
+candidates, and the caller names one. It never guesses between them. The same resolver fills the datasource
+for PowerAI's confirmed examples and retrieval matches, where the lineage object keys (whose first segment is
+the connection reference) are consulted before the SQL. An inferred reference passes the same known-reference
+gate an explicit one does, so inference cannot reach a connection the estate does not declare.
 
 ### Running a query from the chat GUI
 
@@ -153,9 +165,9 @@ run a `sql`-fenced block the assistant hands back, through the *exact same* prep
 never a third path. The SQL is already fully visible in the block, so clicking Run is the person's approval;
 there is no second confirmation dialog, the same reasoning `auto_run_trusted_match` uses for a confirmed
 example (Section "Confirming an answer" of the chat guide) - a click on text a person already read is not a
-step that benefits from a second click on the same text. A required datasource picker (filtered to
-`resolvable` datasources only) sits between the click and prepare, since `PrepareQueryRequest.reference` is
-required and a query cannot run with none chosen.
+step that benefits from a second click on the same text. The click names no datasource; prepare works it out
+(see "Which datasource a query runs against" below), and a picker (filtered to `resolvable` datasources only)
+appears only when prepare answers 422 because it cannot tell.
 
 The result renders as a fitting chart (a stat tile for one row, a bar for one category column against one
 measure, a line for a date column against up to four measures, small multiples instead of a shared axis when
