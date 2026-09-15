@@ -19,6 +19,12 @@ keywords:
   - transcription
   - image
   - screenshot
+  - confirmation
+  - learning loop
+  - powerai
+  - run query
+  - dataops
+  - chart
 related:
   - guide-slack-assistant
   - guide-deployment
@@ -34,6 +40,11 @@ sourceRefs:
   - src/SqlFlow.Catalog/CatalogEntities.cs
   - gui/src/features/chat/ChatPage.tsx
   - gui/src/features/chat/chatAdapters.ts
+  - gui/src/features/chat/AnswerConfirmation.tsx
+  - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
+  - gui/src/features/chat/SqlRunPanel.tsx
+  - gui/src/features/chat/QueryResultView.tsx
+  - src/SqlFlow.ControlPlane/Api/QueryEndpoints.cs
   - deploy/bicep/control-plane.bicep
   - deploy/bicep/ai-foundry.bicep
 ---
@@ -77,6 +88,28 @@ Answers are navigational: when the assistant names a table, flow, run, schedule,
 Rows are recognised by the identity fields they carry rather than by the tool that returned them, so the same shape links identically wherever it appears, and a tool added later is linked without being wired up.
 
 `SQLFLOW_GUI_URL` on the MCP server decides the form: set it to the GUI's public base URL and the links are absolute, which is what Slack and any client rendering outside the GUI need. Left unset they are root-relative (`/catalog?node=...`), which resolves for the GUI chat and nowhere else. `main.bicep` sets it from the deployed GUI automatically.
+
+## Confirming an answer
+
+Under every finished answer that hands back a SQL query, the thread shows one row: **Yes**, **Not quite**, **No**. This is the confirmation moment of PowerAI's learning loop, and it is what turns an answer a person checked into precedent the next similar question is matched against.
+
+- **Yes** opens the query read-only for a last look, with an optional datasource picker, and stores it as a confirmed example.
+- **Not quite** opens the same query in an editable SQL editor. What is stored is the CORRECTED query, never the original proposal, so the example the estate learns from is the one that actually worked.
+- **No** records the decision and stores nothing. Only correct, verified answers become precedent, so a refuted query is discarded rather than kept as a "do not propose this again" row.
+
+The query being judged is read from the answer's own ```sql fenced blocks, which is exactly what the person read before deciding; an answer carrying several queries gets a numbered picker. Only `sql`-tagged fences count, since an untagged one is as likely to be YAML or a table of results. The question is the user turn the answer replies to, so an answer confirmed from a re-opened conversation records the same pair a live one would.
+
+The datasource is optional and must be a whole `${env:...}` / `${keyvault:...}` reference or an `@alias` that the catalog already declares. Without one the example is still stored and still found by later questions; only `auto_run_trusted_match` needs it, since nothing else says which connection the query belongs to.
+
+The row posts to `POST /api/v1/powerai/questions/confirm`, the same endpoint behind the `confirm_question` MCP tool, so a click and a tool call land the same row and nothing new is stored on this path. It appears only when the deployment has the example store turned on: `GET /api/v1/chat/capabilities` reports `questionConfirmation`, which is `ControlPlane:PowerAI:Retrieval:Enabled` read from the same options the confirm endpoint answers 501 on. Confirming the same question and query again refreshes the existing example rather than adding a duplicate, so reaffirming an answer does not give it extra weight in later searches.
+
+## Running a query
+
+Every finished `sql`-fenced block in the thread carries a Run (play) button in its own toolbar row, beside the format/copy buttons `CodeView` already draws. Clicking it runs the query through the *same* two-step DataOps path (`docs/reference/concepts/data-operations.md`, "Running a query from the chat GUI") `prepare_query`/`run_query` use over MCP: prepare mints a token, run redeems it. The SQL is already fully visible in the block, so the click itself is the person's approval; there is no second confirmation dialog, matching how a confirmed example needs no re-approval before `auto_run_trusted_match`.
+
+Running requires a datasource: a picker (filtered to datasources the estate can actually reach) sits between the click and the run, since `PrepareQueryRequest.reference` has no optional case here the way a confirmed example's does. The result renders as a fitting chart, never a fixed one: a single row of one to four numbers becomes stat tiles, one category column against one measure becomes a bar chart, a date column against up to four measures becomes a line chart (splitting into small multiples rather than sharing an axis when those measures' scales are far apart, since a shared axis would flatten the smaller one to the floor), and any other shape falls back to a table. A Chart/Table toggle is always available next to a rendered chart. `gui/src/features/chat/SqlRunPanel.tsx` owns the run state; `QueryResultView.tsx` is the classifier and renderer.
+
+The affordance is gated by `dataOpsRunQuery` on `GET /api/v1/chat/capabilities` (`ControlPlane:DataOps:Enabled`, the same switch `prepare_query`/`run_query` answer 403 on), so it is absent, not merely disabled, on a deployment without the data-operations surface turned on.
 
 ## Voice input
 

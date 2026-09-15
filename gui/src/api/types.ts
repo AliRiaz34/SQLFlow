@@ -1359,25 +1359,26 @@ export interface CreateUserRequest {
 
 // ---- PowerAI column policies ----------------------------------------------------------------------------------------
 // Admin-scope governance over which columns the AI assistant (and the ad-hoc query surface generally) may
-// never read: SearchEndpoints/LineageEndpoints hide a restricted column from schema search and describe, and
-// ColumnPolicyGuard refuses any ad-hoc query that touches one.
+// read at all, as a default-deny allow-list: SearchEndpoints/LineageEndpoints show only a column an admin has
+// explicitly allowed, and ColumnPolicyGuard refuses any ad-hoc query that touches one that is not.
 
-/** One column of an object with its current restriction state, restricted or not; used to render the
- * per-table toggle list. */
+/** One column of an object with its current allow state; used to render the per-table toggle list. A column
+ * with no policy row yet defaults to not allowed. */
 export interface ColumnPolicyState {
   objectKey: string;
   columnName: string;
   ordinal: number;
   dataType: string | null;
   nullable: boolean;
-  isSensitive: boolean;
+  isAllowed: boolean;
   reason: string | null;
   updatedBy: string | null;
   updatedUtc: string | null;
 }
 
-/** One restricted column, with enough of its owning object to render the flat "everything currently
- * restricted" overview without a second lookup per row. */
+/** One column currently NOT allowed - explicitly denied, or never reviewed at all - with enough of its owning
+ * object to render the flat "everything currently blocked" overview without a second lookup per row.
+ * `updatedUtc` is null for a column that has never been reviewed. */
 export interface RestrictedColumn {
   objectKey: string;
   objectName: string;
@@ -1386,15 +1387,46 @@ export interface RestrictedColumn {
   columnName: string;
   reason: string | null;
   updatedBy: string | null;
-  updatedUtc: string;
+  updatedUtc: string | null;
 }
 
-/** Sets or clears the sensitivity flag on one column; an upsert, safe to call repeatedly. */
+/** Sets or clears the allow flag on one column; an upsert, safe to call repeatedly. */
 export interface SetColumnPolicyRequest {
   objectKey: string;
   columnName: string;
-  isSensitive: boolean;
+  isAllowed: boolean;
   reason: string | null;
+}
+
+// ---- PowerAI confirmed examples ---------------------------------------------------------------------------------
+// The write half of question retrieval: what a person decided about an answer the assistant handed back.
+// An accepted or corrected answer becomes precedent the next similar question is matched against; a rejection
+// is recorded as having happened and stores nothing, since only verified answers become precedent.
+
+/** What a person decided about a proposed answer. */
+export type QuestionConfirmationOutcome = "accepted" | "corrected" | "rejected";
+
+/** One confirmation of a question/query pair. On "corrected", `sql` is the CORRECTED query, never the original
+ * proposal: the store holds what worked. `sourceRef` is optional, and only a whole ${env:...}/${keyvault:...}
+ * reference or an @alias is accepted; without one the example is still kept, but it cannot be auto-run. */
+export interface ConfirmQuestionRequest {
+  question: string;
+  sql: string;
+  outcome: QuestionConfirmationOutcome;
+  objectKeys?: string[];
+  confidence?: number | null;
+  repoId?: string | null;
+  sourceRef?: string | null;
+}
+
+/** What the confirmation did. `stored` is the fact that matters: a rejection answers 200 and stores nothing,
+ * so it must be read rather than inferred from the status. `message` is written to be shown verbatim. */
+export interface ConfirmedQuestion {
+  stored: boolean;
+  exampleId: number | null;
+  outcome: string;
+  provenance: string | null;
+  message: string;
 }
 
 // ---- Personal access tokens -------------------------------------------------------------------------------------
@@ -2217,6 +2249,50 @@ export interface TopQueriesResult {
   queries: ExpensiveQuery[];
 }
 
+// ---- DataOps ad-hoc queries (/api/v1/dataops/queries) ---------------------------------------------------------------
+// The human-in-the-loop, two-step path for running a SELECT: prepare validates it and mints a short-lived,
+// single-use token WITHOUT running anything; run redeems that token and enqueues the same compute task
+// prepare_query/run_query use over MCP. There is no one-step "just run this" endpoint by design.
+
+export interface PrepareQueryRequest {
+  sql: string;
+  /** A whole ${env:...}/${keyvault:...} reference or an @alias; inline connection strings are refused. */
+  reference: string;
+  maxRows?: number;
+  timeoutSeconds?: number;
+}
+
+/** A prepared query awaiting redemption: the exact statement that would run (always show this, not the
+ * request's own copy, before redeeming planId) and when the token lapses. */
+export interface PreparedQuery {
+  planId: string;
+  sql: string;
+  reference: string;
+  database: string | null;
+  maxRows: number;
+  timeoutSeconds: number;
+  expiresUtc: string;
+  instruction: string;
+}
+
+/** One column of a query result: its name and the provider's own type name for it. */
+export interface QueryResultColumn {
+  name: string;
+  dataType: string;
+}
+
+/** The rows a runQuery compute task returned, rendered as text so one shape carries every provider type
+ * (ComputeTask.result for operation "runQuery"). `truncated` must be read before describing the answer: a
+ * truncated result is a page, and summing a truncated page gives a confidently wrong total. */
+export interface RunQueryResult {
+  columns: QueryResultColumn[];
+  rows: (string | null)[][];
+  rowCount: number;
+  truncated: boolean;
+  database: string | null;
+  sql: string;
+}
+
 // ---- Chat assistant (/api/v1/chat) ---------------------------------------------------------------------------------
 
 /** What the chat feature can do under the current deployment, so the GUI shows only affordances that work. */
@@ -2227,6 +2303,12 @@ export interface ChatCapabilities {
   transcription: boolean;
   maxImages: number;
   maxImageBytes: number;
+  /** Whether an answer can be confirmed into the PowerAI example store; false hides the
+   * accept/correct/reject affordance, since retrieval is off and there is no store to confirm into. */
+  questionConfirmation: boolean;
+  /** Whether a SQL block the assistant hands back can be run from the thread itself; false hides
+   * the Run affordance, since the data-operations surface is off. */
+  dataOpsRunQuery: boolean;
 }
 
 export interface ChatConversation {

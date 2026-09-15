@@ -9,17 +9,18 @@ using Xunit;
 namespace SqlFlow.ControlPlane.Tests;
 
 /// <summary>
-/// The "AI shouldn't be able to read everything" surface end to end: an admin marks one column sensitive via
-/// <c>/powerai/column-policies</c>, and that single decision is proven to take effect in every place PowerAI (or
-/// any ad-hoc caller) could otherwise learn about or read the column - schema search, the object dossier/column
-/// list, and the DataOps prepare step, including a <c>SELECT *</c> that would otherwise smuggle it through
-/// unnamed. Every seeded row is removed in a finally so repeated runs stay isolated.
+/// The "AI shouldn't be able to read everything" surface end to end, under the default-deny allow-list: a
+/// column with no policy row is hidden exactly like one explicitly denied, and an admin has to allow-list a
+/// column via <c>/powerai/column-policies</c> before it appears in schema search, the object dossier/column
+/// list, or is readable by the DataOps prepare step (including through a <c>SELECT *</c> that would otherwise
+/// smuggle a not-yet-allowed column through unnamed). Every seeded row is removed in a finally so repeated runs
+/// stay isolated.
 /// </summary>
 [Trait("Category", "Integration")]
 public sealed class ColumnPolicyApiTests
 {
     [SkippableFact]
-    public async Task RestrictingAColumn_HidesItFromSchemaSurfaces_AndRefusesQueriesThatWouldReadIt()
+    public async Task UnallowedColumn_IsHiddenFromSchemaSurfaces_AndRefusesQueriesThatWouldReadIt()
     {
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
@@ -65,49 +66,57 @@ public sealed class ColumnPolicyApiTests
             using var client = factory.CreateClient();
             var adminToken = await IssueTokenAsync(client, ["read", "operate", "admin"]);
 
-            // 1. Before any policy exists, the column is a normal, visible column: search finds it, and the
-            //    dossier's column list carries it.
+            // 1. Before any policy row exists, BOTH columns are new/unreviewed, so both default to denied:
+            //    invisible to search, and any query touching either is refused.
             var beforeColumns = await GetJsonAsync<PagedResult<ColumnHitDto>>(
                 client, adminToken, $"/api/v1/search/columns?name={Uri.EscapeDataString("Ssn")}");
-            Assert.Contains(beforeColumns.Items, c => c.ObjectKey == objectKey && c.ColumnName == "Ssn");
+            Assert.DoesNotContain(beforeColumns.Items, c => c.ObjectKey == objectKey);
 
-            // 2. An admin restricts it.
+            using var beforeRefusal = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
+                new PrepareQueryRequest($"SELECT Name FROM dbo.{tableName}", serverRef, Database: "dw"));
+            Assert.Equal(HttpStatusCode.BadRequest, beforeRefusal.StatusCode);
+
+            // 2. An admin allow-lists only "Name", leaving "Ssn" unreviewed/denied.
             using var setResponse = await PutAsync(client, adminToken, "/api/v1/powerai/column-policies",
-                new SetColumnPolicyRequest(objectKey, "Ssn", IsSensitive: true, Reason: "PII"));
+                new SetColumnPolicyRequest(objectKey, "Name", IsAllowed: true, Reason: "not PII"));
             setResponse.EnsureSuccessStatusCode();
             var setResult = await setResponse.Content.ReadFromJsonAsync<ColumnPolicyStateDto>();
             Assert.NotNull(setResult);
-            Assert.True(setResult.IsSensitive);
-            Assert.Equal("PII", setResult.Reason);
+            Assert.True(setResult.IsAllowed);
+            Assert.Equal("not PII", setResult.Reason);
 
-            // 3. The admin state view shows both columns, Ssn flagged and Name not.
+            // 3. The admin state view shows Name allowed and Ssn still not.
             var state = await GetJsonAsync<IReadOnlyList<ColumnPolicyStateDto>>(
                 client, adminToken, $"/api/v1/powerai/column-policies/objects/{Uri.EscapeDataString(objectKey)}");
-            Assert.True(state.Single(c => c.ColumnName == "Ssn").IsSensitive);
-            Assert.False(state.Single(c => c.ColumnName == "Name").IsSensitive);
+            Assert.True(state.Single(c => c.ColumnName == "Name").IsAllowed);
+            Assert.False(state.Single(c => c.ColumnName == "Ssn").IsAllowed);
 
-            // 4. The catalog-wide restricted-columns overview lists it.
+            // 4. The catalog-wide "not allowed" overview still lists Ssn (never reviewed, no policy row at all).
             var overview = await GetJsonAsync<PagedResult<RestrictedColumnDto>>(
                 client, adminToken, "/api/v1/powerai/column-policies?pageSize=200");
             Assert.Contains(overview.Items, c => c.ObjectKey == objectKey && c.ColumnName == "Ssn");
+            Assert.DoesNotContain(overview.Items, c => c.ObjectKey == objectKey && c.ColumnName == "Name");
 
-            // 5. It is now invisible to schema search...
+            // 5. Name is now visible to schema search, Ssn still is not...
             var afterColumns = await GetJsonAsync<PagedResult<ColumnHitDto>>(
+                client, adminToken, $"/api/v1/search/columns?name={Uri.EscapeDataString("Name")}");
+            Assert.Contains(afterColumns.Items, c => c.ObjectKey == objectKey && c.ColumnName == "Name");
+            var stillHiddenSsn = await GetJsonAsync<PagedResult<ColumnHitDto>>(
                 client, adminToken, $"/api/v1/search/columns?name={Uri.EscapeDataString("Ssn")}");
-            Assert.DoesNotContain(afterColumns.Items, c => c.ObjectKey == objectKey);
+            Assert.DoesNotContain(stillHiddenSsn.Items, c => c.ObjectKey == objectKey);
 
-            // ...and to the object's paged column list and dossier, while the untouched column still shows.
+            // ...and the object's paged column list and dossier carry Name but not Ssn.
             var pagedColumns = await GetJsonAsync<PagedResult<ObjectColumnDto>>(
                 client, adminToken, $"/api/v1/lineage/objects/columns?key={Uri.EscapeDataString(objectKey)}");
-            Assert.DoesNotContain(pagedColumns.Items, c => c.Name == "Ssn");
             Assert.Contains(pagedColumns.Items, c => c.Name == "Name");
+            Assert.DoesNotContain(pagedColumns.Items, c => c.Name == "Ssn");
 
             var dossier = await GetJsonAsync<ObjectDossierDto>(
                 client, adminToken, $"/api/v1/lineage/objects/dossier?key={Uri.EscapeDataString(objectKey)}");
-            Assert.DoesNotContain(dossier.Columns, c => c.Name == "Ssn");
             Assert.Contains(dossier.Columns, c => c.Name == "Name");
+            Assert.DoesNotContain(dossier.Columns, c => c.Name == "Ssn");
 
-            // 6. A query naming the restricted column directly is refused at prepare...
+            // 6. A query naming the still-unallowed column directly is refused at prepare...
             using var directRefusal = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
                 new PrepareQueryRequest($"SELECT Ssn FROM dbo.{tableName}", serverRef, Database: "dw"));
             Assert.Equal(HttpStatusCode.BadRequest, directRefusal.StatusCode);
@@ -117,19 +126,27 @@ public sealed class ColumnPolicyApiTests
                 new PrepareQueryRequest($"SELECT * FROM dbo.{tableName}", serverRef, Database: "dw"));
             Assert.Equal(HttpStatusCode.BadRequest, starRefusal.StatusCode);
 
-            // ...but a query that reads only the untouched column still prepares normally.
+            // ...but a query that reads only the allowed column now prepares normally.
             using var allowed = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
                 new PrepareQueryRequest($"SELECT Name FROM dbo.{tableName}", serverRef, Database: "dw"));
             allowed.EnsureSuccessStatusCode();
 
-            // 7. Clearing the restriction reverses all of it.
-            using var clearResponse = await PutAsync(client, adminToken, "/api/v1/powerai/column-policies",
-                new SetColumnPolicyRequest(objectKey, "Ssn", IsSensitive: false, Reason: null));
-            clearResponse.EnsureSuccessStatusCode();
+            // 7. Allowing Ssn too, SELECT * now works; denying it again reverses just that column.
+            using var allowSsn = await PutAsync(client, adminToken, "/api/v1/powerai/column-policies",
+                new SetColumnPolicyRequest(objectKey, "Ssn", IsAllowed: true, Reason: null));
+            allowSsn.EnsureSuccessStatusCode();
 
-            using var clearedAllowed = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
+            using var starNowAllowed = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
+                new PrepareQueryRequest($"SELECT * FROM dbo.{tableName}", serverRef, Database: "dw"));
+            starNowAllowed.EnsureSuccessStatusCode();
+
+            using var denySsnAgain = await PutAsync(client, adminToken, "/api/v1/powerai/column-policies",
+                new SetColumnPolicyRequest(objectKey, "Ssn", IsAllowed: false, Reason: "PII"));
+            denySsnAgain.EnsureSuccessStatusCode();
+
+            using var deniedAgain = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
                 new PrepareQueryRequest($"SELECT Ssn FROM dbo.{tableName}", serverRef, Database: "dw"));
-            clearedAllowed.EnsureSuccessStatusCode();
+            Assert.Equal(HttpStatusCode.BadRequest, deniedAgain.StatusCode);
         }
         finally
         {
@@ -138,6 +155,60 @@ public sealed class ColumnPolicyApiTests
             await db.ColumnPolicies.Where(p => p.ObjectKey == objectKey).ExecuteDeleteAsync();
             await db.ObjectColumns.Where(c => c.ObjectKey == objectKey).ExecuteDeleteAsync();
             await db.Objects.Where(o => o.Key == objectKey).ExecuteDeleteAsync();
+            await db.Pipelines.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();
+            await db.Repos.Where(r => r.Id == repoId).ExecuteDeleteAsync();
+        }
+    }
+
+    /// <summary>
+    /// Closes the exact gap a column blacklist could not: an object the catalog has no record of at all - a
+    /// synonym pointed at a sensitive table is the motivating case, but this covers any object type the
+    /// harvester does not track - has no allow-list to check a query against, so it must be refused outright
+    /// rather than let through unchecked.
+    /// </summary>
+    [SkippableFact]
+    public async Task QueryAgainstAnObjectTheCatalogDoesNotKnow_IsRefused()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var serverRef = "${env:SQLFLOW_COLPOL_" + suffix + "}";
+        var repoId = Guid.NewGuid();
+        var pipelineId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var unknownTableName = "NoSuchSynonym_" + suffix;
+
+        await using var factory = new ControlPlaneAppFactory().WithCatalog(cs)
+            .WithSetting("ControlPlane:DataOps:Enabled", "true");
+        try
+        {
+            await using (var db = CatalogDatabase.Create(cs))
+            {
+                db.Repos.Add(new CatalogRepo { Id = repoId, Name = "colpolunknown_" + suffix, FirstSeenUtc = now, LastSyncUtc = now });
+                db.Pipelines.Add(new CatalogPipeline
+                {
+                    Id = pipelineId, RepoId = repoId, Name = "colpolunknown_flow_" + suffix, Kind = "ing",
+                    RelativePath = "colpolunknown/flow.yaml", Active = true, SourceServer = serverRef, TargetServer = serverRef,
+                    DefinitionJson = "{}", FirstSeenUtc = now, LastSeenUtc = now,
+                });
+                await db.SaveChangesAsync();
+            }
+
+            using var client = factory.CreateClient();
+            var adminToken = await IssueTokenAsync(client, ["read", "operate", "admin"]);
+
+            // No CatalogObject was ever registered for this name (it deliberately does not exist in the
+            // catalog, standing in for a synonym or any object type the harvester never tracks), so there is no
+            // allow-list to check the query against - it must be refused, not passed through.
+            using var refusal = await PostAsync(client, adminToken, "/api/v1/dataops/queries/prepare",
+                new PrepareQueryRequest($"SELECT Name FROM dbo.{unknownTableName}", serverRef, Database: "dw"));
+            Assert.Equal(HttpStatusCode.BadRequest, refusal.StatusCode);
+        }
+        finally
+        {
+            await using var db = CatalogDatabase.Create(cs);
+            await db.QueryPlans.Where(p => p.SourceRef == serverRef).ExecuteDeleteAsync();
             await db.Pipelines.Where(p => p.RepoId == repoId).ExecuteDeleteAsync();
             await db.Repos.Where(r => r.Id == repoId).ExecuteDeleteAsync();
         }

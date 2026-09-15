@@ -226,13 +226,29 @@ public static class QueryEndpoints
         var plan = await db.QueryPlans.AsNoTracking()
             .FirstAsync(p => p.PlanId == planId, ct).ConfigureAwait(false);
 
+        string sql;
+        try
+        {
+            // Re-checked here, not trusted from the plan row, for the same reason auto_run_trusted_match
+            // re-checks a confirmed example: a column can be marked sensitive at ANY time after prepare wrote
+            // this plan, and this redemption, not the earlier prepare, is the moment that decides whether the
+            // query actually reaches a worker. Prepare alone is not enough: a plan can sit unredeemed for up
+            // to its full lifetime (PlanLifetime), and the column policy is free to change underneath it.
+            sql = ReadOnlyQueryGuard.Validate(plan.Sql);
+            await ColumnPolicyGuard.EnsureAllowedAsync(db, sql, ct).ConfigureAwait(false);
+        }
+        catch (SqlFlowException ex)
+        {
+            return Problem(ex.Message, StatusCodes.Status400BadRequest, "Query refused");
+        }
+
         var payload = new ComputeTaskPayload
         {
             Operation = ComputeOperations.RunQuery,
             SourceRef = plan.SourceRef,
             ProviderKind = plan.ProviderKind is null ? null : Enum.Parse<DataSourceKind>(plan.ProviderKind),
             Database = plan.Database,
-            Sql = plan.Sql,
+            Sql = sql,
             MaxRows = plan.MaxRows,
             TimeoutSeconds = plan.TimeoutSeconds,
         };

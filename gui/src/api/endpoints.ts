@@ -19,6 +19,8 @@ import type {
   NotificationQueuedDelivery, NotificationSubscription, SendNotificationDigestRequest,
   ObjectHit, ObjectRepo, PagedResult,
   ColumnPolicyState, RestrictedColumn, SetColumnPolicyRequest,
+  ConfirmQuestionRequest, ConfirmedQuestion,
+  PrepareQueryRequest, PreparedQuery,
   FlowParameters,
   PipelineColumn, PipelineDetail, PipelineFile, PipelineFileStats, PipelineSummary, RegisterRepoSourceRequest, Repo, RepoDeletionResult, RepoSource, RepoSourceRegistered, RepoSyncResult, RepoTree, Role,
   RunAssertion, RunDetail, RunFile, RunGroup, RunHealthCheckMetric, RunScope, RunScopePreview, RunStatement, RunTraceEntry, RunTraceStorage, RunTraceRetention, RunTraceRetentionUpdate, RunStatementPurgeResult, RunEventPurgeResult,
@@ -388,6 +390,42 @@ export async function executeComputeTask(request: ComputeTaskRequest, signal?: A
   }
 }
 
+// ---- DataOps ad-hoc queries ---------------------------------------------------------------------------------------
+
+export const dataOpsApi = {
+  /** Validates a SELECT and mints a short-lived, single-use token; runs nothing. */
+  prepare: (request: PrepareQueryRequest) => post<PreparedQuery>("/api/v1/dataops/queries/prepare", request),
+  /** Redeems a plan token, queuing the compute task the prepared SQL runs as. */
+  run: (planId: string) => post<ComputeTaskAccepted>(`/api/v1/dataops/queries/${planId}/run`),
+};
+
+/**
+ * Runs one ad-hoc SELECT end to end: prepare (mints the token), run (redeems it and enqueues the compute
+ * task), then long-poll until the task reaches a terminal state: the same three-call sequence
+ * prepare_query/run_query/task-polling perform over MCP, so a GUI "Run" click is exactly that sequence, not a
+ * second execution path. There is no one-step variant: PrepareQueryRequest.reference is required, and a plan
+ * is redeemed as-is, so the caller always shows the prepared SQL (identical to what it sent, since the
+ * control plane echoes back what it parsed) before redeeming.
+ */
+export async function executeQueryRun(request: PrepareQueryRequest, signal?: AbortSignal): Promise<ComputeTask> {
+  const prepared = await dataOpsApi.prepare(request);
+  const accepted = await dataOpsApi.run(prepared.planId);
+  try {
+    for (;;) {
+      const task = await datasourceApi.task(accepted.taskId, 10_000, signal);
+      if (task.status === "succeeded" || task.status === "failed" || task.status === "cancelled" || task.status === "skipped") {
+        return task;
+      }
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      datasourceApi.cancelTask(accepted.taskId).catch(() => undefined);
+    }
+
+    throw error;
+  }
+}
+
 // ---- Repo sources -------------------------------------------------------------------------------------------------------------
 
 export const repoSourceApi = {
@@ -531,13 +569,24 @@ export const userApi = {
 // ---- PowerAI column policies (admin-scope: which columns the assistant may never see) ------------------------------
 
 export const columnPolicyApi = {
-  /** Every column currently marked sensitive, across the whole catalog, for the overview list. */
+  /** Every column currently NOT allowed (explicitly denied, or never reviewed), across the whole catalog, for
+   * the overview list. */
   list: (query: PageQuery = {}) =>
     get<PagedResult<RestrictedColumn>>("/api/v1/powerai/column-policies", query as QueryParams),
   /** Every column of one object with its current policy state, for the per-table toggle list. */
   forObject: (objectKey: string) =>
     get<ColumnPolicyState[]>(`/api/v1/powerai/column-policies/objects/${encodeURIComponent(objectKey)}`),
   set: (request: SetColumnPolicyRequest) => put<ColumnPolicyState>("/api/v1/powerai/column-policies", request),
+};
+
+// ---- PowerAI confirmed examples (the learning loop's write half) ---------------------------------------------------
+
+export const questionExampleApi = {
+  /** Records what a person decided about an answer, storing the question/query pair as a confirmed example on
+   * "accepted" and "corrected". Answers 501 when retrieval is not enabled on the deployment, which is the
+   * signal to hide the affordance rather than an error worth toasting. */
+  confirm: (request: ConfirmQuestionRequest) =>
+    post<ConfirmedQuestion>("/api/v1/powerai/questions/confirm", request),
 };
 
 // ---- Personal access tokens (self-service: the caller's own tokens) ----------------------------------------------

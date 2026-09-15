@@ -750,13 +750,14 @@ public static class LineageEndpoints
 
         var (p, size) = PageRequest.Normalize(page, pageSize);
         // A wide table's column list can be large, so it is paged; ordered by the captured ordinal, then name as a
-        // stable secondary key so a page boundary is deterministic. A column an admin has marked sensitive
-        // (CatalogColumnPolicy) never appears here: this same list is what the MCP server hands an AI assistant
-        // to reason about the table, so hiding it from search/describe is what keeps the assistant from ever
-        // learning the column exists, not merely from reading it.
+        // stable secondary key so a page boundary is deterministic. Only a column an admin has explicitly
+        // allow-listed (CatalogColumnPolicy) appears here: this same list is what the MCP server hands an AI
+        // assistant to reason about the table, so a column with no policy row - never reviewed - is just as
+        // hidden from search/describe as one explicitly denied, keeping the assistant from ever learning the
+        // column exists, not merely from reading it.
         var ordered = db.ObjectColumns.AsNoTracking()
             .Where(c => c.ObjectKey == key
-                && !db.ColumnPolicies.Any(pol => pol.IsSensitive && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
+                && db.ColumnPolicies.Any(pol => pol.IsAllowed && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
             .OrderBy(c => c.Ordinal).ThenBy(c => c.Name);
         var total = await ordered.LongCountAsync(ct).ConfigureAwait(false);
         var columns = await ordered
@@ -998,11 +999,12 @@ public static class LineageEndpoints
             return NotFound("object", key);
         }
 
-        // A sensitive column (CatalogColumnPolicy) is left out of the dossier for the same reason it is left out
-        // of the paged column list: this payload is what an AI assistant reasons about the object from.
+        // A column with no allow-list entry (CatalogColumnPolicy) is left out of the dossier for the same reason
+        // it is left out of the paged column list: this payload is what an AI assistant reasons about the
+        // object from.
         var columns = await db.ObjectColumns.AsNoTracking()
             .Where(c => c.ObjectKey == key
-                && !db.ColumnPolicies.Any(pol => pol.IsSensitive && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
+                && db.ColumnPolicies.Any(pol => pol.IsAllowed && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
             .OrderBy(c => c.Ordinal).ThenBy(c => c.Name)
             .Take(MaxDossierRows)
             .Select(c => new ObjectColumnDto(c.Ordinal, c.Name, c.DataType, c.Nullable, c.Tier))

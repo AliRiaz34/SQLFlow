@@ -25,6 +25,7 @@ sourceRefs:
   - src/SqlFlow.Catalog/CatalogDbContext.cs
   - src/SqlFlow.Catalog/Migrations/20260617165538_ObjectFullTextSearch.cs
   - src/SqlFlow.Catalog/Migrations/20260915071502_AddColumnPolicy.cs
+  - src/SqlFlow.Catalog/Migrations/20260915090833_RenameColumnPolicyToAllowList.cs
   - src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs
   - src/SqlFlow.Catalog/RunQueueStore.cs
   - src/SqlFlow.Lineage/Collection/FlowSetCollector.cs
@@ -62,16 +63,20 @@ a change feed that forgets is not a history. They are removed only when their re
 
 ## Column access policy
 
-`ColumnPolicy` (`CatalogColumnPolicy`) marks individual columns as sensitive - restricted from every AI-facing
-surface (schema search, the object column list, the object dossier) and from the ad-hoc query guard. It is
-deliberately its own table, not a flag on `ObjectColumn`: a `--connect` sync deletes and re-inserts an object's
-entire `ObjectColumn` set on every pass (`CatalogSync`, delete-by-`ObjectKey` then re-insert), so a flag stored
-there would be silently lost
-the next time the object's columns were re-read from the live database. `ColumnPolicy` is keyed by
+`ColumnPolicy` (`CatalogColumnPolicy`) is a default-deny allow-list over individual columns: only a column with
+an `IsAllowed` row is visible on any AI-facing surface (schema search, the object column list, the object
+dossier) or readable through the ad-hoc query guard - a column with no row at all is exactly as blocked as one
+explicitly denied. The same default-deny rule reaches one level up, to the table: a query naming an object the
+catalog has no `Object` record for at all (a synonym, or anything else the harvester does not track) has no
+allow-list to check, so it is refused outright rather than passed through unchecked. It is deliberately its own
+table, not a flag on `ObjectColumn`: a `--connect` sync deletes and re-inserts an object's entire `ObjectColumn`
+set on every pass (`CatalogSync`, delete-by-`ObjectKey` then re-insert), so a flag stored there would be
+silently lost the next time the object's columns were re-read from the live database. `ColumnPolicy` is keyed by
 `(ObjectKey, ColumnName)`, the same soft-link shape as the rest of the catalog, so it survives resyncs and even
-outlives a column the sync has not (yet) reported. It is written only through the admin-scope
-`/api/v1/powerai/column-policies` endpoints, never by a sync pass. See
-[Data operations](data-operations.md#column-policy-what-the-assistant-may-never-read) for how it is enforced.
+outlives a column the sync has not (yet) reported - which also means a column a future sync discovers for the
+first time starts out with no row, and so starts out denied until an admin reviews it. It is written only
+through the admin-scope `/api/v1/powerai/column-policies` endpoints, never by a sync pass. See
+[Data operations](data-operations.md#column-policy-what-the-assistant-may-read-at-all) for how it is enforced.
 
 ## Pipeline sync: hashing, redaction, soft deactivation
 

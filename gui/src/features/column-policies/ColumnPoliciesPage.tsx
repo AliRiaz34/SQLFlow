@@ -37,10 +37,11 @@ const OBJECT_POLICY_KEY = (objectKey: string) => ["column-policies", "object", o
 const OVERVIEW_LIST_KEY = ["column-policies", "list"] as const;
 
 /**
- * One column of the managed object: a restriction switch and an optional free-text reason, saved
- * independently of each other. The switch saves immediately (the point of a toggle); the reason saves on
- * blur so a click through several words does not fire a request per keystroke. Both send the other field's
- * current value along, since the endpoint is a full upsert of the row.
+ * One column of the managed object: an allow switch and an optional free-text reason, saved independently of
+ * each other. The switch saves immediately (the point of a toggle); the reason saves on blur so a click
+ * through several words does not fire a request per keystroke. Both send the other field's current value
+ * along, since the endpoint is a full upsert of the row. A column with no policy row yet renders unchecked:
+ * the allow-list is default-deny, so an unreviewed column is exactly as blocked as an explicitly denied one.
  */
 function ColumnPolicyRow({ objectKey, column }: { objectKey: string; column: ColumnPolicyState }) {
   const queryClient = useQueryClient();
@@ -51,10 +52,10 @@ function ColumnPolicyRow({ objectKey, column }: { objectKey: string; column: Col
   }, [column.reason]);
 
   const save = useMutation({
-    mutationFn: (isSensitive: boolean) => columnPolicyApi.set({
+    mutationFn: (isAllowed: boolean) => columnPolicyApi.set({
       objectKey,
       columnName: column.columnName,
-      isSensitive,
+      isAllowed,
       reason: reason.trim() === "" ? null : reason.trim(),
     }),
     onSuccess: () => {
@@ -81,10 +82,10 @@ function ColumnPolicyRow({ objectKey, column }: { objectKey: string; column: Col
       <TableCell className="whitespace-nowrap px-3 py-1.5">
         <div className="flex items-center gap-2">
           <Switch
-            checked={column.isSensitive}
+            checked={column.isAllowed}
             disabled={save.isPending}
             onCheckedChange={(checked) => save.mutate(checked)}
-            aria-label={`Restrict ${column.columnName}`}
+            aria-label={`Allow ${column.columnName}`}
             data-testid="column-policy-toggle"
           />
           {save.isPending && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
@@ -96,7 +97,7 @@ function ColumnPolicyRow({ objectKey, column }: { objectKey: string; column: Col
           onChange={(e) => setReason(e.target.value)}
           onBlur={() => {
             if (reasonDirty) {
-              save.mutate(column.isSensitive);
+              save.mutate(column.isAllowed);
             }
           }}
           placeholder="Reason (optional)"
@@ -112,7 +113,7 @@ function ColumnPolicyRow({ objectKey, column }: { objectKey: string; column: Col
   );
 }
 
-const MANAGE_HEADERS = ["#", "Column", "Type", "Restricted", "Reason", "Last changed"];
+const MANAGE_HEADERS = ["#", "Column", "Type", "Allowed", "Reason", "Last changed"];
 
 /** The per-table toggle list, in a right side sheet (DESIGN.md 7.4): every column of the selected object with
  * its current restriction state, editable inline. */
@@ -141,7 +142,7 @@ function ManageColumnsSheet({
     >
       <SheetContent className="w-full sm:max-w-3xl" data-testid="column-policy-sheet">
         <SheetHeader>
-          <SheetTitle>Restricted columns for {objectLabel}</SheetTitle>
+          <SheetTitle>Allowed columns for {objectLabel}</SheetTitle>
         </SheetHeader>
         <div className="flex flex-1 flex-col gap-3 overflow-y-auto px-4">
           {query.isError && (
@@ -150,9 +151,9 @@ function ManageColumnsSheet({
               : <p className="text-[13px] text-destructive">{errorText(query.error)}</p>
           )}
           <p className="text-[13px] text-muted-foreground">
-            Restricting a column hides it from the assistant&apos;s schema search and describe results, and
-            refuses any ad-hoc query that touches it. Each toggle saves immediately; a reason saves when you
-            leave the field.
+            Only an allowed column is visible to the assistant&apos;s schema search and describe results, and
+            readable by any ad-hoc query; everything else, including a column that has never been reviewed, is
+            blocked by default. Each toggle saves immediately; a reason saves when you leave the field.
           </p>
           <Table>
             <TableHeader>
@@ -200,9 +201,10 @@ const objectColumns: Column<ObjectHit>[] = [
 ];
 
 /**
- * Governs which catalog columns the AI assistant (and the ad-hoc query surface generally) may never read:
- * find a table, toggle its sensitive columns, and audit every restriction currently in effect across the
- * whole catalog. Admin-scope, mirroring UsersPage's shape (a searchable list plus a side-sheet editor).
+ * Governs which catalog columns the AI assistant (and the ad-hoc query surface generally) may read at all, as
+ * a default-deny allow-list: find a table, toggle which of its columns are allowed, and audit every column
+ * still blocked (explicitly denied, or never reviewed) across the whole catalog. Admin-scope, mirroring
+ * UsersPage's shape (a searchable list plus a side-sheet editor).
  */
 export default function ColumnPoliciesPage() {
   const [searchInput, setSearchInput] = useState("");
@@ -256,7 +258,7 @@ export default function ColumnPoliciesPage() {
     <Page data-testid="page-column-policies">
       <PageHeader
         title="Column policies"
-        subtitle="Restrict columns the AI assistant may never see. A restricted column is hidden from schema search and describe, and any ad-hoc query touching it is refused at execution time."
+        subtitle="Only columns explicitly allowed here are visible to the AI assistant. A column that is not allowed, whether denied or simply never reviewed, is hidden from schema search and describe, and any ad-hoc query touching it is refused at execution time."
       />
 
       <div className="flex flex-col gap-2">
@@ -293,13 +295,16 @@ export default function ColumnPoliciesPage() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <h2 className="text-[13px] font-semibold">Restricted columns</h2>
+        <h2 className="text-[13px] font-semibold">Blocked columns</h2>
+        <p className="text-[13px] text-muted-foreground">
+          Every column not currently allowed: an explicit denial, or a column never reviewed at all.
+        </p>
         <PagedTable<RestrictedColumn>
           queryKey={OVERVIEW_LIST_KEY}
           fetchPage={(page, pageSize) => columnPolicyApi.list({ page, pageSize })}
           columns={overviewColumns}
           rowKey={(row) => `${row.objectKey}::${row.columnName}`}
-          emptyMessage="No columns are currently restricted."
+          emptyMessage="Every known column is currently allowed."
           data-testid="column-policy-overview-table"
         />
       </div>

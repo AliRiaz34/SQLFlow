@@ -2562,7 +2562,13 @@
         "dictation",
         "transcription",
         "image",
-        "screenshot"
+        "screenshot",
+        "confirmation",
+        "learning loop",
+        "powerai",
+        "run query",
+        "dataops",
+        "chart"
       ],
       "related": [
         "guide-slack-assistant",
@@ -2580,6 +2586,11 @@
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "gui/src/features/chat/ChatPage.tsx",
         "gui/src/features/chat/chatAdapters.ts",
+        "gui/src/features/chat/AnswerConfirmation.tsx",
+        "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
+        "gui/src/features/chat/SqlRunPanel.tsx",
+        "gui/src/features/chat/QueryResultView.tsx",
+        "src/SqlFlow.ControlPlane/Api/QueryEndpoints.cs",
         "deploy/bicep/control-plane.bicep",
         "deploy/bicep/ai-foundry.bicep"
       ]

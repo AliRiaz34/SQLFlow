@@ -1284,13 +1284,20 @@ public class CatalogObjectColumn
 }
 
 /// <summary>
-/// Marks one column of a catalog object as sensitive: an admin-authored policy that hides the column from every
-/// AI-facing surface (schema search, object describe/dossier, and the ad-hoc query guard) regardless of what the
-/// warehouse itself reports. Deliberately its own table, not a flag on <see cref="CatalogObjectColumn"/>, because
-/// that table is fully replaced (delete-by-key + re-insert) on every connected sync; a flag living there would be
-/// silently lost the next time the object's columns are re-read from the live database. Keyed to the column by
+/// An allow-list entry for one column of a catalog object: an admin-authored policy that decides whether the
+/// column may appear on every AI-facing surface (schema search, object describe/dossier, and the ad-hoc query
+/// guard) regardless of what the warehouse itself reports. The model is default-deny: a column with no row here
+/// at all, or a row with <see cref="IsAllowed"/> false, cannot be read; only a row with <see cref="IsAllowed"/>
+/// true opens it up. This closes the gap a blacklist cannot: an object the catalog has no record of (a synonym,
+/// or anything else not harvested into the catalog) has no allow-list entry either, so it is refused by the same
+/// rule rather than passing unchecked.
+///
+/// Deliberately its own table, not a flag on <see cref="CatalogObjectColumn"/>, because that table is fully
+/// replaced (delete-by-key + re-insert) on every connected sync; a flag living there would be silently lost the
+/// next time the object's columns are re-read from the live database. Keyed to the column by
 /// <see cref="ObjectKey"/> + <see cref="ColumnName"/> (a soft link, no FK, matching the rest of the catalog), so
-/// the policy survives a sync even for a column the sync has not (yet) seen.
+/// the policy survives a sync even for a column the sync has not (yet) seen - and a column a future sync
+/// discovers for the first time starts out with no row, so it starts out denied until an admin reviews it.
 /// </summary>
 public class CatalogColumnPolicy
 {
@@ -1301,10 +1308,10 @@ public class CatalogColumnPolicy
 
     public string ColumnName { get; set; } = string.Empty;
 
-    /// <summary>True to hide the column from AI-facing search/describe results and refuse any ad-hoc query that
-    /// would select it. Stored (rather than the row's mere presence meaning "sensitive") so a column can be
-    /// explicitly cleared without deleting the row's audit trail.</summary>
-    public bool IsSensitive { get; set; }
+    /// <summary>True to let AI-facing search/describe results and ad-hoc queries read the column. Stored
+    /// (rather than the row's mere presence meaning "allowed") so a column can be explicitly denied again
+    /// without deleting the row's audit trail. Absent entirely, the column defaults to denied.</summary>
+    public bool IsAllowed { get; set; }
 
     /// <summary>Why the column is restricted, shown alongside the flag in the management UI (for example
     /// "PII" or "compensation data"). Optional context, not enforced.</summary>

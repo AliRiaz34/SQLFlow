@@ -5,7 +5,8 @@ its report/visual layer), the report structure is retrievable over MCP
 (`describe_subscriber_report`), and every visual can now carry 1-3 LLM-generated business questions
 (Section 9, step 3). Retrieval over those questions is built, and so is the confirmed-example store
 behind it (`find_similar_questions` reads both halves, `confirm_question` writes the confirmed one);
-what is left of the learning loop is the GUI affordance that asks a person to confirm. Section 10
+and the GUI now asks a person to confirm on every answer that hands back a query, closing the
+learning loop. Section 10
 states exactly what is built versus what remains. For the systems this feature builds on, see
 [docs/reference/flow/subscribers.md](reference/flow/subscribers.md) and
 [docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md).
@@ -278,11 +279,12 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
    second one. See
    [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) for the design and what
    each step landed.
-7. **Wire the learning loop.** Partly done: the store and the write path exist and every assistant surface can
-   reach both halves over MCP, so a model that is TOLD to confirm an answer can record it. What remains is the
-   part that makes it happen reliably rather than opportunistically: the GUI's own accept/correct/reject
-   affordance on an answer, so a person confirms by clicking rather than by the assistant remembering to ask.
-   Section 10 states the remaining scope.
+7. ~~**Wire the learning loop.**~~ **Done.** The store and the write path already existed, reachable over MCP,
+   so a model that was TOLD to confirm an answer could record it; what was missing was the part that makes it
+   happen reliably rather than opportunistically. The GUI now carries its own accept/correct/reject row under
+   every finished answer that hands back a query (`gui/src/features/chat/AnswerConfirmation.tsx`), so a person
+   confirms by clicking rather than by the assistant remembering to ask. Section 10 states exactly what the
+   affordance does and what it deliberately does not send.
 8. ~~Visuals/field-co-occurrence and default filters.~~ **Done**, and delivered earlier than
    originally sequenced (visual-layer data turned out to be the load-bearing signal: it is the only
    place a field's ROLE is recorded, and SQL-derived lineage cannot recover that fact). Every page,
@@ -544,13 +546,33 @@ In roughly the order it would need to land, since each depends on groundwork the
    rejection is accepted and stores nothing, and a query that would write is refused by the same
    `ReadOnlyQueryGuard` the DataOps prepare step uses, so the store cannot come to hold a statement that
    would mutate the warehouse if a later answer were adapted from it.
-6. **The learning loop** (Section 6): what remains is the CONFIRMATION MOMENT, not the machinery behind
-   it. Today a person's decision is recorded only when the assistant chooses to call `confirm_question`
-   after being told the answer was right, which makes the loop real but opportunistic. The missing piece
-   is the GUI's own accept/correct/reject affordance on a generated answer, so confirming is a click a
-   person makes rather than something a model has to remember to ask for, wired through the existing
-   DataOps confirmation gate rather than a second one. Nothing new needs storing: it calls the endpoint
-   that already exists.
+6. ~~**The learning loop**~~ (Section 6): **Done.** What was missing was the CONFIRMATION MOMENT, not the
+   machinery behind it: a person's decision was recorded only when the assistant chose to call
+   `confirm_question` after being told the answer was right, which made the loop real but opportunistic.
+   The GUI now shows its own Yes / Not quite / No row under every finished answer that hands back a query
+   (`AnswerConfirmation`, hung off a new `AnswerFooter` slot on the thread so the answer renderer did not
+   have to be forked to add a row beneath it). Nothing new is stored and there is no second write path: it
+   posts to `POST /api/v1/powerai/questions/confirm`, the endpoint already behind `confirm_question`, so a
+   click and a tool call land the same row.
+
+   **What the query being judged is.** The `sql`-tagged fenced blocks of the answer itself, which is exactly
+   what the person read before deciding, and which the assistant is already instructed to write every query
+   in (`AssistantInstructions`). An untagged fence is deliberately ignored: it is as likely to be YAML or a
+   table of results, and storing one of those as a confirmed example would poison the store with something
+   no future question should ever be answered with. An answer carrying several queries gets a numbered
+   picker; "Not quite" opens the chosen one in a SQL editor and stores the CORRECTED text, never the
+   original proposal.
+
+   **What it deliberately does not send.** No `objectKeys`, because no lineage pass produced them on this
+   path and inventing identities would put unverified keys in the catalog, and no `confidence`, because the
+   endpoint defines that as the retrieval score a proposal was built from, never anyone's impression that a
+   query looks right. The datasource is optional and is picked from `GET /api/v1/datasources`, so a stored
+   example can only ever name a connection the reviewed git estate already declares.
+
+   **It appears only where it would work.** `GET /api/v1/chat/capabilities` gained
+   `questionConfirmation`, read from the same `ControlPlane:PowerAI:Retrieval:Enabled` option the confirm
+   endpoint answers 501 on, so a deployment without the example store shows no button rather than one whose
+   only possible answer is an error.
 7. **Broader version coverage**: extraction is proven against one report from one PowerBI version.
    Widening this is a matter of running the tool against more real files as they turn up and fixing
    what the schema probes catch, not a design change.
