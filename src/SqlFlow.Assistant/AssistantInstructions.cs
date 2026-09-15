@@ -103,27 +103,31 @@ public static class AssistantInstructions
 
             Business users ask in business terms; map their question to the tool that answers it in one
             call before composing chains by hand:
-            - A typed BUSINESS QUESTION in plain English ("what is our revenue by region", "how many
-              customers churned", "what drives our turnover") is NOT a name to search the schema for,
-              even when it contains words that also happen to be table or column names. Call
-              find_similar_questions FIRST, before search_all, describe_object, or any schema lookup: it
-              matches the question against ones this estate's dashboards or a person already answered,
-              expanding wording so a paraphrase still finds them, and returns the SQL that already
-              answers it with a `score`/`trusted` flag as the only reliable confidence signal, never your
-              own sense that a query looks right. A TRUSTED match needs no further checking: do not call
-              describe_object, search_all, or any schema lookup to confirm its table is real before
-              handing it back, since that verification is what "trusted" already means, and re-deriving
-              it defeats the reason this store exists. Only an untrusted match, or no match at all, is a
-              lead rather than an answer; only then fall through to search_all/describe_object to compose
-              or verify something yourself. Once the person
-              confirms an answer (accepts it, corrects it, or says it is wrong), call confirm_question so
-              the next similar question finds it too; call it only on an answer a person has actually
-              judged. A matched query is still SQL you hand back in a code block for the person to run
-              themselves, exactly like any other query in this chat: you cannot execute it either way.
-              When the person tells you an answer was wrong, call confirm_question with outcome "rejected"
-              so the decision is recorded as having happened, but be clear that nothing about the wrong
-              query itself is kept: only correct, verified answers become precedent a later question can
-              find.
+            - The command "!cwd <question>" (e.g. "!cwd what is our revenue by region", "!cwd how many
+              customers churned", "!cwd what drives our turnover") is the ONLY trigger for the business-
+              question path. This exact prefix, not phrasing, is what activates it: never guess from a
+              message's wording alone that it is a business question, even one that reads exactly like
+              "what is our revenue by region" or names things that sound like table or column names. A
+              message without the "!cwd" prefix is never routed here, no matter how business-like it
+              sounds; treat it as a normal question and search the schema as usual. When the prefix IS
+              present, strip it and call find_similar_questions FIRST, before search_all, describe_object,
+              or any schema lookup, with the rest of the message as the question: it matches the question
+              against ones this estate's dashboards or a person already answered, expanding wording so a
+              paraphrase still finds them, and returns the SQL that already answers it with a
+              `score`/`trusted` flag as the only reliable confidence signal, never your own sense that a
+              query looks right. A TRUSTED match needs no further checking: do not call describe_object,
+              search_all, or any schema lookup to confirm its table is real before handing it back, since
+              that verification is what "trusted" already means, and re-deriving it defeats the reason
+              this store exists. Only an untrusted match, or no match at all, is a lead rather than an
+              answer; only then fall through to search_all/describe_object to compose or verify something
+              yourself. Once the person confirms an answer (accepts it, corrects it, or says it is wrong),
+              call confirm_question so the next similar question finds it too; call it only on an answer a
+              person has actually judged. A matched query is still SQL you hand back in a code block for
+              the person to run themselves, exactly like any other query in this chat: you cannot execute
+              it either way. When the person tells you an answer was wrong, call confirm_question with
+              outcome "rejected" so the decision is recorded as having happened, but be clear that nothing
+              about the wrong query itself is kept: only correct, verified answers become precedent a
+              later question can find.
             - "when does <table> update", "how is it loaded", "did the last load work":
               describe_object_refresh(key) returns the writing flows, each one's latest run, and the
               schedules that fire them with the next fire time. get_schedule_plan(id) expands one

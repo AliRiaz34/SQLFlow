@@ -291,8 +291,9 @@ pub struct KeyInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SimilarQuestionsInput {
-    /// The business question, in the user's own words. Pass it as they typed it: the match is on meaning,
-    /// so rewording it into schema terms first throws away the signal this searches on.
+    /// The business question, in the user's own words, with the `!cwd` command prefix stripped. Pass the
+    /// rest exactly as they typed it: the match is on meaning, so rewording it into schema terms first
+    /// throws away the signal this searches on.
     pub question: String,
     /// How many matches to return (default 3, max 20).
     pub top_k: Option<u32>,
@@ -1711,10 +1712,11 @@ and fix every finding first."
     #[tool(
         description = "START HERE for locating a NAMED IDENTIFIER in the estate - a table, column, flow, or \
             file whose name (or a fragment of it) you already have, as in \"where does CustomerId live\" or \
-            \"where is Sales computed\". NOT for a typed business question in plain English (\"what is our \
-            revenue by region\", \"how many customers churned\") - that is find_similar_questions's job, \
-            called BEFORE this tool, since a question like that names no single identifier this can search \
-            for. One term fanned across every catalog surface at once - warehouse \
+            \"where is Sales computed\". NOT for a message given as the `!cwd <question>` command (e.g. \
+            \"!cwd what is our revenue by region\", \"!cwd how many customers churned\") - that exact prefix \
+            routes to find_similar_questions instead, called BEFORE this tool, since a question like that \
+            names no single identifier this can search for. A question phrased the same way but WITHOUT the \
+            `!cwd` prefix still belongs here, not there. One term fanned across every catalog surface at once - warehouse \
             objects, their columns, their code, processed files, flow YAML, and the columns flows produce - \
             returning each surface's FULL match count with a preview of its top hits, plus a nextSteps plan \
             naming the tool that pages each surface and the tool that turns a hit into an answer. A term \
@@ -1919,10 +1921,14 @@ and fix every finding first."
     }
 
     #[tool(
-        description = "CALL THIS FIRST, before search_all or any schema-lookup tool, for ANY typed business \
-            question in plain English - \"what is our revenue by region\", \"how many customers churned\", \
-            \"what drives our turnover\" - even one that names things that sound like table or column names. \
-            A full question is not an identifier to search_all's index; it is what THIS tool matches. Finds \
+        description = "ONLY call this when the user's message is the explicit command `!cwd <question>` - \
+            e.g. \"!cwd what is our revenue by region\", \"!cwd how many customers churned\". The `!cwd` \
+            prefix is what marks a message as a typed BUSINESS QUESTION bound for this tool; strip it and \
+            pass the remainder as `question`. Do NOT guess from phrasing alone that a message unprefixed by \
+            `!cwd` is a business question, even one that reads like \"what is our revenue by region\" or \
+            names things that sound like table or column names: without the `!cwd` prefix, route it through \
+            search_all/describe_object like any other question instead. A full question is not an identifier \
+            to search_all's index; it is what THIS tool matches, once `!cwd` has activated it. Finds \
             the business questions this estate's dashboards or a person ALREADY answered that mean the same \
             thing as the one just typed. The question is first expanded into related business \
             vocabulary, so wording need not match (\"what drives our turnover\" can find \"revenue by product \
@@ -3151,19 +3157,23 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   row that came back without links. A result about something the CALL named rather than about its rows (a
   flow's columns, an object's columns, a repo's edges, one file's provenance, the insights boards, summary)
   carries the subject's links on the envelope beside `items`, so those answers have a destination too.
-- A typed BUSINESS QUESTION in plain English (\"What is our revenue by region?\", \"how many customers
-  churned last month\"): call find_similar_questions FIRST, before search_all or describe_object. It
-  matches the question against ones this estate's dashboards and confirmed answers already answer,
-  expanding the wording so a paraphrase still finds them, and returns the SQL that already answers it
-  plus a trustworthy score (`trusted`) rather than an LLM's own confidence. Adapting a close match beats
-  composing new SQL from scratch. A `trusted` match carrying both `exampleId` and `sourceRef` can be run
-  right away with auto_run_trusted_match, no prepare_query/run_query approval needed for it. Only fall
-  through to search_all/describe_object when
-  nothing matches, or every match is untrusted and you need to understand the schema to write a fresh
-  query. describe_subscriber_report then shows which report VISUAL a matched question came from, with the
+- The command `!cwd <question>` (e.g. \"!cwd what is our revenue by region?\", \"!cwd how many customers
+  churned last month\"): this exact prefix, not phrasing, is what activates the business-question path.
+  Strip `!cwd` and call find_similar_questions FIRST, before search_all or describe_object, with the
+  remainder as the question. It matches the question against ones this estate's dashboards and confirmed
+  answers already answer, expanding the wording so a paraphrase still finds them, and returns the SQL
+  that already answers it plus a trustworthy score (`trusted`) rather than an LLM's own confidence.
+  Adapting a close match beats composing new SQL from scratch. A `trusted` match carrying both
+  `exampleId` and `sourceRef` can be run right away with auto_run_trusted_match, no prepare_query/
+  run_query approval needed for it. Only fall through to search_all/describe_object when nothing
+  matches, or every match is untrusted and you need to understand the schema to write a fresh query.
+  describe_subscriber_report then shows which report VISUAL a matched question came from, with the
   field ROLE (axis vs. value) a flattened column list cannot express. Once a person has judged an answer
   right, wrong, or in need of a fix, call confirm_question so the next similar question finds it too; call
-  it only on an answer a human actually judged, never on your own sense that a query looks correct.
+  it only on an answer a human actually judged, never on your own sense that a query looks correct. A
+  message with NO `!cwd` prefix is never routed to find_similar_questions, no matter how much it reads
+  like a business question in plain English: treat it as a normal schema/lookup question and work it
+  through search_all, describe_object, and the rest of this list instead.
 - \"Where does <name> live / where is <X> computed / what is <X>?\": call search_all FIRST. It fans one term
   across all seven surfaces at once and answers with each surface's full count plus a nextSteps plan naming
   the tool that pages it and the tool that turns a hit into an answer; work that plan rather than guessing a
