@@ -389,6 +389,8 @@ v1.MapAuthEndpoints(options);
 
 // The authenticated read surface: repos/pipelines, runs, lineage, cross-repo search, and schedules.
 v1.MapGroup(string.Empty).RequireAuthorization("read")
+    // On the assistant surface, withhold any text naming a column outside the semantic layer (AssistantScope).
+    .AddEndpointFilter<RouteGroupBuilder, AssistantRedactionFilter>()
     .MapCatalogEndpoints()
     .MapRepoTreeEndpoints()
     .MapGitHistoryEndpoints()
@@ -396,6 +398,8 @@ v1.MapGroup(string.Empty).RequireAuthorization("read")
     .MapActivityEndpoints()
     .MapLineageEndpoints()
     .MapSearchEndpoints()
+    // The semantic layer: the allow-listed schema, with its business context, as an assistant reads it.
+    .MapSemanticLayerEndpoints()
     .MapScheduleReadEndpoints()
     .MapNodeEndpoints()
     .MapDatasourceReadEndpoints()
@@ -415,6 +419,7 @@ v1.MapGroup(string.Empty).RequireAuthorization("read")
 // The operate surface: triggering/cancelling a run and managing schedules are privileged operations, so they live
 // under the "operate" scope rather than the read group.
 v1.MapGroup(string.Empty).RequireAuthorization("operate")
+    .AddEndpointFilter<RouteGroupBuilder, AssistantRedactionFilter>()
     .MapCatalogWriteEndpoints()
     .MapRunTriggerEndpoints()
     .MapDatasourceComputeEndpoints()
@@ -435,7 +440,8 @@ v1.MapGroup(string.Empty).RequireAuthorization("author")
 // token that requested it).
 v1.MapGroup(string.Empty).RequireAuthorization("admin")
     .MapUserEndpoints()
-    .MapColumnPolicyEndpoints();
+    .MapColumnPolicyEndpoints()
+    .MapSemanticLayerAdminEndpoints();
 
 app.Run();
 

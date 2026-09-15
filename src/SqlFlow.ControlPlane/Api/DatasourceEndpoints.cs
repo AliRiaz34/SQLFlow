@@ -285,7 +285,7 @@ public static class DatasourceEndpoints
 
     private static async Task<Results<Accepted<ComputeTaskAccepted>, ProblemHttpResult>> TriggerTaskAsync(
         ComputeTaskRequest request, CatalogDbContext db, IRunDispatcher dispatcher,
-        IOptions<ControlPlaneOptions> options, ClaimsPrincipal user, CancellationToken ct)
+        IOptions<ControlPlaneOptions> options, ClaimsPrincipal user, HttpContext http, CancellationToken ct)
     {
         if (request is null)
         {
@@ -399,6 +399,21 @@ public static class DatasourceEndpoints
         catch (SqlFlowException ex)
         {
             return Problem(ex.Message, StatusCodes.Status400BadRequest, "Invalid compute task");
+        }
+
+        // The assistant surface reads only the semantic layer: a task it enqueues must read nothing an ad-hoc query
+        // from it could not, so it passes the same read-only and column allow-list guards. A person's own request is
+        // not narrowed here, matching every other surface where the header is the only thing that narrows.
+        if (AssistantScope.IsAssistant(http))
+        {
+            try
+            {
+                await ColumnPolicyGuard.EnsureTaskAllowedAsync(db, payload, ct).ConfigureAwait(false);
+            }
+            catch (SqlFlowException ex)
+            {
+                return Problem(ex.Message, StatusCodes.Status400BadRequest, "Refused by the column allow-list");
+            }
         }
 
         // The reference gate: a ${...} reference must already be declared by the estate (some pipeline reads or

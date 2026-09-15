@@ -18,7 +18,10 @@ import type {
   GenerateNotificationDigestRequest, NotificationDelivery, NotificationDigest, NotificationDigestSummary,
   NotificationQueuedDelivery, NotificationSubscription, SendNotificationDigestRequest,
   ObjectHit, ObjectRepo, PagedResult,
-  ColumnPolicyState, RestrictedColumn, SetColumnPolicyRequest,
+  ColumnPolicyState, RestrictedColumn, SetColumnPolicyRequest, SetObjectColumnPoliciesRequest,
+  SemanticAnnotation, SemanticCuratedJoin, SemanticInstructions, SemanticMeasureAdmin, SemanticObjectAdmin,
+  SemanticObjectCoverage, SemanticOverview, SemanticSchemaCoverage, SetSemanticAnnotationRequest,
+  UpsertSemanticJoinRequest, UpsertSemanticMeasureRequest,
   ConfirmQuestionRequest, ConfirmedQuestion,
   PrepareQueryRequest, PreparedQuery,
   FlowParameters,
@@ -568,17 +571,61 @@ export const userApi = {
   roles: () => get<Role[]>("/api/v1/roles"),
 };
 
-// ---- PowerAI column policies (admin-scope: which columns the assistant may never see) ------------------------------
+// ---- PowerAI column policies (admin-scope: which columns are in the semantic layer at all) ------------------------
 
 export const columnPolicyApi = {
   /** Every column currently NOT allowed (explicitly denied, or never reviewed), across the whole catalog, for
-   * the overview list. */
+   * the blocked-columns audit. */
   list: (query: PageQuery = {}) =>
     get<PagedResult<RestrictedColumn>>("/api/v1/powerai/column-policies", query as QueryParams),
-  /** Every column of one object with its current policy state, for the per-table toggle list. */
+  /** Every column of one object with its current policy state and annotations. */
   forObject: (objectKey: string) =>
     get<ColumnPolicyState[]>(`/api/v1/powerai/column-policies/objects/${encodeURIComponent(objectKey)}`),
+  /** A full upsert of one column's allow flag, reason, description, and synonyms. */
   set: (request: SetColumnPolicyRequest) => put<ColumnPolicyState>("/api/v1/powerai/column-policies", request),
+  /** Allows or denies every column of one object at once. */
+  setObject: (request: SetObjectColumnPoliciesRequest) =>
+    put<ColumnPolicyState[]>("/api/v1/powerai/column-policies/objects", request),
+};
+
+// ---- Semantic layer (the allow-listed schema and its business context) ---------------------------------------------
+
+export interface SemanticObjectQuery extends PageQuery {
+  database?: string;
+  schema?: string;
+  name?: string;
+  inLayer?: boolean;
+}
+
+export const semanticLayerApi = {
+  /** The layer as an assistant reads it (read scope): instructions, where its tables live, servable measures. */
+  overview: () => get<SemanticOverview>("/api/v1/semantic-layer"),
+  /** Coverage per (database, schema), for the editor's tree skeleton. */
+  schemas: () => get<SemanticSchemaCoverage[]>("/api/v1/powerai/semantic-layer/schemas"),
+  /** Objects with catalogued columns and their coverage, filterable, paged. */
+  objects: ({ inLayer, ...query }: SemanticObjectQuery = {}) =>
+    get<PagedResult<SemanticObjectCoverage>>("/api/v1/powerai/semantic-layer/objects", {
+      ...query,
+      inLayer: inLayer === true ? "true" : undefined,
+    } as QueryParams),
+  /** Everything the editor shows for one object. */
+  object: (key: string) => get<SemanticObjectAdmin>("/api/v1/powerai/semantic-layer/objects/detail", { key }),
+  setAnnotation: (request: SetSemanticAnnotationRequest) =>
+    put<SemanticAnnotation>("/api/v1/powerai/semantic-layer/objects/annotation", request),
+  instructions: () => get<SemanticInstructions>("/api/v1/powerai/semantic-layer/instructions"),
+  setInstructions: (instructions: string | null) =>
+    put<SemanticInstructions>("/api/v1/powerai/semantic-layer/instructions", { instructions }),
+  measures: () => get<SemanticMeasureAdmin[]>("/api/v1/powerai/semantic-layer/measures"),
+  createMeasure: (request: UpsertSemanticMeasureRequest) =>
+    post<SemanticMeasureAdmin>("/api/v1/powerai/semantic-layer/measures", request),
+  updateMeasure: (id: number, request: UpsertSemanticMeasureRequest) =>
+    put<SemanticMeasureAdmin>(`/api/v1/powerai/semantic-layer/measures/${id}`, request),
+  deleteMeasure: (id: number) => del<void>(`/api/v1/powerai/semantic-layer/measures/${id}`),
+  createRelationship: (request: UpsertSemanticJoinRequest) =>
+    post<SemanticCuratedJoin>("/api/v1/powerai/semantic-layer/relationships", request),
+  updateRelationship: (id: number, request: UpsertSemanticJoinRequest) =>
+    put<SemanticCuratedJoin>(`/api/v1/powerai/semantic-layer/relationships/${id}`, request),
+  deleteRelationship: (id: number) => del<void>(`/api/v1/powerai/semantic-layer/relationships/${id}`),
 };
 
 // ---- PowerAI confirmed examples (the learning loop's write half) ---------------------------------------------------

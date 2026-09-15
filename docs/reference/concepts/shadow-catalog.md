@@ -77,6 +77,19 @@ outlives a column the sync has not (yet) reported - which also means a column a 
 first time starts out with no row, and so starts out denied until an admin reviews it. It is written only
 through the admin-scope `/api/v1/powerai/column-policies` endpoints, never by a sync pass. See
 [Data operations](data-operations.md#column-policy-what-the-assistant-may-read-at-all) for how it is enforced.
+A policy row also carries the column's semantic annotations (`Description`, `Synonyms`), since the allow-list is
+the semantic layer's membership.
+
+## Semantic layer tables
+
+The [semantic layer](semantic-layer.md)'s business context lives in four admin-authored tables, all keyed by soft
+link like `ColumnPolicy` and all written only through the admin-scope `/api/v1/powerai/semantic-layer` endpoints:
+`SemanticObject` (`CatalogSemanticObject`: one row per annotated object, unique on `ObjectKey`, holding its business
+name, description, synonyms, and curated key), `SemanticRelationship` (`CatalogSemanticRelationship`: a declared
+join, unique on `IdentityHash`, the SHA-256 of both endpoints and their column lists), `SemanticMeasure`
+(`CatalogSemanticMeasure`: a named expression anchored to one object, unique on `Name`), and
+`SemanticLayerSettings` (`CatalogSemanticLayerSettings`: a single row, `Id` 1, holding the layer-wide instructions).
+None of them records whether an object is in the layer: that is decided by `ColumnPolicy` alone.
 
 ## Pipeline sync: hashing, redaction, soft deactivation
 

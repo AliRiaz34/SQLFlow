@@ -106,12 +106,43 @@ public sealed class AssistantToolAllowlistTests
     [Fact]
     public void TheQuerySurfaceIsReachable_BecauseThatIsThePointOfBuildingIt()
     {
-        // Pinned by name: these are the tools whose absence produced "I can only see metadata, not the rows".
+        // Pinned by name: these are the tools whose absence produced "I can only see metadata, not the rows". The
+        // columns, key, and joins a query is composed from now come from the semantic layer.
         var allowed = new McpOptions().AllowedTools;
         Assert.Contains("prepare_query", allowed);
         Assert.Contains("run_query", allowed);
-        Assert.Contains("get_table_key", allowed);
-        Assert.Contains("get_table_joins", allowed);
+        Assert.Contains("search_semantic_layer", allowed);
+        Assert.Contains("describe_semantic_table", allowed);
+    }
+
+    /// <summary>The readers that see every catalogued column regardless of the column allow-list.</summary>
+    private static readonly string[] RawSchemaTools =
+    [
+        "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
+        "describe_object", "search_all", "search_objects", "search_columns", "search_definitions",
+        "search_flow_columns", "pipeline_columns", "get_table_key", "get_table_joins", "detect_unique_key",
+    ];
+
+    [Fact]
+    public void TheChatSurfacesReadTheSchemaOnlyThroughTheSemanticLayer()
+    {
+        // The allow-listed semantic layer is the only schema an assistant is given. A raw reader creeping back onto
+        // either surface would hand the model every column the allow-list withholds.
+        foreach (var surface in new[] { McpOptions.GuiDefaultTools, McpOptions.SlackDefaultTools })
+        {
+            foreach (var raw in RawSchemaTools)
+            {
+                Assert.DoesNotContain(raw, surface);
+            }
+
+            Assert.Contains("get_semantic_layer", surface);
+            Assert.Contains("describe_semantic_table", surface);
+        }
+
+        foreach (var raw in RawSchemaTools)
+        {
+            Assert.Contains(raw, McpOptions.ExcludedTools);
+        }
     }
 
     [Fact]
@@ -139,12 +170,12 @@ public sealed class AssistantToolAllowlistTests
     }
 
     [Fact]
-    public void SlackGetsTheJoinLookup_AndNothingThatReachesADatasource()
+    public void SlackGetsTheSemanticLayer_AndNothingThatReachesADatasource()
     {
         var slack = McpOptions.SlackDefaultTools;
 
-        // The one addition Slack gets: answering "how do I join these tables" is a metadata question.
-        Assert.Contains("get_table_joins", slack);
+        // Answering "how do I join these tables" is a metadata question, answered from the semantic layer.
+        Assert.Contains("describe_semantic_table", slack);
 
         // Everything that reaches a datasource stays off, because the two-step confirmation the query surface
         // relies on is a weak guarantee in a room where the approver need not be the asker.

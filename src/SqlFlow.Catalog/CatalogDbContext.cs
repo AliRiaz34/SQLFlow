@@ -69,6 +69,14 @@ public sealed class CatalogDbContext : DbContext
 
     public DbSet<CatalogColumnPolicy> ColumnPolicies => Set<CatalogColumnPolicy>();
 
+    public DbSet<CatalogSemanticObject> SemanticObjects => Set<CatalogSemanticObject>();
+
+    public DbSet<CatalogSemanticRelationship> SemanticRelationships => Set<CatalogSemanticRelationship>();
+
+    public DbSet<CatalogSemanticMeasure> SemanticMeasures => Set<CatalogSemanticMeasure>();
+
+    public DbSet<CatalogSemanticLayerSettings> SemanticLayerSettings => Set<CatalogSemanticLayerSettings>();
+
     public DbSet<CatalogPipelineColumn> PipelineColumns => Set<CatalogPipelineColumn>();
 
     public DbSet<CatalogSchedule> Schedules => Set<CatalogSchedule>();
@@ -517,10 +525,66 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(c => c.ObjectKey).HasMaxLength(900).IsRequired();
             entity.Property(c => c.ColumnName).HasMaxLength(512).IsRequired();
             entity.Property(c => c.Reason).HasMaxLength(512);
+            entity.Property(c => c.Description).HasMaxLength(2000);
+            entity.Property(c => c.Synonyms).HasMaxLength(1000);
             entity.Property(c => c.UpdatedBy).HasMaxLength(256);
             // One policy row per (object, column); the enforcement lookups filter by ObjectKey, so it is the
             // leftmost prefix.
             entity.HasIndex(c => new { c.ObjectKey, c.ColumnName }).IsUnique();
+        });
+
+        modelBuilder.Entity<CatalogSemanticObject>(entity =>
+        {
+            entity.ToTable("SemanticObject");
+            entity.HasKey(o => o.Id);
+            entity.Property(o => o.ObjectKey).HasMaxLength(900).IsRequired();
+            entity.Property(o => o.BusinessName).HasMaxLength(200);
+            entity.Property(o => o.Description).HasMaxLength(4000);
+            entity.Property(o => o.Synonyms).HasMaxLength(1000);
+            entity.Property(o => o.KeyColumns).HasMaxLength(1024);
+            entity.Property(o => o.UpdatedBy).HasMaxLength(256);
+            // At most one annotation per object.
+            entity.HasIndex(o => o.ObjectKey).IsUnique();
+        });
+
+        modelBuilder.Entity<CatalogSemanticRelationship>(entity =>
+        {
+            entity.ToTable("SemanticRelationship");
+            entity.HasKey(r => r.Id);
+            entity.Property(r => r.FromObjectKey).HasMaxLength(900).IsRequired();
+            entity.Property(r => r.FromColumns).HasMaxLength(1024).IsRequired();
+            entity.Property(r => r.ToObjectKey).HasMaxLength(900).IsRequired();
+            entity.Property(r => r.ToColumns).HasMaxLength(1024).IsRequired();
+            entity.Property(r => r.JoinType).HasMaxLength(16).IsRequired();
+            entity.Property(r => r.Description).HasMaxLength(1000);
+            entity.Property(r => r.IdentityHash).HasMaxLength(64).IsRequired();
+            entity.Property(r => r.UpdatedBy).HasMaxLength(256);
+            entity.HasIndex(r => r.IdentityHash).IsUnique();
+            // An object's declared joins are read in either direction.
+            entity.HasIndex(r => r.FromObjectKey);
+            entity.HasIndex(r => r.ToObjectKey);
+        });
+
+        modelBuilder.Entity<CatalogSemanticMeasure>(entity =>
+        {
+            entity.ToTable("SemanticMeasure");
+            entity.HasKey(m => m.Id);
+            entity.Property(m => m.Name).HasMaxLength(128).IsRequired();
+            entity.Property(m => m.ObjectKey).HasMaxLength(900).IsRequired();
+            entity.Property(m => m.Expression).HasMaxLength(4000).IsRequired();
+            entity.Property(m => m.Description).HasMaxLength(1000);
+            entity.Property(m => m.UpdatedBy).HasMaxLength(256);
+            entity.HasIndex(m => m.Name).IsUnique();
+            entity.HasIndex(m => m.ObjectKey);
+        });
+
+        modelBuilder.Entity<CatalogSemanticLayerSettings>(entity =>
+        {
+            entity.ToTable("SemanticLayerSettings");
+            entity.HasKey(s => s.Id);
+            // The singleton's id is fixed by the application, never generated.
+            entity.Property(s => s.Id).ValueGeneratedNever();
+            entity.Property(s => s.UpdatedBy).HasMaxLength(256);
         });
 
         modelBuilder.Entity<CatalogPipelineColumn>(entity =>

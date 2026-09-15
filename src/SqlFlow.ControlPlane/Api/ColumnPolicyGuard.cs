@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 using SqlFlow.Catalog;
 using SqlFlow.Core;
+using SqlFlow.Core.Comparison;
+using SqlFlow.Core.Compute;
 using SqlFlow.SqlServer.Query;
 
 namespace SqlFlow.ControlPlane.Api;
@@ -136,6 +138,82 @@ public static class ColumnPolicyGuard
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// The SELECT a data-operations task run by the assistant surface would read, so the task passes the same
+    /// read-only and allow-list checks as an ad-hoc query. Throws <see cref="SqlFlowException"/> for a task the
+    /// assistant may not run at all:
+    /// <list type="bullet">
+    /// <item>duplicateKeys must name its key columns: left empty it reads whatever key the table declares, which
+    /// can be a column outside the semantic layer, and asks back with every candidate column's name.</item>
+    /// <item>compareBaseline in inventory mode lists every object of a schema, tables outside the layer included.</item>
+    /// <item>compareBaseline in schema mode reports every column, so it reads like <c>SELECT *</c>.</item>
+    /// <item>compareBaseline in data mode reads its key expressions, its compare columns (every column when none are
+    /// named, hence <c>*</c>), and its filter.</item>
+    /// <item>Every other operation is refused: no assistant tool enqueues one.</item>
+    /// </list>
+    /// </summary>
+    internal static string ComposeTaskSelect(ComputeTaskPayload payload)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        var target = string.IsNullOrWhiteSpace(payload.Schema) || string.IsNullOrWhiteSpace(payload.ObjectName)
+            ? null
+            : $"{SemanticLayer.QuoteIdentifier(payload.Schema.Trim())}.{SemanticLayer.QuoteIdentifier(payload.ObjectName.Trim())}";
+
+        switch (payload.Operation)
+        {
+            case ComputeOperations.DuplicateKeys when target is not null:
+                if (payload.Columns is not { Count: > 0 } keyColumns)
+                {
+                    throw new SqlFlowException(
+                        "Name the key columns: the assistant's duplicate-key check must use the allowed key " +
+                        "describe_semantic_table reports, since the key the table declares could be a column outside " +
+                        "the semantic layer.");
+                }
+
+                return $"SELECT {string.Join(", ", keyColumns.Select(c => SemanticLayer.QuoteIdentifier(c.Trim())))} FROM {target}";
+
+            case ComputeOperations.CompareBaseline when payload.CompareMode is BaselineCompareMode.Inventory:
+                throw new SqlFlowException(
+                    "An inventory comparison lists every object of a schema, including tables outside the semantic " +
+                    "layer, so the assistant cannot run one. Compare one semantic layer table in schema or data mode.");
+
+            case ComputeOperations.CompareBaseline when payload.CompareMode is BaselineCompareMode.Schema && target is not null:
+                return $"SELECT * FROM {target}";
+
+            case ComputeOperations.CompareBaseline when payload.CompareMode is BaselineCompareMode.Data && target is not null:
+            {
+                var selected = (payload.KeyExpressions ?? [])
+                    .Concat(payload.CompareColumns is { Count: > 0 } compared
+                        ? compared.Select(c => SemanticLayer.QuoteIdentifier(c.Trim()))
+                        : ["*"])
+                    .ToList();
+                var sql = $"SELECT {string.Join(", ", selected)} FROM {target}";
+                return string.IsNullOrWhiteSpace(payload.Where) ? sql : $"{sql} WHERE {payload.Where}";
+            }
+
+            default:
+                throw new SqlFlowException(
+                    $"The '{payload.Operation}' task is not available to the assistant with these arguments: it runs " +
+                    "duplicateKeys and compareBaseline (schema or data mode) over one semantic layer table only.");
+        }
+    }
+
+    /// <summary>Throws <see cref="SqlFlowException"/> unless the task the assistant surface asked for reads only
+    /// allow-listed columns of catalogued objects (see <see cref="ComposeTaskSelect"/>).</summary>
+    internal static async Task EnsureTaskAllowedAsync(CatalogDbContext db, ComputeTaskPayload payload, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        var validated = ReadOnlyQueryGuard.Validate(ComposeTaskSelect(payload));
+        if (ParseSingleSelect(validated) is null)
+        {
+            // EnsureAllowedAsync passes a statement it cannot parse as one SELECT, trusting ReadOnlyQueryGuard to have
+            // refused it; a composed task statement gets no such benefit of the doubt.
+            throw new SqlFlowException("The task's columns and filter could not be verified against the column allow-list.");
+        }
+
+        await EnsureAllowedAsync(db, validated, ct).ConfigureAwait(false);
     }
 
     /// <summary>Parses <paramref name="sql"/> as exactly one SELECT, or null when it is anything else. Shared with

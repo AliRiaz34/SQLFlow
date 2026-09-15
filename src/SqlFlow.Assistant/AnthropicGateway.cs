@@ -207,7 +207,7 @@ public sealed class AnthropicGateway : IAssistantGateway, IDisposable
                 new BetaRequestMcpServerUrlDefinition
                 {
                     Name = _settings.Mcp.ServerLabel,
-                    Url = _settings.Mcp.ServerUrl,
+                    Url = _settings.Mcp.AssistantServerUri.AbsoluteUri,
                     // Sent by the connector as "Authorization: Bearer <token>"; the MCP server
                     // forwards it verbatim to the control plane, which enforces the token's scopes.
                     AuthorizationToken = mcpBearer,

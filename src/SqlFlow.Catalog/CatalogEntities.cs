@@ -1317,8 +1317,150 @@ public class CatalogColumnPolicy
     /// "PII" or "compensation data"). Optional context, not enforced.</summary>
     public string? Reason { get; set; }
 
+    /// <summary>The column's business meaning as the semantic layer states it (for example "Net amount in NOK,
+    /// excluding VAT"). Lives on the policy row because this row already IS the semantic layer's per-column
+    /// record: the allow-list decides whether the column is in the layer at all, and this says what it means
+    /// once it is. Only served to an assistant while <see cref="IsAllowed"/> is true.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>Other words a person uses for this column (for example "turnover" for <c>NetRevenue</c>),
+    /// newline-joined, matched by the semantic layer search so a business term finds the physical column.</summary>
+    public string? Synonyms { get; set; }
+
     /// <summary>The identity (subject claim) that last changed this row, for an audit trail on a restriction
     /// that gates what an AI assistant may read.</summary>
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>
+/// The semantic layer's table-level business context for one catalog object: what the table means, what people
+/// call it, and which columns identify one of its rows. Whether the object is IN the layer is not stored here: an
+/// object is in the layer exactly when at least one of its columns is allow-listed (<see cref="CatalogColumnPolicy"/>),
+/// so the allow-list stays the single decision about what an assistant may see, and this row only annotates it.
+/// Its own table, keyed by <see cref="ObjectKey"/> (a soft link, no FK), for the same reason the column policy is:
+/// <see cref="CatalogObject"/> rows are upserted by every sync and must not carry admin-authored state.
+/// </summary>
+public class CatalogSemanticObject
+{
+    public long Id { get; set; }
+
+    /// <summary>The annotated object's global key (server reference + database + schema + name).</summary>
+    public string ObjectKey { get; set; } = string.Empty;
+
+    /// <summary>The name a business reader knows the table by (for example "Bike trips"), or null.</summary>
+    public string? BusinessName { get; set; }
+
+    /// <summary>What one row of the table represents and anything a query author must know about it.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>Other words a person uses for the table, newline-joined, matched by the semantic layer search.</summary>
+    public string? Synonyms { get; set; }
+
+    /// <summary>The curated key: the columns identifying one row, comma-joined in key order. Outranks the key the
+    /// lineage sync interprets from the codebase (<see cref="CatalogObject.KeyColumns"/>) because a person stated
+    /// it. Every column must be allow-listed when it is saved, and it is only served while all of them still are.</summary>
+    public string? KeyColumns { get; set; }
+
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>
+/// An admin-declared join between two semantic layer tables: the relationship a person vouches for, served to an
+/// assistant beside the ones the lineage sync infers from the codebase (<see cref="CatalogObjectRelationship"/>).
+/// Declared because a warehouse often has joins nothing in its code exhibits yet, or several inferred joins of
+/// which only one is correct. Column lists are comma-joined and positionally paired. Every column must be
+/// allow-listed when the row is saved, and the row is only served while all of them still are.
+/// </summary>
+public class CatalogSemanticRelationship
+{
+    public long Id { get; set; }
+
+    /// <summary>The referencing (typically fact) side's global object key.</summary>
+    public string FromObjectKey { get; set; } = string.Empty;
+
+    public string FromColumns { get; set; } = string.Empty;
+
+    /// <summary>The referenced (typically dimension) side's global object key.</summary>
+    public string ToObjectKey { get; set; } = string.Empty;
+
+    public string ToColumns { get; set; } = string.Empty;
+
+    /// <summary>The join a query should use: <see cref="SemanticJoinType.Inner"/> or <see cref="SemanticJoinType.Left"/>.</summary>
+    public string JoinType { get; set; } = SemanticJoinType.Inner;
+
+    /// <summary>When to use this join, or what it means, in a sentence.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>The lowercase-hex SHA-256 of the normalized endpoints, carrying a UNIQUE index: the four identity
+    /// columns together are far wider than an index key may be, and declaring the same join twice is one fact.</summary>
+    public string IdentityHash { get; set; } = string.Empty;
+
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>The join types a <see cref="CatalogSemanticRelationship"/> may declare, named once so the writer, the
+/// validation, and the served payload cannot drift into spelling them differently.</summary>
+public static class SemanticJoinType
+{
+    public const string Inner = "Inner";
+
+    public const string Left = "Left";
+
+    /// <summary>The canonical spelling of <paramref name="value"/> when it names a known join type, else null.</summary>
+    public static string? Normalize(string? value)
+        => string.Equals(value?.Trim(), Inner, StringComparison.OrdinalIgnoreCase) ? Inner
+            : string.Equals(value?.Trim(), Left, StringComparison.OrdinalIgnoreCase) ? Left
+            : null;
+}
+
+/// <summary>
+/// A named, reusable SQL expression of the semantic layer (a measure such as <c>net_revenue</c> =
+/// <c>SUM(Amount) - SUM(RefundAmount)</c>), anchored to the one table whose columns it reads, so an assistant reuses
+/// the estate's own definition verbatim instead of re-deriving it. Anchoring is what makes it checkable: the
+/// expression is validated as <c>SELECT expression FROM anchor</c> through the same read-only and column allow-list
+/// guards an ad-hoc query passes, when saved and again before it is served.
+/// </summary>
+public class CatalogSemanticMeasure
+{
+    public long Id { get; set; }
+
+    /// <summary>The measure's identifier, unique across the layer (for example <c>net_revenue</c>).</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The object whose columns <see cref="Expression"/> reads.</summary>
+    public string ObjectKey { get; set; } = string.Empty;
+
+    /// <summary>The SQL expression, stored verbatim as the admin wrote it.</summary>
+    public string Expression { get; set; } = string.Empty;
+
+    public string? Description { get; set; }
+
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>
+/// The semantic layer's layer-wide settings: a single row (<see cref="SingletonId"/>) holding the general
+/// instructions an assistant reads before writing SQL against the layer (conventions, fiscal calendar, which
+/// status values count as active, and the like).
+/// </summary>
+public class CatalogSemanticLayerSettings
+{
+    /// <summary>The one row's id; the table never holds another.</summary>
+    public const int SingletonId = 1;
+
+    public int Id { get; set; }
+
+    /// <summary>Markdown instructions for an assistant, or null when none are written yet.</summary>
+    public string? Instructions { get; set; }
+
     public string? UpdatedBy { get; set; }
 
     public DateTime UpdatedUtc { get; set; }

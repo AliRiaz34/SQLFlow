@@ -22,8 +22,8 @@ import {
   Search,
   Server,
   Settings,
-  ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Users,
   Workflow,
   Wrench,
@@ -105,7 +105,7 @@ export const navGroups: NavGroup[] = [
     requiresScope: "admin",
     items: [
       { label: "Users", to: "/users", icon: Users, testId: "nav-users" },
-      { label: "Column policies", to: "/column-policies", icon: ShieldAlert, testId: "nav-column-policies" },
+      { label: "Semantic layer", to: "/semantic-layer", icon: Sparkles, testId: "nav-semantic-layer" },
     ],
   },
   {

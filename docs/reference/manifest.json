@@ -1317,6 +1317,49 @@
       ]
     },
     {
+      "id": "concept-semantic-layer",
+      "corpus": "reference",
+      "path": "concepts/semantic-layer.md",
+      "title": "Semantic layer: the allow-listed schema an assistant writes SQL against",
+      "type": "concept",
+      "summary": "The column allow-list as the AI assistant's only schema, with descriptions, synonyms, curated keys and joins, measures, examples, and instructions.",
+      "keywords": [
+        "semantic layer",
+        "semantic context",
+        "column policy",
+        "allow-list",
+        "whitelist",
+        "business glossary",
+        "synonyms",
+        "measures",
+        "curated relationships",
+        "text to sql",
+        "schema grounding",
+        "get_semantic_layer",
+        "search_semantic_layer",
+        "describe_semantic_table"
+      ],
+      "related": [
+        "concept-data-operations",
+        "concept-shadow-catalog"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.ControlPlane/Api/SemanticLayer.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyGuard.cs",
+        "src/SqlFlow.Catalog/CatalogEntities.cs",
+        "src/SqlFlow.Assistant/AssistantSettings.cs",
+        "src/SqlFlow.Assistant/AssistantInstructions.cs",
+        "tools/sqlflow-mcp/src/server.rs",
+        "gui/src/features/semantic-layer/SemanticLayerPage.tsx",
+        "src/SqlFlow.ControlPlane/Api/AssistantScope.cs",
+        "src/SqlFlow.ControlPlane/Api/DatasourceEndpoints.cs",
+        "tools/sqlflow-mcp/src/control_plane.rs"
+      ]
+    },
+    {
       "id": "concept-shadow-catalog",
       "corpus": "reference",
       "path": "concepts/shadow-catalog.md",
@@ -4003,6 +4046,37 @@
         "wiki-pattern-catalog"
       ],
       "sourceRefs": []
+    },
+    {
+      "id": "wiki-semantic-layer-is-the-allow-list",
+      "corpus": "wiki",
+      "path": "decisions/semantic-layer-is-the-allow-list.md",
+      "title": "The semantic layer is the column allow-list",
+      "type": "decision",
+      "summary": "Why the assistant's schema is one layer defined by the column allow-list, and why chat lost the raw schema tools instead of shared endpoints being filtered.",
+      "keywords": [
+        "semantic layer",
+        "column policy",
+        "allow-list",
+        "whitelist",
+        "schema grounding",
+        "named contexts",
+        "chat tool allowlist",
+        "no-tracking"
+      ],
+      "related": [],
+      "sourceRefs": [
+        "src/SqlFlow.ControlPlane/Api/SemanticLayer.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Program.cs",
+        "src/SqlFlow.Assistant/AssistantSettings.cs",
+        "tests/SqlFlow.ControlPlane.Tests/SemanticLayerApiTests.cs",
+        "src/SqlFlow.ControlPlane/Api/AssistantScope.cs",
+        "tools/sqlflow-mcp/src/control_plane.rs"
+      ]
     },
     {
       "id": "wiki-string-first-landing",

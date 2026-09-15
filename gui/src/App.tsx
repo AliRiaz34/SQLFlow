@@ -33,7 +33,7 @@ const SubscribersPage = lazyRoute("SubscribersPage", () => import("./features/su
 const LineageGraphPage = lazyRoute("LineageGraphPage", () => import("./features/lineage/LineageGraphPage"));
 const SearchPage = lazyRoute("SearchPage", () => import("./features/search/SearchPage"));
 const UsersPage = lazyRoute("UsersPage", () => import("./features/users/UsersPage"));
-const ColumnPoliciesPage = lazyRoute("ColumnPoliciesPage", () => import("./features/column-policies/ColumnPoliciesPage"));
+const SemanticLayerPage = lazyRoute("SemanticLayerPage", () => import("./features/semantic-layer/SemanticLayerPage"));
 const AccessTokensPage = lazyRoute("AccessTokensPage", () => import("./features/tokens/AccessTokensPage"));
 const NotificationsPage = lazyRoute("NotificationsPage", () => import("./features/notifications/NotificationsPage"));
 const MaintenancePage = lazyRoute("MaintenancePage", () => import("./features/maintenance/MaintenancePage"));
@@ -108,13 +108,15 @@ export default function App() {
             )}
           />
           <Route
-            path="/column-policies"
+            path="/semantic-layer"
             element={(
               <RequireScope scope="admin">
-                <ColumnPoliciesPage />
+                <SemanticLayerPage />
               </RequireScope>
             )}
           />
+          {/* The column policy page became the semantic layer editor; keep old links working. */}
+          <Route path="/column-policies" element={<Navigate to="/semantic-layer" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

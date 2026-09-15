@@ -193,3 +193,19 @@ from "the consumer can read them".
 Both POWERAI.md Section 10 and this page previously said the extractor half was proven; both are
 corrected rather than quietly amended, since the earlier claim is exactly the kind a later reader
 would otherwise rely on.
+
+## [2026-09-15] ingest | The semantic layer is the column allow-list
+
+Wrote [The semantic layer is the column allow-list](decisions/semantic-layer-is-the-allow-list.md) from the
+semantic layer implementation (`SemanticLayer.cs`, its read and admin endpoint files, the chat tool allowlist in
+`AssistantSettings.cs`) and the two design decisions the human made while it was built: the allow-list as the
+layer's only membership, and the chat assistants losing the raw schema tools rather than the shared endpoints
+being filtered. It also records the no-tracking update bug the new integration tests exposed in the column policy
+upsert. The surface itself is documented in the reference page `concept-semantic-layer`.
+
+## [2026-09-15] ingest | The assistant surface closes the text leaks
+
+Extended [The semantic layer is the column allow-list](decisions/semantic-layer-is-the-allow-list.md) with why the
+chat's operational tools and its two data-operations tasks are narrowed by an advisory `surface=assistant` marker
+(`AssistantScope.cs`, `control_plane.rs`) rather than removed, given a separate token, or redacted for everyone.
+The mechanism is documented in the reference page `concept-semantic-layer`.

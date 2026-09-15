@@ -438,7 +438,7 @@ public sealed class ResponsesApiGateway : IAssistantGateway, IDisposable
         {
             ["type"] = "mcp",
             ["server_label"] = _settings.Mcp.ServerLabel,
-            ["server_url"] = _settings.Mcp.ServerUrl,
+            ["server_url"] = _settings.Mcp.AssistantServerUri.AbsoluteUri,
             // Approval is off because there is no human in the loop to approve a tool call mid-run;
             // authority is bounded by the bearer's scopes and the tool allowlist instead.
             ["require_approval"] = "never",

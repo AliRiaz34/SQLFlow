@@ -92,6 +92,10 @@ public sealed class AssistantSettings
         }
 
         Require(Mcp.ServerUrl, "Mcp:ServerUrl (https://<sqlflow-mcp host>/mcp)");
+        if (!string.IsNullOrWhiteSpace(Mcp.ServerUrl) && !Uri.TryCreate(Mcp.ServerUrl, UriKind.Absolute, out _))
+        {
+            missing.Add($"{sectionPrefix}:Mcp:ServerUrl must be an absolute URL (was '{Mcp.ServerUrl}')");
+        }
 
         switch (Provider)
         {
@@ -134,6 +138,29 @@ public sealed class McpOptions
     /// <summary>The deployed SQLFlow MCP server's endpoint, e.g. https://sqlflow-mcp.internal.example/mcp.</summary>
     public string ServerUrl { get; set; } = "";
 
+    /// <summary>The query parameter marking an MCP session as the assistant surface. The MCP server reads it and
+    /// tags its control-plane calls, which then serve only the semantic layer (<c>AssistantScope</c> in the control
+    /// plane). Mirrored by <c>request_surface</c> in the MCP server's <c>server.rs</c>.</summary>
+    public const string AssistantSurfaceQuery = "surface=assistant";
+
+    /// <summary><see cref="ServerUrl"/> with <see cref="AssistantSurfaceQuery"/> added (once, keeping any existing
+    /// query): the address every assistant gateway gives its MCP connector, so no provider can reach the MCP server
+    /// without the assistant narrowing.</summary>
+    public Uri AssistantServerUri
+    {
+        get
+        {
+            var builder = new UriBuilder(ServerUrl);
+            var query = builder.Query.TrimStart('?');
+            if (!query.Split('&').Contains(AssistantSurfaceQuery, StringComparer.Ordinal))
+            {
+                builder.Query = query.Length == 0 ? AssistantSurfaceQuery : $"{query}&{AssistantSurfaceQuery}";
+            }
+
+            return builder.Uri;
+        }
+    }
+
     /// <summary>The MCP server label shared between the tool definition and its per-run resources.</summary>
     public string ServerLabel { get; set; } = "sqlflow";
 
@@ -163,14 +190,15 @@ public sealed class McpOptions
         "validate_flow", "list_flow_keys", "describe_flow_key",
         "check_connectivity", "get_control_plane_url",
         "list_repos", "get_repo", "list_pipelines", "list_flow_batches", "get_pipeline", "pipeline_definition",
-        "pipeline_file_stats", "pipeline_columns",
+        "pipeline_file_stats",
         "list_runs", "get_run", "run_statements", "run_assertions", "run_files", "run_health_metrics",
-        "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
-        "describe_object", "describe_object_refresh", "object_lineage", "list_file_sources", "file_provenance",
+        // The schema, as the semantic layer serves it: only allow-listed tables and columns, with their business
+        // context. These are the assistant's ONLY schema readers; the raw ones are in ExcludedTools.
+        "get_semantic_layer", "search_semantic_layer", "list_semantic_tables", "describe_semantic_table",
+        "describe_object_refresh", "object_lineage", "list_file_sources", "file_provenance",
         "lineage_edges", "lineage_waves", "lineage_dependencies",
         "list_subscribers", "describe_subscriber", "describe_subscriber_report", "find_similar_questions",
-        "search_all", "search_objects", "search_columns", "search_definitions", "search_flows",
-        "search_flow_columns", "search_files", "search_statements",
+        "search_flows", "search_files", "search_statements",
         "list_schedules", "get_schedule", "get_schedule_plan", "list_nodes", "list_repo_sources", "summary",
         "insights_flows", "insights_attention", "insights_recommendations", "insights_steps",
         "detect_stream_anomalies",
@@ -184,11 +212,9 @@ public sealed class McpOptions
     public static readonly IReadOnlyList<string> GuiDefaultTools =
     [
         .. SharedReadTools,
-        // The data model, one question per tool: what identifies a row, and how tables join. These are what an
-        // assistant composes correct SQL from, so leaving them out is what makes it guess or give up.
-        "get_table_key", "get_table_joins", "detect_unique_key",
         // The data-operations surface. Read-only, and behind ControlPlane:DataOps:Enabled, which is the switch
-        // that actually governs them.
+        // that actually governs them. What identifies a row and how tables join come from
+        // describe_semantic_table, which serves both restricted to allow-listed columns.
         "dataops_capabilities", "check_duplicate_keys", "compare_baseline",
         // Running a business question. prepare_query executes nothing, and run_query only redeems a single-use
         // token minted by a prepare whose exact SQL was shown to a person.
@@ -203,18 +229,17 @@ public sealed class McpOptions
     ];
 
     /// <summary>
-    /// Slack's surface: the shared read tools plus the JOIN lookup, and nothing that reaches a datasource.
+    /// Slack's surface: the shared read tools, and nothing that reaches a datasource.
     ///
     /// Slack is a SHARED, semi-public channel rather than a signed-in per-user session, so the trust model is
     /// different from the GUI's: a message is visible to a room, and the two-step confirmation the query
     /// surface relies on ("show the SQL, get agreement, then run") is a much weaker guarantee when the person
     /// who approves it need not be the person who asked. Answering "how do I join these tables" is a metadata
-    /// question with no such property, which is why it is the one addition Slack gets.
+    /// question with no such property, and describe_semantic_table (a shared read tool) already answers it.
     /// </summary>
     public static readonly IReadOnlyList<string> SlackDefaultTools =
     [
         .. SharedReadTools,
-        "get_table_joins",
     ];
 
     public List<string> AllowedTools { get; set; } = [.. GuiDefaultTools];
@@ -252,6 +277,13 @@ public sealed class McpOptions
         "scaffold_ingestion_flow",
         // Session and transport plumbing, inert or meaningless over HTTP with a forwarded bearer.
         "login", "logout", "check_auth_status", "set_access_token", "set_control_plane_url",
+        // The raw schema readers. Each sees every catalogued table and column (or, for detect_unique_key, profiles
+        // live rows) regardless of the column allow-list, so on the chat surfaces the semantic layer tools replace
+        // them: the allow-listed schema is the only schema an assistant is given. They stay available to other MCP
+        // clients and their data stays on the GUI's own Catalog pages.
+        "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
+        "describe_object", "search_all", "search_objects", "search_columns", "search_definitions",
+        "search_flow_columns", "pipeline_columns", "get_table_key", "get_table_joins", "detect_unique_key",
         // Git history and schema-diff readers reachable through the GUI, kept off the chat surface to bound
         // the tool count the model has to choose between.
         "database_schema_changes", "database_schema_history_databases", "database_object_ddl",

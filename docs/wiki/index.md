@@ -83,6 +83,9 @@ to narrow a search to one kind of page.
 - [A report's model entity becomes a warehouse object](decisions/powerbi-model-entity-resolution.md) -
   pattern-matching Power Query instead of parsing it, reusing the synonym pass instead of adding a
   mechanism, and why an unresolvable source is reported rather than guessed.
+- [The semantic layer is the column allow-list](decisions/semantic-layer-is-the-allow-list.md) - one
+  estate-wide layer instead of named contexts, removing raw schema tools from the chat instead of filtering the
+  shared endpoints, and the no-tracking update bug building it exposed.
 
 ### Incidents
 

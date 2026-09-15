@@ -1360,10 +1360,11 @@ export interface CreateUserRequest {
 // ---- PowerAI column policies ----------------------------------------------------------------------------------------
 // Admin-scope governance over which columns the AI assistant (and the ad-hoc query surface generally) may
 // read at all, as a default-deny allow-list: SearchEndpoints/LineageEndpoints show only a column an admin has
-// explicitly allowed, and ColumnPolicyGuard refuses any ad-hoc query that touches one that is not.
+// explicitly allowed, and ColumnPolicyGuard refuses any ad-hoc query that touches one that is not. The allow-list
+// IS the semantic layer's membership; a column's description and synonyms are its semantic annotations.
 
-/** One column of an object with its current allow state; used to render the per-table toggle list. A column
- * with no policy row yet defaults to not allowed. */
+/** One column of an object with its current allow state and annotations; used to render the per-table column
+ * editor. A column with no policy row yet defaults to not allowed. */
 export interface ColumnPolicyState {
   objectKey: string;
   columnName: string;
@@ -1374,6 +1375,8 @@ export interface ColumnPolicyState {
   reason: string | null;
   updatedBy: string | null;
   updatedUtc: string | null;
+  description: string | null;
+  synonyms: string[];
 }
 
 /** One column currently NOT allowed - explicitly denied, or never reviewed at all - with enough of its owning
@@ -1390,12 +1393,184 @@ export interface RestrictedColumn {
   updatedUtc: string | null;
 }
 
-/** Sets or clears the allow flag on one column; an upsert, safe to call repeatedly. */
+/** Sets one column's allow flag and annotations; a full upsert of the row, safe to call repeatedly. */
 export interface SetColumnPolicyRequest {
   objectKey: string;
   columnName: string;
   isAllowed: boolean;
   reason: string | null;
+  description: string | null;
+  synonyms: string[];
+}
+
+/** Allows or denies every catalogued column of one object at once. */
+export interface SetObjectColumnPoliciesRequest {
+  objectKey: string;
+  isAllowed: boolean;
+}
+
+// ---- Semantic layer ---------------------------------------------------------------------------------------------
+// The allow-listed schema with its business context: what the AI assistant's schema tools serve. The admin editor
+// reads coverage and per-object state; the read side (overview) is what an assistant sees.
+
+/** One (database, schema) of objects with catalogued columns, and how many are in the layer. */
+export interface SemanticSchemaCoverage {
+  database: string | null;
+  schema: string | null;
+  objectCount: number;
+  layerObjectCount: number;
+}
+
+/** One object with catalogued columns and how much of it is in the layer. */
+export interface SemanticObjectCoverage {
+  key: string;
+  name: string;
+  kind: string;
+  serverRef: string;
+  database: string | null;
+  schema: string | null;
+  businessName: string | null;
+  allowedColumns: number;
+  totalColumns: number;
+}
+
+/** An object's table-level business context as stored. */
+export interface SemanticAnnotation {
+  businessName: string | null;
+  description: string | null;
+  synonyms: string[];
+  keyColumns: string[];
+  updatedBy: string | null;
+  updatedUtc: string | null;
+}
+
+/** One way to join a layer table to another, read from the table's side. `source` is Curated or Discovered. */
+export interface SemanticJoin {
+  source: string;
+  otherObjectKey: string;
+  otherDatabase: string | null;
+  otherSchema: string | null;
+  otherName: string;
+  ownColumns: string[];
+  otherColumns: string[];
+  on: string;
+  joinTypes: string[];
+  isRangeJoin: boolean;
+  occurrences: number | null;
+  description: string | null;
+}
+
+/** An admin-declared join, in its declared direction; `problem` says why it is withheld, null when served. */
+export interface SemanticCuratedJoin {
+  id: number;
+  fromObjectKey: string;
+  fromObjectName: string;
+  fromColumns: string[];
+  toObjectKey: string;
+  toObjectName: string;
+  toColumns: string[];
+  joinType: string;
+  description: string | null;
+  problem: string | null;
+  updatedBy: string | null;
+  updatedUtc: string;
+}
+
+/** A join discovered from the codebase; `problem` says why it is withheld, null when served. */
+export interface SemanticDiscoveredJoin {
+  join: SemanticJoin;
+  problem: string | null;
+}
+
+/** A measure as an assistant is served it. */
+export interface SemanticMeasure {
+  id: number;
+  name: string;
+  objectKey: string;
+  objectName: string;
+  expression: string;
+  description: string | null;
+}
+
+/** A measure as the editor shows it; `problem` says why it is withheld, null when served. */
+export interface SemanticMeasureAdmin extends SemanticMeasure {
+  problem: string | null;
+  updatedBy: string | null;
+  updatedUtc: string;
+}
+
+/** A stored example query reading the object; `problem` says why it is withheld, null when served. */
+export interface SemanticExampleAdmin {
+  id: number;
+  question: string;
+  sql: string;
+  provenance: string;
+  confirmedBy: string | null;
+  confirmedUtc: string;
+  problem: string | null;
+}
+
+/** Everything the semantic layer editor shows for one object. */
+export interface SemanticObjectAdmin {
+  key: string;
+  serverRef: string;
+  database: string | null;
+  schema: string | null;
+  name: string;
+  kind: string;
+  interpretedKeyColumns: string | null;
+  interpretedKeyOrigin: string | null;
+  annotation: SemanticAnnotation;
+  columns: ColumnPolicyState[];
+  curatedJoins: SemanticCuratedJoin[];
+  discoveredJoins: SemanticDiscoveredJoin[];
+  measures: SemanticMeasureAdmin[];
+  examples: SemanticExampleAdmin[];
+}
+
+export interface SetSemanticAnnotationRequest {
+  objectKey: string;
+  businessName: string | null;
+  description: string | null;
+  synonyms: string[];
+  keyColumns: string[];
+}
+
+export interface SemanticInstructions {
+  instructions: string | null;
+  updatedBy: string | null;
+  updatedUtc: string | null;
+}
+
+export interface UpsertSemanticMeasureRequest {
+  name: string;
+  objectKey: string;
+  expression: string;
+  description: string | null;
+}
+
+export interface UpsertSemanticJoinRequest {
+  fromObjectKey: string;
+  fromColumns: string[];
+  toObjectKey: string;
+  toColumns: string[];
+  joinType: string;
+  description: string | null;
+}
+
+/** A (database, schema) holding layer tables. */
+export interface SemanticSchema {
+  database: string | null;
+  schema: string | null;
+  tableCount: number;
+}
+
+/** The layer at a glance, exactly as an assistant's get_semantic_layer call reads it. */
+export interface SemanticOverview {
+  instructions: string | null;
+  tableCount: number;
+  schemas: SemanticSchema[];
+  measures: SemanticMeasure[];
 }
 
 // ---- PowerAI confirmed examples ---------------------------------------------------------------------------------

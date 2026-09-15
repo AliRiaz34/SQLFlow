@@ -290,6 +290,27 @@ pub struct KeyInput {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SemanticSearchInput {
+    /// One or more words: a table or column name, or a business term (a synonym such as "turnover" finds
+    /// the column an admin tagged with it). Every word must match somewhere on the same table.
+    pub q: String,
+    pub page: Option<i64>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SemanticTablesInput {
+    /// Database filter (exact), as get_semantic_layer lists it.
+    pub database: Option<String>,
+    /// Schema filter (exact, e.g. "dbo"), as get_semantic_layer lists it.
+    pub schema: Option<String>,
+    pub page: Option<i64>,
+    #[serde(rename = "pageSize")]
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SimilarQuestionsInput {
     /// The business question, in the user's own words, with the `!cwd` command prefix stripped. Pass the
     /// rest exactly as they typed it: the match is on meaning, so rewording it into schema terms first
@@ -1372,6 +1393,78 @@ and fix every finding first."
         self.get("/api/v1/lineage/objects/dossier", &[("key", i.key)]).await
     }
 
+    // ---- Semantic layer (the allow-listed schema) --------------------------
+
+    #[tool(
+        description = "START HERE for any question that needs the warehouse SCHEMA: which tables exist, what \
+            their columns mean, or how to write SQL against them. The semantic layer is the governed schema: \
+            only the tables and columns an admin has allow-listed exist in it, each with its business \
+            description and synonyms. Returns the layer's general instructions (read and follow them whenever \
+            you write SQL), where its tables live (database/schema with table counts), and every measure: a \
+            named SQL expression anchored to one table, to reuse verbatim rather than re-derive. A table or \
+            column that is not in the layer is not available to query, however it is named: say so rather \
+            than guessing at it."
+    )]
+    async fn get_semantic_layer(&self, Parameters(_): Parameters<EmptyInput>) -> String {
+        self.get("/api/v1/semantic-layer", &[]).await
+    }
+
+    #[tool(
+        description = "Search the semantic layer (the allow-listed schema) for tables, columns, and measures by \
+            physical name OR business term. Every word must match somewhere on one table: its name, schema, \
+            business name, description, or synonyms, or one of its allowed columns' names, descriptions, or \
+            synonyms. So a business word like \"turnover\" finds the column an admin tagged with it even when \
+            the column is called NetRevenue. Each hit carries the table (with its `key`), `matchedColumns` \
+            (which allowed columns matched), and `matchedOn` (which fields carried the match); measures \
+            matching every word come back beside the tables. Search single words or short terms, not whole \
+            sentences, and try a synonym when a word finds nothing. Follow a hit with \
+            describe_semantic_table(key) before writing any SQL."
+    )]
+    async fn search_semantic_layer(&self, Parameters(i): Parameters<SemanticSearchInput>) -> String {
+        let q = vec![
+            ("q", i.q),
+            ("page", i.page.map(|n| n.to_string()).unwrap_or_default()),
+            ("pageSize", i.page_size.map(|n| n.to_string()).unwrap_or_default()),
+        ];
+        self.get("/api/v1/semantic-layer/search", &q).await
+    }
+
+    #[tool(
+        description = "List the semantic layer's tables, optionally within one database and/or schema \
+            (get_semantic_layer names which exist), each with its business name, description, synonyms, and \
+            how many allowed columns it has. Use it to browse the layer when no name or business term is \
+            known; use search_semantic_layer when one is."
+    )]
+    async fn list_semantic_tables(&self, Parameters(i): Parameters<SemanticTablesInput>) -> String {
+        let q = vec![
+            ("database", i.database.unwrap_or_default()),
+            ("schema", i.schema.unwrap_or_default()),
+            ("page", i.page.map(|n| n.to_string()).unwrap_or_default()),
+            ("pageSize", i.page_size.map(|n| n.to_string()).unwrap_or_default()),
+        ];
+        self.get("/api/v1/semantic-layer/tables", &q).await
+    }
+
+    #[tool(
+        description = "Everything needed to write SQL against ONE semantic layer table, in one call: its \
+            identity (the database, schema, and name to qualify it with); its business name, description, and \
+            synonyms; its ALLOWED columns with type, nullability, description, and synonyms, which are the \
+            only columns a query may read (any other column is refused when the query runs, and SELECT * is \
+            refused on a table that has columns outside the layer, so always name the columns); the key \
+            identifying one row (`keyOrigin` Curated means an admin stated it); its joins to other layer \
+            tables, each with a ready ON clause (`source` Curated = declared by an admin, prefer it; \
+            Discovered = inferred from the codebase's own joins, ranked by `occurrences`, and `isRangeJoin` \
+            marks an interval join that must never be treated as a key match); the measures anchored to it \
+            (reuse `expression` verbatim); example questions with the SQL that already answers them (mirror \
+            their shape for a similar question); the reports and dashboards that consume it (`consumers`, \
+            the answer to \"who uses this table\"); and the layer's general instructions. Takes the `key` from \
+            search_semantic_layer or list_semantic_tables. A 404 means the table is not in the semantic \
+            layer, so it cannot be queried: say so rather than composing SQL against it."
+    )]
+    async fn describe_semantic_table(&self, Parameters(i): Parameters<KeyInput>) -> String {
+        self.get("/api/v1/semantic-layer/tables/describe", &[("key", i.key)]).await
+    }
+
     #[tool(
         description = "What identifies ONE row of a table: its interpreted primary/business key columns in key \
             order, and where that interpretation came from (a declared constraint, a flow's merge key, or the \
@@ -1929,8 +2022,8 @@ and fix every finding first."
             pass the remainder as `question`. Do NOT guess from phrasing alone that a message unprefixed by \
             `!cwd` is a business question, even one that reads like \"what is our revenue by region\" or \
             names things that sound like table or column names: without the `!cwd` prefix, route it through \
-            search_all/describe_object like any other question instead. A full question is not an identifier \
-            to search_all's index; it is what THIS tool matches, once `!cwd` has activated it. Finds \
+            search_semantic_layer/describe_semantic_table like any other question instead. A full question is \
+            not an identifier to a schema search's index; it is what THIS tool matches, once `!cwd` has activated it. Finds \
             the business questions this estate's dashboards or a person ALREADY answered that mean the same \
             thing as the one just typed. The question is first expanded into related business \
             vocabulary, so wording need not match (\"what drives our turnover\" can find \"revenue by product \
@@ -1944,13 +2037,14 @@ and fix every finding first."
             your own confidence for it: a query you wrote from a 1-term match can read exactly as \
             convincingly as one from a 4-term match and still be wrong. `searchedTerms` shows what was \
             actually looked for (the question expanded into business vocabulary) and `matchedTerms` which of \
-            those each hit, so say plainly which match you built on and why it matched. A TRUSTED match \
-            needs NO further checking against the schema: do not call describe_object, search_all, or any \
-            other lookup to confirm the table it reads is real before offering it. That verification is what \
+            those each hit, for your own judgement; do not recite them to the person, who wants the answer, \
+            not how it was found. A TRUSTED match \
+            needs NO further checking against the schema: do not call describe_semantic_table, \
+            search_semantic_layer, or any other lookup to confirm the table it reads is real before offering it. That verification is what \
             being trusted already means, and re-deriving it defeats the reason this store exists, which is \
             to reuse a checked answer instead of re-checking one. Only an UNTRUSTED match (or none at all) is \
-            a lead rather than an answer: say so plainly, and only then fall back to describe_object/search_all \
-            to compose or verify something yourself. A trusted confirmed match runs with \
+            a lead rather than an answer: say so plainly, and only then fall back to \
+            search_semantic_layer/describe_semantic_table to compose or verify something yourself. A trusted confirmed match runs with \
             auto_run_trusted_match; anything else goes through prepare_query/run_query. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
             a person accepted or corrected this exact answer before (and `confirmedBy` names them), which is \
@@ -1966,7 +2060,7 @@ and fix every finding first."
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
             finds it. An empty `matches` \
             means nothing stored matched those terms (or no questions are stored yet), not that the question \
-            is unanswerable: fall back to describe_object/get_table_joins and say that is what you did. When a \
+            is unanswerable: fall back to search_semantic_layer/describe_semantic_table and say that is what you did. When a \
             person tells you an answer was wrong, call confirm_question with outcome=\"rejected\" so the loop \
             is recorded as having happened, but nothing about the wrong query is stored or returned by a later \
             search: only correct, verified answers become precedent here."
@@ -2032,7 +2126,7 @@ and fix every finding first."
             409 means neither exists. The response carries a `taskId` identifying the stored result. The row cap \
             and timeout are fixed by the deployment, not by you: read `maxRows`/`timeoutSeconds` back from the \
             response rather than assuming defaults. Read `ran` first: true means `result` holds the answer and \
-            you can present it, prefixed as a confirmed answer (since it is one) rather than a guess. False \
+            you can present it: state the answer once, in plain language, without preamble about the match. False \
             means the query did not finish inside the budget (or failed against the live source): do NOT retry \
             auto-run again for the same example, and do NOT tell the user it ran - instead call prepare_query \
             with the `sql` and `sourceRef` this response still carries, so a person approves it the normal way. \
@@ -3079,6 +3173,35 @@ pub(crate) fn bearer_token(headers: &http::HeaderMap) -> Option<String> {
     (!token.is_empty()).then(|| token.to_string())
 }
 
+/// The client surface an inbound HTTP request declares through the MCP URL's query, when it is the
+/// assistant (`surface=assistant`, `McpOptions.AssistantSurfaceQuery`). Any other value is ignored
+/// rather than forwarded, so only the one surface the control plane understands is ever sent.
+pub(crate) fn request_surface(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == "surface" && value == crate::control_plane::ASSISTANT_SURFACE).then(|| value.to_string())
+    })
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::request_surface;
+
+    #[test]
+    fn the_assistant_surface_is_read_from_the_query() {
+        assert_eq!(request_surface(Some("surface=assistant")).as_deref(), Some("assistant"));
+        assert_eq!(request_surface(Some("a=1&surface=assistant")).as_deref(), Some("assistant"));
+    }
+
+    #[test]
+    fn anything_else_declares_no_surface() {
+        assert_eq!(request_surface(None), None);
+        assert_eq!(request_surface(Some("")), None);
+        assert_eq!(request_surface(Some("surface=gui")), None);
+        assert_eq!(request_surface(Some("surfaces=assistant")), None);
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for SqlFlowMcp {
     /// Hand-written dispatch (the #[tool_handler] macro only generates `call_tool`
@@ -3091,18 +3214,19 @@ impl ServerHandler for SqlFlowMcp {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let bearer = context
-            .extensions
-            .get::<http::request::Parts>()
-            .and_then(|parts| bearer_token(&parts.headers));
+        let parts = context.extensions.get::<http::request::Parts>();
+        let bearer = parts.and_then(|parts| bearer_token(&parts.headers));
+        let surface = parts.and_then(|parts| request_surface(parts.uri.query()));
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        match bearer {
-            Some(token) => {
+        let call = self.tool_router.call(tcc);
+        match (bearer, surface) {
+            (Some(token), Some(surface)) => {
                 crate::control_plane::HTTP_BEARER
-                    .scope(token, self.tool_router.call(tcc))
+                    .scope(token, crate::control_plane::HTTP_SURFACE.scope(surface, call))
                     .await
             }
-            None => self.tool_router.call(tcc).await,
+            (Some(token), None) => crate::control_plane::HTTP_BEARER.scope(token, call).await,
+            (None, _) => call.await,
         }
     }
 
@@ -3168,13 +3292,17 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   carries the subject's links on the envelope beside `items`, so those answers have a destination too.
 - The command `!cwd <question>` (e.g. \"!cwd what is our revenue by region?\", \"!cwd how many customers
   churned last month\"): this exact prefix, not phrasing, is what activates the business-question path.
-  Strip `!cwd` and call find_similar_questions FIRST, before search_all or describe_object, with the
+  Strip `!cwd` and call find_similar_questions FIRST, before any schema lookup, with the
   remainder as the question. It matches the question against ones this estate's dashboards and confirmed
   answers already answer, expanding the wording so a paraphrase still finds them, and returns the SQL
   that already answers it plus a trustworthy score (`trusted`) rather than an LLM's own confidence.
-  Adapting a close match beats composing new SQL from scratch. A `trusted` match carrying both
-  `exampleId` and `sourceRef` can be run right away with auto_run_trusted_match, no prepare_query/
-  run_query approval needed for it. Only fall through to search_all/describe_object when nothing
+  Adapting a close match beats composing new SQL from scratch. A `trusted` match carrying an `exampleId`
+  MUST be run immediately with auto_run_trusted_match: never prepare_query/run_query for it, never ask the
+  person for permission, and never ask which datasource to use (it is worked out from the tables the SQL
+  reads). Do not narrate between tool calls on this path (no \"found a trusted match\", no \"let me run
+  it\"): say nothing until you have the result, then answer ONCE for a business reader, opening with the
+  finding in a plain sentence (\"You have 4 customers.\"), without scores, matched terms, provenance, who
+  confirmed it, datasource references, or tool names unless asked. Only fall through to search_semantic_layer/describe_semantic_table when nothing
   matches, or every match is untrusted and you need to understand the schema to write a fresh query.
   describe_subscriber_report then shows which report VISUAL a matched question came from, with the
   field ROLE (axis vs. value) a flattened column list cannot express. Once a person has judged an answer
@@ -3182,7 +3310,16 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   it only on an answer a human actually judged, never on your own sense that a query looks correct. A
   message with NO `!cwd` prefix is never routed to find_similar_questions, no matter how much it reads
   like a business question in plain English: treat it as a normal schema/lookup question and work it
-  through search_all, describe_object, and the rest of this list instead.
+  through the semantic layer and the rest of this list instead.
+- Writing SQL, or any question about which tables and columns exist and what they mean: use the SEMANTIC
+  LAYER, the governed schema holding only the tables and columns an admin has allow-listed, with their
+  business descriptions, synonyms, curated keys and joins, measures, and example queries. get_semantic_layer
+  first (its general instructions apply to every query you write), then search_semantic_layer with a name or
+  a business term, then describe_semantic_table(key) for the columns, key, joins, and measures of one table.
+  A query may read only the allowed columns describe_semantic_table lists: anything else is refused when it
+  runs. The raw catalog readers below (describe_object, search_objects/_columns/_definitions, get_table_key,
+  get_table_joins) see every catalogued column regardless of the allow-list; where a client exposes them,
+  use them for lineage and code questions, never to find columns to query.
 - \"Where does <name> live / where is <X> computed / what is <X>?\": call search_all FIRST. It fans one term
   across all seven surfaces at once and answers with each surface's full count plus a nextSteps plan naming
   the tool that pages it and the tool that turns a hit into an answer; work that plan rather than guessing a
@@ -3218,8 +3355,8 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   is more than one hop away; describe_object's edge list stops at the object itself.
 - \"Which tables does this dashboard/report use?\": subscribers are the consumption side. list_subscribers
   (filter by type or search by name/owner) finds the report; describe_subscriber(key) lists every object its
-  queries read and the SQL itself. The reverse (\"who consumes this table\") is in describe_object's
-  `subscribers`. Then answer \"and how are those tables populated\" per table with describe_object_refresh.
+  queries read and the SQL itself. The reverse (\"who consumes this table\") is in describe_semantic_table's
+  `consumers` (and describe_object's `subscribers` where a client exposes it). Then answer \"and how are those tables populated\" per table with describe_object_refresh.
 - \"What is the computation formula for <column>?\": three places compute values, check in this order:
   search_flow_columns (an expression in a flow's transform), the owning view/procedure body via
   describe_object or search_definitions, and search_statements (SQL the engine composed at run time).

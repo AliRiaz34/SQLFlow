@@ -182,8 +182,10 @@ Read-only is a statement-shape guarantee: it says a query cannot write, not that
 game. `CatalogColumnPolicy` (the `ColumnPolicy` table; see [Shadow catalog](shadow-catalog.md#column-access-policy))
 is a per-column, admin-authored **allow-list**, orthogonal to the `DataOps` switch and the RBAC scopes: it does
 not gate the surface, it narrows what the surface may touch. The model is **default-deny**: a column with no
-policy row at all - never reviewed - is exactly as blocked as one an admin has explicitly denied. There is no
-table- or schema-level form - only individual columns carry a policy row.
+policy row at all - never reviewed - is exactly as blocked as one an admin has explicitly denied. Policy rows are
+per column; the bulk route below writes one for every column of an object at once. The allow-list is also the
+[semantic layer](semantic-layer.md)'s membership: an object with at least one allowed column is in the layer, and
+a policy row carries the column's semantic `description` and `synonyms`.
 
 Default-deny also applies one level up, to the table itself: a query naming a table, view, or synonym the
 catalog has no `CatalogObject` record for at all has no allow-list to check it against, and is refused outright
@@ -198,19 +200,28 @@ An admin sets a column's allow state through the admin-scope API, never through 
 | --- | --- |
 | `GET /api/v1/powerai/column-policies` | Every column currently NOT allowed, across the whole catalog - denied, or never reviewed |
 | `GET /api/v1/powerai/column-policies/objects/{key}` | Every column of one object with its current allow state |
-| `PUT /api/v1/powerai/column-policies` | Upsert one column's allow state (`objectKey`, `columnName`, `isAllowed`, `reason`) |
+| `PUT /api/v1/powerai/column-policies` | Full upsert of one column's row (`objectKey`, `columnName`, `isAllowed`, `reason`, `description`, `synonyms`) |
+| `PUT /api/v1/powerai/column-policies/objects` | Allow or deny every column of one object (`objectKey`, `isAllowed`), keeping each row's reason and annotations |
+
+The GUI edits all of this on the Semantic layer page (`/semantic-layer`, Admin; the old `/column-policies` link
+redirects there).
 
 A column that is not allowed disappears from every surface that could otherwise teach an assistant it exists or
 let it read it:
 
-- **Schema discovery**: `search_columns` (`SearchEndpoints.ColumnsQuery`), the object's paged column list
-  (`GET /api/v1/lineage/objects/columns`), and the object dossier (`GET /api/v1/lineage/objects/dossier`,
-  behind `describe_object`) all filter to only the columns with an `IsAllowed` row. An assistant composing a
-  query from metadata never learns a not-yet-allowed column's name, type, or that it exists at all.
+- **Schema discovery**: the chat assistants' only schema readers are the semantic layer tools
+  (`get_semantic_layer`, `search_semantic_layer`, `list_semantic_tables`, `describe_semantic_table`), which serve
+  nothing outside the allow-list, not even inside a key, join, measure, or example query; see
+  [Semantic layer](semantic-layer.md). The raw readers stay filtered too: `search_columns`
+  (`SearchEndpoints.ColumnsQuery`), the object's paged column list (`GET /api/v1/lineage/objects/columns`), and the
+  object dossier's column list (`GET /api/v1/lineage/objects/dossier`, behind `describe_object`) show only columns
+  with an `IsAllowed` row.
 - **Execution**: `ColumnPolicyGuard.EnsureAllowedAsync` checks every SELECT that reaches `prepare_query`,
   `confirm_question`, or `auto_run_trusted_match` against the allow-list, and refuses one that would read a
   column not on it - refuses it even unnamed, if a `SELECT *` (bare or table-qualified) would expose it. This
-  runs in addition to, not instead of, `ReadOnlyQueryGuard`; both must pass.
+  runs in addition to, not instead of, `ReadOnlyQueryGuard`; both must pass. For the chat assistants, a
+  `check_duplicate_keys` or `compare_baseline` task is checked the same way, as the SELECT it would read; see
+  [Semantic layer](semantic-layer.md#the-assistant-surface).
 
 `confirm_question` matters here as much as `prepare_query`: a confirmed example is precedent every future
 similar question can be matched against and auto-run, so a not-allowed column must be refused when an example
@@ -365,7 +376,8 @@ the builder, so a name carrying its own bracket is refused rather than escaped.
 | `GET /api/v1/datasources/tasks/{id}?waitMs=20000` | Long-poll the result |
 | `GET /api/v1/powerai/column-policies` | Every column currently NOT allowed, across the whole catalog (admin scope) |
 | `GET /api/v1/powerai/column-policies/objects/{key}` | One object's columns with their allow state (admin scope) |
-| `PUT /api/v1/powerai/column-policies` | Allow or deny one column (admin scope) |
+| `PUT /api/v1/powerai/column-policies` | Allow or deny one column, with its annotations (admin scope) |
+| `PUT /api/v1/powerai/column-policies/objects` | Allow or deny every column of one object (admin scope) |
 
 ## MCP tools
 
@@ -377,9 +389,10 @@ the builder, so a name carrying its own bracket is refused rather than escaped.
 - `check_duplicate_keys` - the duplicate check, including the ask-back path
 - `compare_baseline` - inventory, schema, or data comparison
 
-`search_columns`, `describe_object`, and `get_table_key`/`get_table_joins` (both projections of the object
-dossier) never surface a restricted column at all, so composing SQL from what they return cannot name one by
-accident.
+The semantic layer tools (`describe_semantic_table` above all) never surface a column outside the allow-list, in
+any field, so composing SQL from what they return cannot name one by accident. They are the chat assistants'
+schema surface; `search_columns` and `describe_object`'s column list are filtered the same way for other MCP
+clients.
 
 ## Composing SQL against these tables
 
@@ -397,6 +410,11 @@ to know that a general-purpose aggregate happens to contain the answer:
 (`GET /api/v1/lineage/objects/dossier`), trimmed to one answer each: a narrow question should not spend a
 wide answer's worth of context. `describe_object` still returns the whole dossier when a model genuinely
 wants everything at once.
+
+These three tools, and `describe_object`, are not given to the GUI or Slack chat assistants. Those assistants
+compose SQL from `describe_semantic_table`, which serves the same key and the same discovered joins (through
+the same relationship folding), restricted to allow-listed columns and joined by admin-declared relationships;
+see [Semantic layer](semantic-layer.md). The tables below still describe the tools for other MCP clients.
 
 The join graph is the part worth understanding. SQLFlow does not rely on declared foreign keys, because a
 warehouse rarely has them. `TSqlLineageExtractor` reads the AND-connected column equalities out of every view

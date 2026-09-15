@@ -1097,9 +1097,25 @@ public static class LineageEndpoints
                 detail.Database, detail.Schema, e.Tier, detail.Kind))
             .ToListAsync(ct).ConfigureAwait(false);
 
-        // The interpreted data model, both directions. Rows are repo-scoped (each repo's code exhibits its own
-        // observations), so the same relationship is deduplicated here by its identity, keeping the strongest
-        // interpretation (constraint over join), the highest occurrence count, and the first constraint name.
+        var (references, referencedBy) = await LoadRelationshipsAsync(db, key, ct).ConfigureAwait(false);
+
+        // Who consumes this object. The read edges already carry it, but a raw subscriber node key tells a person
+        // nothing; this resolves them to the reports and their owners, which is the whole point of the model.
+        var subscribers = await LoadObjectSubscribersAsync(db, key, ct).ConfigureAwait(false);
+
+        return TypedResults.Ok(new ObjectDossierDto(detail, columns, edges, references, referencedBy, subscribers));
+    }
+
+    /// <summary>
+    /// The interpreted data model of one object, both directions: what it references and what references it. Rows
+    /// are repo-scoped (each repo's code exhibits its own observations), so the same relationship is deduplicated
+    /// here by its identity, keeping the strongest interpretation (constraint over join), the highest occurrence
+    /// count, and the first constraint name. Shared by the object dossier and the semantic layer's table bundle,
+    /// so both read the one folding of the relationship rows.
+    /// </summary>
+    internal static async Task<(IReadOnlyList<ObjectRelationshipDto> References, IReadOnlyList<ObjectRelationshipDto> ReferencedBy)>
+        LoadRelationshipsAsync(CatalogDbContext db, string key, CancellationToken ct)
+    {
         var rawRelationships = await db.ObjectRelationships.AsNoTracking()
             .Where(r => r.FromObjectKey == key || r.ToObjectKey == key)
             .OrderBy(r => r.Id)
@@ -1153,11 +1169,7 @@ public static class LineageEndpoints
             .OrderByDescending(r => r.Occurrences).ThenBy(r => r.OtherName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // Who consumes this object. The read edges already carry it, but a raw subscriber node key tells a person
-        // nothing; this resolves them to the reports and their owners, which is the whole point of the model.
-        var subscribers = await LoadObjectSubscribersAsync(db, key, ct).ConfigureAwait(false);
-
-        return TypedResults.Ok(new ObjectDossierDto(detail, columns, edges, references, referencedBy, subscribers));
+        return (references, referencedBy);
     }
 
     /// <summary>The lineage relations that mean a flow POPULATES the object (as opposed to reading or merely
@@ -1753,7 +1765,7 @@ public static class LineageEndpoints
 
     /// <summary>The subscribers consuming one object, for its dossier: the read edges attributed to a subscriber
     /// node, joined to the consumer rows and to the individual queries that name the object.</summary>
-    private static async Task<IReadOnlyList<ObjectSubscriberDto>> LoadObjectSubscribersAsync(
+    internal static async Task<IReadOnlyList<ObjectSubscriberDto>> LoadObjectSubscribersAsync(
         CatalogDbContext db, string objectKey, CancellationToken ct)
     {
         // A subscriber's facts are module-attributed (no flow), so its edges are exactly the flowless ones whose
@@ -2802,7 +2814,7 @@ public static class LineageEndpoints
         _ => comparison,
     };
 
-    private static IReadOnlyList<string> SplitColumns(string columns)
+    internal static IReadOnlyList<string> SplitColumns(string columns)
         => columns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
     /// <summary>
@@ -2812,7 +2824,7 @@ public static class LineageEndpoints
     /// legitimately differ if a relationship was recorded oddly, so the pairing stops at the shorter side
     /// rather than throwing.
     /// </summary>
-    private static string RenderOn(
+    internal static string RenderOn(
         string leftName, IReadOnlyList<string> leftColumns, string rightName, IReadOnlyList<string> rightColumns,
         IReadOnlyList<string> operators)
         => string.Join(" AND ", leftColumns
