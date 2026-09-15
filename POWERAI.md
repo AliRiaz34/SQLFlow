@@ -110,7 +110,8 @@ known limitations for what remains unproven.
 
 ## 6. The learning loop (question -> guess -> confirm -> remember)
 
-Built except for the confirmation moment itself (Section 10). Separate from extraction: a live
+Built, including the confirmation moment (Section 10) and admin curation of saved answers on the GUI's
+Saved answers page. Separate from extraction: a live
 feedback loop that grows the example set from real usage, not just from PowerBI.
 
 - A user asks a question. The system searches confirmed question/query examples (from PowerBI
@@ -136,8 +137,9 @@ feedback loop that grows the example set from real usage, not just from PowerBI.
 - This makes the system self-improving under real usage. Auto-running a TRUSTED match directly
   (capped: a short server-enforced timeout and a row limit, falling back to the existing manual
   confirmation gate when it would not finish in that budget) reads `CatalogQuestionExample.SourceRef`
-  (Section 8) to know which datasource to run a trusted match's SQL against; the GUI datasource picker
-  that is meant to set `SourceRef` at confirmation time is still open (Section 10).
+  (Section 8) to know which datasource to run a trusted match's SQL against. The GUI confirmation row
+  sets it through a datasource picker, and when nobody picks one it is inferred from the tables the
+  query reads (`DatasourceInference`).
 
 ## 7. Storage: flat confirmed examples, not a separate AST/graph store
 
@@ -253,10 +255,8 @@ Landed since that:
   question as the one typed (equal sets of meaningful words, stop words dropped and inflections folded):
   a threshold on term count alone could never trust a short question, whose verbatim twin scores 1.
 
-Still needed, not started:
-
-- Nothing else in this section's original list. The remaining work is the confirm/correct/reject FLOW
-  that calls into the store (Section 10), including the GUI control that sets `SourceRef`.
+Still needed: nothing from this section's original list. The confirm/correct/reject flow that calls
+into the store (Section 10) and the GUI control that sets `SourceRef` have both landed.
 
 ## 9. Roadmap
 

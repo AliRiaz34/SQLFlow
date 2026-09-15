@@ -573,7 +573,7 @@ function ExamplesTab({ detail }: { detail: SemanticObjectAdmin }) {
     return (
       <EmptyState
         title="No example query reads this table yet"
-        description="Examples come from confirmed chat answers and from dashboard questions, and are matched to the tables their SQL reads."
+        description="Examples are saved answers: questions someone confirmed an assistant answer to, matched to the tables their SQL reads."
       />
     );
   }

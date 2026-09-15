@@ -237,6 +237,39 @@ public sealed class ConfirmQuestionApiTests
         Assert.Contains(QuestionConfirmationOutcome.Rejected, body, StringComparison.Ordinal);
     }
 
+    [SkippableFact]
+    public async Task AQuestionConfirmedWithTheCwdCommand_IsStoredWithoutIt()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        // The GUI row sends the message as typed ("!cwd ..."); an assistant strips the command. Both must land the
+        // same stored question, or one question saved from two surfaces becomes two examples.
+        var question = $"How many depots are open ({Guid.NewGuid():N})?";
+        const string Sql = "SELECT 1 AS Depots";
+        await using var factory = Enabled(cs);
+        using var client = factory.CreateClient();
+        var token = await IssueOperateTokenAsync(client);
+        await using var db = CatalogDatabase.Create(cs);
+
+        try
+        {
+            using (var response = await ConfirmAsync(client, token, new ConfirmQuestionRequest(
+                $"!cwd   {question}", Sql, QuestionConfirmationOutcome.Accepted)))
+            {
+                response.EnsureSuccessStatusCode();
+            }
+
+            var stored = await db.QuestionExamples.AsNoTracking().SingleAsync(e => e.Question.Contains(question));
+            Assert.Equal(question, stored.Question);
+            Assert.Equal(QuestionExampleHash.Compute(question, Sql), stored.ContentHash);
+        }
+        finally
+        {
+            await db.QuestionExamples.Where(e => e.Question.Contains(question)).ExecuteDeleteAsync();
+        }
+    }
+
     /// <summary>A host with retrieval turned on, which is what makes the example store writable at all. Synonym
     /// expansion is switched off: this file tests the write path and its storage semantics, not the LLM
     /// expansion (covered by <see cref="QuestionSearchTests"/>), and turning it on would require an Anthropic

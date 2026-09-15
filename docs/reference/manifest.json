@@ -3477,9 +3477,15 @@
       ],
       "related": [
         "wiki-string-first-landing",
-        "wiki-census-drift"
+        "wiki-census-drift",
+        "wiki-semantic-layer-is-the-allow-list"
       ],
-      "sourceRefs": []
+      "sourceRefs": [
+        "src/SqlFlow.Catalog/CatalogEntities.cs",
+        "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs",
+        "gui/src/features/chat/AnswerConfirmation.tsx"
+      ]
     },
     {
       "id": "wiki-file-ingestion-shaping",

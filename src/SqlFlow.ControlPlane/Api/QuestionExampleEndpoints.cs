@@ -168,7 +168,7 @@ public static class QuestionExampleEndpoints
         }
 
         var outcome = request.Outcome!.Trim().ToLowerInvariant();
-        var question = request.Question?.Trim() ?? string.Empty;
+        var question = NormalizeQuestion(request.Question);
         if (QuestionProblem(question) is { } questionProblem)
         {
             return Problem(questionProblem, StatusCodes.Status400BadRequest);
@@ -494,6 +494,28 @@ public static class QuestionExampleEndpoints
     /// <summary>The longest question stored, matching the column's own length so an over-long question is
     /// refused with a stated reason rather than truncated into a different question.</summary>
     internal const int MaxQuestionLength = 1000;
+
+    /// <summary>The chat command that routes a message down the business-question path ("!cwd what is our revenue").</summary>
+    internal const string BusinessQuestionCommand = "!cwd";
+
+    /// <summary>
+    /// A question as it is stored: trimmed, and without a leading <see cref="BusinessQuestionCommand"/>. The GUI's
+    /// confirmation row sends the message exactly as it was typed, while an assistant strips the command before
+    /// searching, so without this the same question saved from two surfaces would be two questions, and the
+    /// command's own word would count as a matched term in every later search.
+    /// </summary>
+    internal static string NormalizeQuestion(string? question)
+    {
+        var trimmed = question?.Trim() ?? string.Empty;
+        var command = BusinessQuestionCommand.Length;
+        if (trimmed.StartsWith(BusinessQuestionCommand, StringComparison.OrdinalIgnoreCase)
+            && (trimmed.Length == command || char.IsWhiteSpace(trimmed[command])))
+        {
+            return trimmed[command..].TrimStart();
+        }
+
+        return trimmed;
+    }
 
     /// <summary>Why a trimmed question cannot be stored, or null when it can. Shared by confirming an example and
     /// editing one, so the two can never disagree about what a storable question is.</summary>

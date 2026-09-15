@@ -23,15 +23,23 @@ rawRefs:
   - docs/schema-evolution-design.md
   - docs/schema-sync-and-discovery-design.md
   - docs/flattener-memory-postmortem.md
+  - docs/powerai-question-retrieval-design.md
+sourceRefs:
+  - src/SqlFlow.Catalog/CatalogEntities.cs
+  - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/QuestionExampleAdminEndpoints.cs
+  - gui/src/features/chat/AnswerConfirmation.tsx
 referenceRefs:
   - concept-architecture-and-execution
   - concept-connections-and-secrets
   - concept-environment-variables
   - concept-ingestion-run-pipeline
+  - guide-chat-assistant
 related:
   - wiki-string-first-landing
   - wiki-census-drift
-updated: 2026-09-09
+  - wiki-semantic-layer-is-the-allow-list
+updated: 2026-09-15
 ---
 
 # Design document drift map: which docs under docs/ can still be trusted
@@ -80,6 +88,25 @@ against the engine rather than against the census, and therefore also documents 
 the census is missing (see [census-drift](census-drift.md)). `acquisition.md` remains useful as the
 design narrative for why the acquisition engine exists at all, and is no longer load-bearing for
 behaviour.
+
+## PowerAI question retrieval (unbannered, partly stale)
+
+[powerai-question-retrieval-design.md](../../powerai-question-retrieval-design.md) was added after the
+eleven documents above were mapped. It opens with a status line and a note that its mechanism changed
+from embeddings to LLM query expansion, and that note is still accurate. Three of its "still to build"
+claims are not, as of 2026-09-15:
+
+| Where | What it says | What the code shows |
+| --- | --- | --- |
+| Status line | What is left of the learning loop is the GUI affordance that asks a person to confirm an answer | The GUI confirmation row exists (`gui/src/features/chat/AnswerConfirmation.tsx`), posting to the same confirm endpoint as `confirm_question` |
+| Section 7 | The `CatalogQuestionExample` table for the user-confirmed half is still unbuilt | The entity exists (`CatalogQuestionExample` in `src/SqlFlow.Catalog/CatalogEntities.cs`), written by `QuestionExampleEndpoints` and curated on the admin Saved answers page (`QuestionExampleAdminEndpoints`) |
+| Section 8, step 6 | What remains is the GUI's own accept/correct/reject affordance | The same confirmation row; a rejection stores nothing and nothing records that it was made |
+
+The raw document is left as written. For what the learning loop does today, read the reference page
+`guide-chat-assistant` (Confirming an answer, Managing saved answers). The design's reasoning (why
+confidence is retrieval similarity rather than a model's self-rating, and what dropping embeddings
+traded away) is still the right place to learn why it is shaped this way. How the saved answers relate
+to the column allow-list is in [the semantic layer decision](../decisions/semantic-layer-is-the-allow-list.md).
 
 ## Incident record
 

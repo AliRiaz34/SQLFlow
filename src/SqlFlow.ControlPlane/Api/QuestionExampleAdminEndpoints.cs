@@ -130,7 +130,7 @@ public static class QuestionExampleAdminEndpoints
             return Invalid("A request body is required.");
         }
 
-        var question = request.Question?.Trim() ?? string.Empty;
+        var question = QuestionExampleEndpoints.NormalizeQuestion(request.Question);
         if (QuestionExampleEndpoints.QuestionProblem(question) is { } questionProblem)
         {
             return Invalid(questionProblem);

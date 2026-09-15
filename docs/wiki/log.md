@@ -209,3 +209,12 @@ Extended [The semantic layer is the column allow-list](decisions/semantic-layer-
 chat's operational tools and its two data-operations tasks are narrowed by an advisory `surface=assistant` marker
 (`AssistantScope.cs`, `control_plane.rs`) rather than removed, given a separate token, or redacted for everyone.
 The mechanism is documented in the reference page `concept-semantic-layer`.
+
+## [2026-09-15] ingest | PowerAI retrieval design drift
+
+Mapped [docs/powerai-question-retrieval-design.md](../powerai-question-retrieval-design.md) into the
+[design document drift map](maps/design-doc-drift.md). Its status line, Section 7, and Section 8 step 6
+still describe the confirmed-example table and the GUI confirmation row as unbuilt; the code shows both
+(`CatalogQuestionExample`, `AnswerConfirmation.tsx`), plus the admin Saved answers page added the same
+day. The raw document is left as written. The map now links the semantic layer decision page, which had
+no inbound `related` link.

@@ -18,7 +18,8 @@ public sealed class AssistantInstructionsTests
     {
         var slack = Build(AssistantSurface.Slack);
 
-        Assert.Contains("If this is right, reply *save* and I'll remember it for next time.", slack, StringComparison.Ordinal);
+        // The offer's wording travels on the run_query result (`saveOffer`), so every client shows the same line.
+        Assert.Contains("`saveOffer`", slack, StringComparison.Ordinal);
         Assert.Contains("Saying yes to running a query is never a request to save it.", slack, StringComparison.Ordinal);
     }
 

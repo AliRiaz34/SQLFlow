@@ -1,9 +1,9 @@
 //! The SQLFlow MCP server: tool definitions and dispatch.
 //!
 //! Two capability tiers, mirroring DeltaForge's design:
-//!   * **Offline** — the embedded reference corpus (doc tools) and the
+//!   * **Offline**: the embedded reference corpus (doc tools) and the
 //!     `.flow.yaml` analysis engine (`validate_flow`, key lookup). No network.
-//!   * **Online** — a proxy over the control plane's `/api/v1` read surface
+//!   * **Online**: a proxy over the control plane's `/api/v1` read surface
 //!     (catalog, lineage, runs, schedules, search, summary) plus the operate
 //!     surface (trigger/cancel), gated by device-flow authentication.
 
@@ -706,10 +706,11 @@ fn json_str(v: &Value) -> String {
 /// How a query answer must be laid out. Carried IN the tool result rather than only in the server instructions,
 /// because a client may truncate those instructions long before the business-question section.
 const ANSWER_FORMAT: &str = "If your own instructions already define how to lay out a query answer (a chat \
-    that embeds the result, for example), follow those and ignore this field, `sqlIntro`, `sqlBlock`, and \
-    `chartLink`. Otherwise: reply with the finding in one or two plain sentences, then `sqlIntro` on its own \
+    that embeds the result, for example), follow those and ignore this field, `sqlIntro`, `sqlBlock`, \
+    `chartLink`, and `saveOffer`. Otherwise: reply with the finding in one or two plain sentences, then `sqlIntro` on its own \
     line exactly as given, then `sqlBlock` copied exactly as given, as its own fenced code block on its own lines, \
-    then, only when `chartLink` is present, a last line reading [View this as a chart](chartLink) with that URL; \
+    then, only when `chartLink` is present, a line reading [View this as a chart](chartLink) with that URL, then, only when `saveOffer` is present, \
+    `saveOffer` on its own last line exactly as given; \
     nothing else goes before, between, or after these parts. Never put the SQL inline in a sentence or in single backticks, never \
     paraphrase it, and beyond `sqlIntro` do not describe how the answer was found (matches, confirmations, \
     datasources, tool names) unless asked. Running this query is NOT confirmation of the answer: do not call \
@@ -765,6 +766,10 @@ fn attach_approval_format(value: &mut Value) {
 const SAVED_QUERY_INTRO: &str = "Here's the saved query I ran:";
 const QUERY_INTRO: &str = "Here's the query I ran:";
 
+/// The closing line inviting a person to save a fresh answer. Only a run_query result carries it: an auto-run
+/// replayed an answer someone already saved, so offering to save it again would ask for a decision already made.
+const SAVE_OFFER: &str = "If this is right, reply *save* and I'll remember it for next time.";
+
 /// Attaches the answer layout to a query result that actually produced rows: `sqlBlock` is the SQL that ran,
 /// already fenced, so the model copies a finished element instead of deciding how to render it. Both the
 /// auto-run response and a compute task carry the executed statement at `result.sql`; a result that did not
@@ -789,6 +794,9 @@ fn attach_answer_format(value: &mut Value, links: &GuiLinks) {
         map.insert("answerFormat".into(), json!(ANSWER_FORMAT));
         map.insert("sqlIntro".into(), json!(intro));
         map.insert("sqlBlock".into(), json!(block));
+        if intro == QUERY_INTRO {
+            map.insert("saveOffer".into(), json!(SAVE_OFFER));
+        }
     }
     let chart = value["taskId"]
         .as_str()
@@ -3625,6 +3633,7 @@ mod tests {
         );
         assert_eq!(value["answerFormat"], json!(ANSWER_FORMAT));
         assert_eq!(value["sqlIntro"], json!("Here's the saved query I ran:"));
+        assert!(value.get("saveOffer").is_none(), "a replayed saved answer must not offer to be saved again");
     }
 
     #[test]
@@ -3633,6 +3642,7 @@ mod tests {
         attach_answer_format(&mut value, &GuiLinks::new(""));
         assert_eq!(value["sqlBlock"], json!("```sql\nSELECT 1 AS One\n```"));
         assert_eq!(value["sqlIntro"], json!("Here's the query I ran:"));
+        assert_eq!(value["saveOffer"], json!(SAVE_OFFER));
     }
 
     #[test]

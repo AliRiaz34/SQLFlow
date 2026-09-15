@@ -45,7 +45,8 @@ to narrow a search to one kind of page.
 - [Census drift map](maps/census-drift.md) - nine key paths the engine accepts that
   `keys.api.json` does not declare, and the enum value it documents one version behind.
 - [Design document drift map](maps/design-doc-drift.md) - which documents under `docs/` describe
-  shipped behavior, which are historical design intent, and where the unbannered gaps are.
+  shipped behavior, which are historical design intent, and where the unbannered gaps are, including
+  the PowerAI retrieval design's stale "still to build" claims.
 
 ### Patterns: acquisition
 

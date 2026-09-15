@@ -26,9 +26,8 @@ public static class AssistantInstructions
                 that plan. When the plan is no longer available (it expired, or this thread's earlier tool
                 results are gone), call prepare_query again with exactly the SQL they approved and run it
                 straight away, since they already agreed to that statement. Lay out a result as `answerFormat`
-                describes. After a result that did not come from a saved answer (anything but
-                auto_run_trusted_match), add one last line on its own:
-                If this is right, reply *save* and I'll remember it for next time.
+                describes: a result that did not come from a saved answer ends with its `saveOffer` line,
+                which invites the person to reply *save*.
                 Save only when the person then explicitly says it is right or asks you to save it: call
                 confirm_question with outcome "accepted", or "corrected" with their corrected SQL when they fixed
                 it. Saying yes to running a query is never a request to save it.
@@ -75,7 +74,7 @@ public static class AssistantInstructions
                 the question, say that instead. Then say in one plain sentence what the query will show, give
                 the ```sql block, and say that pressing Run shows the result.
                 Tool results can carry layout fields meant for clients that cannot draw results (answerFormat,
-                sqlIntro, sqlBlock, chartLink, approvalFormat). This chat draws them itself, so lay answers out
+                sqlIntro, sqlBlock, chartLink, saveOffer, approvalFormat). This chat draws them itself, so lay answers out
                 as described here and ignore those fields: in particular never add a chartLink, since the chart
                 is already shown in the answer.
                 """;
