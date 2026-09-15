@@ -1357,6 +1357,46 @@ export interface CreateUserRequest {
   displayName?: string | null;
 }
 
+// ---- PowerAI column policies ----------------------------------------------------------------------------------------
+// Admin-scope governance over which columns the AI assistant (and the ad-hoc query surface generally) may
+// never read: SearchEndpoints/LineageEndpoints hide a restricted column from schema search and describe, and
+// ColumnPolicyGuard refuses any ad-hoc query that touches one.
+
+/** One column of an object with its current restriction state, restricted or not; used to render the
+ * per-table toggle list. */
+export interface ColumnPolicyState {
+  objectKey: string;
+  columnName: string;
+  ordinal: number;
+  dataType: string | null;
+  nullable: boolean;
+  isSensitive: boolean;
+  reason: string | null;
+  updatedBy: string | null;
+  updatedUtc: string | null;
+}
+
+/** One restricted column, with enough of its owning object to render the flat "everything currently
+ * restricted" overview without a second lookup per row. */
+export interface RestrictedColumn {
+  objectKey: string;
+  objectName: string;
+  database: string | null;
+  schema: string | null;
+  columnName: string;
+  reason: string | null;
+  updatedBy: string | null;
+  updatedUtc: string;
+}
+
+/** Sets or clears the sensitivity flag on one column; an upsert, safe to call repeatedly. */
+export interface SetColumnPolicyRequest {
+  objectKey: string;
+  columnName: string;
+  isSensitive: boolean;
+  reason: string | null;
+}
+
 // ---- Personal access tokens -------------------------------------------------------------------------------------
 
 export interface AccessToken {

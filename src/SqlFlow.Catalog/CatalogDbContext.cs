@@ -67,6 +67,8 @@ public sealed class CatalogDbContext : DbContext
 
     public DbSet<CatalogObjectColumn> ObjectColumns => Set<CatalogObjectColumn>();
 
+    public DbSet<CatalogColumnPolicy> ColumnPolicies => Set<CatalogColumnPolicy>();
+
     public DbSet<CatalogPipelineColumn> PipelineColumns => Set<CatalogPipelineColumn>();
 
     public DbSet<CatalogSchedule> Schedules => Set<CatalogSchedule>();
@@ -506,6 +508,19 @@ public sealed class CatalogDbContext : DbContext
             // object) and the idempotency backstop for the sync's delete-by-key + re-insert. The composite also
             // serves the "an object's columns, in order" drill-down (ObjectKey is the leftmost prefix).
             entity.HasIndex(c => new { c.ObjectKey, c.Ordinal }).IsUnique();
+        });
+
+        modelBuilder.Entity<CatalogColumnPolicy>(entity =>
+        {
+            entity.ToTable("ColumnPolicy");
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.ObjectKey).HasMaxLength(900).IsRequired();
+            entity.Property(c => c.ColumnName).HasMaxLength(512).IsRequired();
+            entity.Property(c => c.Reason).HasMaxLength(512);
+            entity.Property(c => c.UpdatedBy).HasMaxLength(256);
+            // One policy row per (object, column); the enforcement lookups filter by ObjectKey, so it is the
+            // leftmost prefix.
+            entity.HasIndex(c => new { c.ObjectKey, c.ColumnName }).IsUnique();
         });
 
         modelBuilder.Entity<CatalogPipelineColumn>(entity =>

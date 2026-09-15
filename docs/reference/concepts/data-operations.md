@@ -12,6 +12,10 @@ keywords:
   - linked server
   - migration reconciliation
   - compute task
+  - column policy
+  - sensitive column
+  - pii
+  - data access control
 related:
   - concept-control-plane
   - concept-shadow-catalog
@@ -25,7 +29,14 @@ sourceRefs:
   - src/SqlFlow.SqlServer/Quality/SqlServerDuplicateKeyProbe.cs
   - src/SqlFlow.SqlServer/Query/ReadOnlyQueryGuard.cs
   - src/SqlFlow.SqlServer/Query/SqlServerQueryRunner.cs
+  - src/SqlFlow.SqlServer/Query/SqlColumnAccessExtractor.cs
   - src/SqlFlow.ControlPlane/Api/QueryEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/ColumnPolicyGuard.cs
+  - src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/SearchEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs
+  - src/SqlFlow.Catalog/CatalogEntities.cs
   - src/SqlFlow.SqlServer/Comparison/SqlServerBaselineComparer.cs
   - src/SqlFlow.Execution/ComputeTaskExecutor.cs
   - src/SqlFlow.ControlPlane/Api/DatasourceEndpoints.cs
@@ -132,6 +143,67 @@ It is validated at **both** ends: at prepare in the control plane, and again on 
 because the queue row is data from the database. On top of that, the query runs inside a transaction that is
 **always rolled back**, so even a statement that somehow passed the parser leaves nothing behind. Belt and
 braces is warranted where the cost of being wrong is data.
+
+Being read-only says nothing about *which* data a SELECT may read - that is a separate check, described next.
+
+## Column policy: what the assistant may never read
+
+Read-only is a statement-shape guarantee: it says a query cannot write, not that every column it names is fair
+game. `CatalogColumnPolicy` (the `ColumnPolicy` table; see [Shadow catalog](shadow-catalog.md#column-access-policy))
+is a per-column, admin-authored restriction, orthogonal to the `DataOps` switch and the RBAC scopes: it does not
+gate the surface, it narrows what the surface may touch. There is no table- or schema-level form - only
+individual columns are restrictable.
+
+An admin sets it through the admin-scope API, never through a sync:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/v1/powerai/column-policies` | Every column currently restricted, across the whole catalog |
+| `GET /api/v1/powerai/column-policies/objects/{key}` | Every column of one object with its current restriction state |
+| `PUT /api/v1/powerai/column-policies` | Upsert one column's restriction (`objectKey`, `columnName`, `isSensitive`, `reason`) |
+
+A restricted column disappears from every surface that could otherwise teach an assistant it exists or let it
+read it:
+
+- **Schema discovery**: `search_columns` (`SearchEndpoints.ColumnsQuery`), the object's paged column list
+  (`GET /api/v1/lineage/objects/columns`), and the object dossier (`GET /api/v1/lineage/objects/dossier`,
+  behind `describe_object`) all filter it out. An assistant composing a query from metadata never learns the
+  column's name, type, or that it exists at all.
+- **Execution**: `ColumnPolicyGuard.EnsureAllowedAsync` checks every SELECT that reaches `prepare_query`,
+  `confirm_question`, or `auto_run_trusted_match` against the policy, and refuses one that would read a
+  restricted column - refuses it even unnamed, if a `SELECT *` (bare or table-qualified) would expose it. This
+  runs in addition to, not instead of, `ReadOnlyQueryGuard`; both must pass.
+
+`confirm_question` matters here as much as `prepare_query`: a confirmed example is precedent every future
+similar question can be matched against and auto-run, so a restricted column must be refused when an example
+naming it is stored, not only when it is later run. And because a column can be restricted *after* an example
+was confirmed, `auto_run_trusted_match` re-checks the policy immediately before every run, even for an example
+that passed the check when it was confirmed.
+
+### How a query is checked
+
+`SqlColumnAccessExtractor` walks the already-parsed SELECT and resolves every (table, column) pair it touches.
+Table references resolve to catalog objects by schema/name (case-insensitive; an unqualified reference matches
+any schema) - never by which datasource the query happens to be prepared against, because a policy is set once
+per object and must hold regardless of which connection reaches it.
+
+The extractor is deliberately **fail-closed**, matching `ReadOnlyQueryGuard`'s own stance that a refused query
+that was actually safe costs a rewrite, while an accepted one that was not costs data:
+
+- A column reference it cannot bind to exactly one table with certainty - an **unqualified column**, or a
+  qualifier that matches no alias or table it saw - is attributed to **every** table the statement reads,
+  rather than dropped or guessed at. If any of those tables has a restricted column by that name, the query is
+  refused, even though the column the author meant might belong to an unrelated table.
+- A bare `SELECT *` is recorded as reading **every column of every table** in scope; `alias.*` is recorded as
+  reading every column of just that table. Either is refused outright if the table in question has any
+  restricted column at all, since naming individual safe columns is the only way past a restriction.
+- Only a flat, whole-statement alias map is built (every `FROM`/`JOIN` in the statement and in any subquery it
+  contains, all at once). An alias this pass cannot place falls back to the same fan-out as an unqualified
+  column.
+
+This means a restriction can occasionally refuse a query that, read carefully, would not actually have touched
+the restricted column (an unqualified column name that happens to collide with a restricted one on an unrelated
+joined table). That is accepted by design: guessing narrower here would risk the opposite mistake.
 
 ### Bounds
 
@@ -249,14 +321,22 @@ the builder, so a name carrying its own bracket is refused rather than escaped.
 | `POST /api/v1/dataops/queries/{planId}/run` | Redeem an approved token and queue the query (202 + taskId) |
 | `POST /api/v1/datasources/tasks` | `operation: "duplicateKeys"` or `"compareBaseline"` |
 | `GET /api/v1/datasources/tasks/{id}?waitMs=20000` | Long-poll the result |
+| `GET /api/v1/powerai/column-policies` | Every column currently restricted, across the whole catalog (admin scope) |
+| `GET /api/v1/powerai/column-policies/objects/{key}` | One object's columns with their restriction state (admin scope) |
+| `PUT /api/v1/powerai/column-policies` | Restrict or clear one column (admin scope) |
 
 ## MCP tools
 
 - `dataops_capabilities` - call first; reports whether the surface is enabled here
-- `prepare_query` - step 1: validate a SELECT, get the exact statement plus a token. Nothing runs
+- `prepare_query` - step 1: validate a SELECT, get the exact statement plus a token. Nothing runs. Refused if
+  the statement would read a column an admin has restricted (see "Column policy" above)
 - `run_query` - step 2: redeem an approved token and return the rows
 - `check_duplicate_keys` - the duplicate check, including the ask-back path
 - `compare_baseline` - inventory, schema, or data comparison
+
+`search_columns`, `describe_object`, and `get_table_key`/`get_table_joins` (both projections of the object
+dossier) never surface a restricted column at all, so composing SQL from what they return cannot name one by
+accident.
 
 ## Composing SQL against these tables
 

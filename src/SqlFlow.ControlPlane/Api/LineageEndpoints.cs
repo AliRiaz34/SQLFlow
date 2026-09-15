@@ -750,9 +750,13 @@ public static class LineageEndpoints
 
         var (p, size) = PageRequest.Normalize(page, pageSize);
         // A wide table's column list can be large, so it is paged; ordered by the captured ordinal, then name as a
-        // stable secondary key so a page boundary is deterministic.
+        // stable secondary key so a page boundary is deterministic. A column an admin has marked sensitive
+        // (CatalogColumnPolicy) never appears here: this same list is what the MCP server hands an AI assistant
+        // to reason about the table, so hiding it from search/describe is what keeps the assistant from ever
+        // learning the column exists, not merely from reading it.
         var ordered = db.ObjectColumns.AsNoTracking()
-            .Where(c => c.ObjectKey == key)
+            .Where(c => c.ObjectKey == key
+                && !db.ColumnPolicies.Any(pol => pol.IsSensitive && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
             .OrderBy(c => c.Ordinal).ThenBy(c => c.Name);
         var total = await ordered.LongCountAsync(ct).ConfigureAwait(false);
         var columns = await ordered
@@ -994,8 +998,11 @@ public static class LineageEndpoints
             return NotFound("object", key);
         }
 
+        // A sensitive column (CatalogColumnPolicy) is left out of the dossier for the same reason it is left out
+        // of the paged column list: this payload is what an AI assistant reasons about the object from.
         var columns = await db.ObjectColumns.AsNoTracking()
-            .Where(c => c.ObjectKey == key)
+            .Where(c => c.ObjectKey == key
+                && !db.ColumnPolicies.Any(pol => pol.IsSensitive && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name))
             .OrderBy(c => c.Ordinal).ThenBy(c => c.Name)
             .Take(MaxDossierRows)
             .Select(c => new ObjectColumnDto(c.Ordinal, c.Name, c.DataType, c.Nullable, c.Tier))
@@ -1530,18 +1537,22 @@ public static class LineageEndpoints
 
     /// <summary>
     /// Matches stored business questions against a typed one, returning each with the SQL that already answers
-    /// it (POWERAI.md Section 6). An LLM first expands the question into related business vocabulary (when
-    /// <c>ExpandSynonyms</c> is on), then the stored questions are ranked by how many of those terms they
-    /// match. Reports 501 when retrieval is not configured, rather than silently answering with a weaker
-    /// mechanism: a caller must be able to tell "nothing matched this question" from "this deployment cannot
-    /// answer that kind of question at all".
+    /// it (POWERAI.md Section 6). The stored questions are ranked by how many expanded business-vocabulary terms
+    /// they match. A caller that is itself an LLM (the MCP tool's usual caller) should expand the question into
+    /// that vocabulary itself and pass the result as <paramref name="expandedTerms"/>, which skips the
+    /// server-side expansion call entirely; when <paramref name="expandedTerms"/> is omitted or empty, an LLM
+    /// here expands the question instead (when <c>ExpandSynonyms</c> is on), so a non-LLM caller (a script, a
+    /// future GUI search box) still gets expansion without having to reimplement it. Reports 501 when retrieval
+    /// is not configured, rather than silently answering with a weaker mechanism: a caller must be able to tell
+    /// "nothing matched this question" from "this deployment cannot answer that kind of question at all".
     /// <para>
     /// Searches the whole estate by default, since a question about revenue is worth answering from whichever
     /// repo's report first asked it; <paramref name="repoId"/> narrows it to one repo when a caller wants that.
     /// </para>
     /// </summary>
     private static async Task<Results<Ok<SimilarQuestionsDto>, ProblemHttpResult>> FindSimilarQuestionsAsync(
-        string question, HttpContext http, CatalogDbContext db, int? topK, Guid? repoId, CancellationToken ct)
+        string question, HttpContext http, CatalogDbContext db, int? topK, Guid? repoId,
+        string[]? expandedTerms, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(question))
         {
@@ -1560,13 +1571,21 @@ public static class LineageEndpoints
                 statusCode: StatusCodes.Status501NotImplemented, title: "Retrieval not configured");
         }
 
-        // Absent when expansion is switched off, in which case the search runs on the typed words alone.
-        var expander = http.RequestServices.GetService<SqlFlow.Assistant.QuestionExpander>();
-
         var requested = Math.Clamp(topK ?? retrieval.DefaultTopK, 1, MaxSimilarQuestions);
-        var result = await Background.QuestionSearch
-            .FindSimilarAsync(db, question.Trim(), requested, expander, repoId, ct)
-            .ConfigureAwait(false);
+        var callerTerms = expandedTerms?.Where(t => !string.IsNullOrWhiteSpace(t)).ToList() ?? [];
+
+        var result = callerTerms.Count > 0
+            ? await Background.QuestionSearch
+                .FindSimilarAsync(db, question.Trim(), requested, callerTerms, repoId, ct)
+                .ConfigureAwait(false)
+            : await Background.QuestionSearch
+                .FindSimilarAsync(
+                    db, question.Trim(), requested,
+                    // Absent when expansion is switched off, in which case the search runs on the typed
+                    // words alone.
+                    http.RequestServices.GetService<SqlFlow.Assistant.QuestionExpander>(),
+                    repoId, ct)
+                .ConfigureAwait(false);
 
         return TypedResults.Ok(new SimilarQuestionsDto(
             question.Trim(),

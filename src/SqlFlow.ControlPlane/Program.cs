@@ -434,7 +434,8 @@ v1.MapGroup(string.Empty).RequireAuthorization("author")
 // The admin surface: user and role administration requires the "admin" scope (the admin role, or a bootstrap
 // token that requested it).
 v1.MapGroup(string.Empty).RequireAuthorization("admin")
-    .MapUserEndpoints();
+    .MapUserEndpoints()
+    .MapColumnPolicyEndpoints();
 
 app.Run();
 

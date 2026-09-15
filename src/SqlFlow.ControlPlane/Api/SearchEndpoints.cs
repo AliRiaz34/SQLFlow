@@ -481,8 +481,12 @@ public static class SearchEndpoints
     // column on the one table without the caller having to know which word names which.
     internal static IQueryable<ColumnHitDto> ColumnsQuery(CatalogDbContext db, SearchQuery term)
     {
+        // A column an admin has marked sensitive (CatalogColumnPolicy) never matches a search: this is the
+        // surface an AI assistant uses to discover schema, so the column must be invisible here, not merely
+        // blocked later when a query tries to read it.
         var rows = from c in db.ObjectColumns.AsNoTracking()
                    join o in db.Objects.AsNoTracking() on c.ObjectKey equals o.Key
+                   where !db.ColumnPolicies.Any(pol => pol.IsSensitive && pol.ObjectKey == c.ObjectKey && pol.ColumnName == c.Name)
                    select new { Column = c, Object = o };
 
         foreach (var token in term.Tokens)

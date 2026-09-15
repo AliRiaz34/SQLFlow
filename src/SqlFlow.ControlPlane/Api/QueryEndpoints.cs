@@ -138,6 +138,11 @@ public static class QueryEndpoints
                 MaxRows = request.MaxRows ?? QueryRunRequest.DefaultMaxRows,
                 TimeoutSeconds = request.TimeoutSeconds ?? QueryRunRequest.DefaultTimeoutSeconds,
             }.Validate();
+
+            // A second, narrower check: read-only is not the same as unrestricted. Refuses any column an admin
+            // has marked sensitive, whether or not it is named directly (a SELECT * against a table that has one
+            // is refused too).
+            await ColumnPolicyGuard.EnsureAllowedAsync(db, sql, ct).ConfigureAwait(false);
         }
         catch (SqlFlowException ex)
         {

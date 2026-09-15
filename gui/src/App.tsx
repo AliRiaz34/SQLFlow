@@ -33,6 +33,7 @@ const SubscribersPage = lazyRoute("SubscribersPage", () => import("./features/su
 const LineageGraphPage = lazyRoute("LineageGraphPage", () => import("./features/lineage/LineageGraphPage"));
 const SearchPage = lazyRoute("SearchPage", () => import("./features/search/SearchPage"));
 const UsersPage = lazyRoute("UsersPage", () => import("./features/users/UsersPage"));
+const ColumnPoliciesPage = lazyRoute("ColumnPoliciesPage", () => import("./features/column-policies/ColumnPoliciesPage"));
 const AccessTokensPage = lazyRoute("AccessTokensPage", () => import("./features/tokens/AccessTokensPage"));
 const NotificationsPage = lazyRoute("NotificationsPage", () => import("./features/notifications/NotificationsPage"));
 const MaintenancePage = lazyRoute("MaintenancePage", () => import("./features/maintenance/MaintenancePage"));
@@ -103,6 +104,14 @@ export default function App() {
             element={(
               <RequireScope scope="admin">
                 <UsersPage />
+              </RequireScope>
+            )}
+          />
+          <Route
+            path="/column-policies"
+            element={(
+              <RequireScope scope="admin">
+                <ColumnPoliciesPage />
               </RequireScope>
             )}
           />

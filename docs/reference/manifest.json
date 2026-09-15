@@ -749,7 +749,11 @@
         "baseline comparison",
         "linked server",
         "migration reconciliation",
-        "compute task"
+        "compute task",
+        "column policy",
+        "sensitive column",
+        "pii",
+        "data access control"
       ],
       "related": [
         "concept-control-plane",
@@ -765,7 +769,14 @@
         "src/SqlFlow.SqlServer/Quality/SqlServerDuplicateKeyProbe.cs",
         "src/SqlFlow.SqlServer/Query/ReadOnlyQueryGuard.cs",
         "src/SqlFlow.SqlServer/Query/SqlServerQueryRunner.cs",
+        "src/SqlFlow.SqlServer/Query/SqlColumnAccessExtractor.cs",
         "src/SqlFlow.ControlPlane/Api/QueryEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyGuard.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SearchEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/LineageEndpoints.cs",
+        "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.SqlServer/Comparison/SqlServerBaselineComparer.cs",
         "src/SqlFlow.Execution/ComputeTaskExecutor.cs",
         "src/SqlFlow.ControlPlane/Api/DatasourceEndpoints.cs",
@@ -1335,6 +1346,8 @@
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.Catalog/CatalogDbContext.cs",
         "src/SqlFlow.Catalog/Migrations/20260617165538_ObjectFullTextSearch.cs",
+        "src/SqlFlow.Catalog/Migrations/20260915071502_AddColumnPolicy.cs",
+        "src/SqlFlow.ControlPlane/Api/ColumnPolicyEndpoints.cs",
         "src/SqlFlow.Catalog/RunQueueStore.cs",
         "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
         "src/SqlFlow.Cli/Program.cs"

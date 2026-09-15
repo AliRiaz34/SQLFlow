@@ -22,6 +22,7 @@ import {
   Search,
   Server,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Users,
   Workflow,
@@ -104,6 +105,7 @@ export const navGroups: NavGroup[] = [
     requiresScope: "admin",
     items: [
       { label: "Users", to: "/users", icon: Users, testId: "nav-users" },
+      { label: "Column policies", to: "/column-policies", icon: ShieldAlert, testId: "nav-column-policies" },
     ],
   },
   {

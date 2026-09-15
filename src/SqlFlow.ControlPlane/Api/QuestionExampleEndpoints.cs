@@ -204,6 +204,10 @@ public static class QuestionExampleEndpoints
             // query later answers get adapted from, so one that would write if it ran must never enter the
             // store, however it was labelled on the way in.
             sql = ReadOnlyQueryGuard.Validate(request.Sql ?? string.Empty);
+
+            // A confirmed example is precedent for every future similar question, so a restricted column must be
+            // refused here too, not only when the example is later auto-run.
+            await ColumnPolicyGuard.EnsureAllowedAsync(db, sql, ct).ConfigureAwait(false);
         }
         catch (SqlFlowException ex)
         {
@@ -394,6 +398,10 @@ public static class QuestionExampleEndpoints
             // confirm_question already ran, so a row edited directly in the database (never through the
             // confirm endpoint) still cannot reach the executor as anything but a proven single SELECT.
             sql = ReadOnlyQueryGuard.Validate(example.Sql);
+
+            // Re-checked for the same reason: a column can be marked sensitive at any time AFTER an example
+            // naming it was confirmed, and this is the moment that example would actually read live data.
+            await ColumnPolicyGuard.EnsureAllowedAsync(db, sql, ct).ConfigureAwait(false);
         }
         catch (SqlFlowException ex)
         {

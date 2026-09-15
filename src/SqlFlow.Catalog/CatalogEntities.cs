@@ -1284,6 +1284,40 @@ public class CatalogObjectColumn
 }
 
 /// <summary>
+/// Marks one column of a catalog object as sensitive: an admin-authored policy that hides the column from every
+/// AI-facing surface (schema search, object describe/dossier, and the ad-hoc query guard) regardless of what the
+/// warehouse itself reports. Deliberately its own table, not a flag on <see cref="CatalogObjectColumn"/>, because
+/// that table is fully replaced (delete-by-key + re-insert) on every connected sync; a flag living there would be
+/// silently lost the next time the object's columns are re-read from the live database. Keyed to the column by
+/// <see cref="ObjectKey"/> + <see cref="ColumnName"/> (a soft link, no FK, matching the rest of the catalog), so
+/// the policy survives a sync even for a column the sync has not (yet) seen.
+/// </summary>
+public class CatalogColumnPolicy
+{
+    public long Id { get; set; }
+
+    /// <summary>The owning object's global key (server reference + database + schema + name).</summary>
+    public string ObjectKey { get; set; } = string.Empty;
+
+    public string ColumnName { get; set; } = string.Empty;
+
+    /// <summary>True to hide the column from AI-facing search/describe results and refuse any ad-hoc query that
+    /// would select it. Stored (rather than the row's mere presence meaning "sensitive") so a column can be
+    /// explicitly cleared without deleting the row's audit trail.</summary>
+    public bool IsSensitive { get; set; }
+
+    /// <summary>Why the column is restricted, shown alongside the flag in the management UI (for example
+    /// "PII" or "compensation data"). Optional context, not enforced.</summary>
+    public string? Reason { get; set; }
+
+    /// <summary>The identity (subject claim) that last changed this row, for an audit trail on a restriction
+    /// that gates what an AI assistant may read.</summary>
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>
 /// One resolved column of a pipeline's pre-ingestion transformation view: the modernized, central form of a
 /// legacy <c>flw.PreIngestionTransform</c> row, so the estate can be queried for "which transformations are set
 /// or detected on a pipeline". Two provenances share the row shape, distinguished by <see cref="Kind"/>:

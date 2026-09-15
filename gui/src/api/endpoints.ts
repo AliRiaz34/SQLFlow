@@ -18,6 +18,7 @@ import type {
   GenerateNotificationDigestRequest, NotificationDelivery, NotificationDigest, NotificationDigestSummary,
   NotificationQueuedDelivery, NotificationSubscription, SendNotificationDigestRequest,
   ObjectHit, ObjectRepo, PagedResult,
+  ColumnPolicyState, RestrictedColumn, SetColumnPolicyRequest,
   FlowParameters,
   PipelineColumn, PipelineDetail, PipelineFile, PipelineFileStats, PipelineSummary, RegisterRepoSourceRequest, Repo, RepoDeletionResult, RepoSource, RepoSourceRegistered, RepoSyncResult, RepoTree, Role,
   RunAssertion, RunDetail, RunFile, RunGroup, RunHealthCheckMetric, RunScope, RunScopePreview, RunStatement, RunTraceEntry, RunTraceStorage, RunTraceRetention, RunTraceRetentionUpdate, RunStatementPurgeResult, RunEventPurgeResult,
@@ -525,6 +526,18 @@ export const userApi = {
   deactivate: (id: string) => post<User>(`/api/v1/users/${id}/deactivate`),
   setPassword: (id: string, password: string) => post<User>(`/api/v1/users/${id}/password`, { password }),
   roles: () => get<Role[]>("/api/v1/roles"),
+};
+
+// ---- PowerAI column policies (admin-scope: which columns the assistant may never see) ------------------------------
+
+export const columnPolicyApi = {
+  /** Every column currently marked sensitive, across the whole catalog, for the overview list. */
+  list: (query: PageQuery = {}) =>
+    get<PagedResult<RestrictedColumn>>("/api/v1/powerai/column-policies", query as QueryParams),
+  /** Every column of one object with its current policy state, for the per-table toggle list. */
+  forObject: (objectKey: string) =>
+    get<ColumnPolicyState[]>(`/api/v1/powerai/column-policies/objects/${encodeURIComponent(objectKey)}`),
+  set: (request: SetColumnPolicyRequest) => put<ColumnPolicyState>("/api/v1/powerai/column-policies", request),
 };
 
 // ---- Personal access tokens (self-service: the caller's own tokens) ----------------------------------------------
