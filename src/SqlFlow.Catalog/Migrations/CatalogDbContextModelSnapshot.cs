@@ -2576,6 +2576,9 @@ namespace SqlFlow.Catalog.Migrations
                         .HasMaxLength(400)
                         .HasColumnType("nvarchar(400)");
 
+                    b.Property<string>("SourceSql")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("Sql")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -2584,6 +2587,10 @@ namespace SqlFlow.Catalog.Migrations
                         .IsRequired()
                         .HasMaxLength(900)
                         .HasColumnType("nvarchar(900)");
+
+                    b.Property<string>("TranslationProblem")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
 
                     b.HasKey("Id");
 

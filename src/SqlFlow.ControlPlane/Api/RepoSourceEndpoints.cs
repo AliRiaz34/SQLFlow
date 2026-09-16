@@ -133,11 +133,15 @@ public static class RepoSourceEndpoints
     internal static async Task<bool> QueueSyncForRepoAsync(
         CatalogDbContext db, string repoName, string reason, TimeProvider clock, CancellationToken ct)
     {
-        var sourceId = await db.RepoSources.AsNoTracking()
-            .Where(s => s.Name == repoName && s.Enabled)
-            .Select(s => (Guid?)s.Id)
-            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-        return sourceId is { } id && await QueueSyncAsync(db, id, reason, clock, ct).ConfigureAwait(false);
+        var sourceId = await RepoSourceStore.TriggerForRepoAsync(db, repoName, clock.GetUtcNow().UtcDateTime, ct)
+            .ConfigureAwait(false);
+        if (sourceId is not { } id)
+        {
+            return false;
+        }
+
+        await TraceQueuedAsync(db, id, reason, clock, ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>Queues one source's sync now (the single path behind "sync now" and every change that needs the graph
@@ -151,12 +155,19 @@ public static class RepoSourceEndpoints
             return false;
         }
 
+        await TraceQueuedAsync(db, id, reason, clock, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>Opens the queued sync's activity trace.</summary>
+    private static async Task TraceQueuedAsync(
+        CatalogDbContext db, Guid id, string reason, TimeProvider clock, CancellationToken ct)
+    {
         // Post a non-terminal "queued" line to the activity trace so the panel a client opens on this click latches
         // onto a live trace right away: the background sync worker (which claims the source on its next tick) then
         // appends the real clone/reconcile/result trace, and the stream stays open until that attempt is terminal.
         var trace = await ActivityTrace.BeginAsync(db, ActivityKinds.RepoSync, id.ToString(), clock, ct).ConfigureAwait(false);
         await trace.InfoAsync("queued", $"{reason}; waiting for a worker to pick it up.", ct).ConfigureAwait(false);
-        return true;
     }
 
     /// <summary>

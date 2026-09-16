@@ -40,7 +40,7 @@ public static class FlowProposalPreflight
         new YamlStoredProcedureFlowLoader(), new YamlInvokeFlowLoader(), new YamlHealthCheckFlowLoader(),
         new YamlSourceControlFlowLoader(), new YamlBatchFlowLoader(), new YamlAcquireFlowLoader(),
         new YamlCopyFlowLoader(), new YamlSftpFlowLoader(), new YamlCalendarFlowLoader(),
-        new YamlTranslateFlowLoader());
+        new YamlTranslateFlowLoader(), new YamlSchemaRegistrationFlowLoader());
 
     private static readonly YamlScheduleLibraryLoader ScheduleLibraries = new();
 

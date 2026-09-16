@@ -161,6 +161,22 @@ internal static class Program
                             return 0;
                         }
 
+                        case SchemaRegistrationFlowDocument doc:
+                        {
+                            var flow = doc.Document.Flow;
+                            var scope = flow.Scope;
+                            var schemas = scope.IncludeSchemas.Count > 0
+                                ? $"schemas {string.Join(", ", scope.IncludeSchemas)}"
+                                : "every schema";
+                            var excluded = scope.ExcludeSchemas.Count > 0
+                                ? $" except {string.Join(", ", scope.ExcludeSchemas)}"
+                                : string.Empty;
+                            Console.WriteLine(
+                                $"OK  '{flow.SysAlias}' is valid (schema registration: tables and views of " +
+                                $"{scope.Database ?? "the connection's database"} on '{flow.Server}', {schemas}{excluded}).");
+                            return 0;
+                        }
+
                         case CalendarFlowDocument doc:
                         {
                             var flow = doc.Document.Flow;
@@ -2765,6 +2781,25 @@ internal static class Program
             case SourceControlFlowDocument:
                 PrintSourceControlResult((SourceControlResult)exec.Result);
                 break;
+            case SchemaRegistrationFlowDocument:
+            {
+                var result = (SqlFlow.Core.SchemaRegistration.SchemaRegistrationResult)exec.Result;
+                if (!result.Success)
+                {
+                    Console.WriteLine($"FAILED  {result.Error}");
+                    break;
+                }
+
+                Console.WriteLine(
+                    $"OK  registered {result.Tables} table(s) and {result.Views} view(s) ({result.Columns} column(s)) " +
+                    $"from '{result.Database}' in {result.DurationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}s");
+                foreach (var warning in result.Warnings)
+                {
+                    Console.WriteLine($"WARN  {warning}");
+                }
+
+                break;
+            }
             case CalendarFlowDocument doc:
             {
                 var result = (CalendarRunResult)exec.Result;

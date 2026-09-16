@@ -596,6 +596,37 @@ static int emit_model(
 
         free(table_node);
     }
+    /* Shared expressions: the model's not-loaded Power Query queries, one node each with its M,
+     * so a consumer can follow a table's merge into them by name. */
+    for (i = 0; i < spec->expression_count; i++) {
+        const SharedExpression *expression = &spec->expressions[i];
+        char *expression_rest;
+        char *expression_node;
+
+        if (expression->name == NULL) {
+            continue;
+        }
+
+        expression_rest = tagged("expr", expression->name);
+        if (expression_rest == NULL) {
+            return -1;
+        }
+        expression_node = node_id(name, report_file, expression_rest);
+        free(expression_rest);
+        if (expression_node == NULL) {
+            return -1;
+        }
+
+        if (emit_node(nodes, expression_node, "expression") != 0
+            || emit_id_field(nodes, 6, "powerQuery",
+                   expression->expression != NULL ? expression->expression : "") != 0) {
+            free(expression_node);
+            return -1;
+        }
+
+        free(expression_node);
+    }
+
     /* Measures: a node per measure, carrying its DAX and description as properties, plus a
      * `definedOn` edge to the table it belongs to. */
     for (i = 0; i < spec->measure_count; i++) {
@@ -1006,9 +1037,11 @@ int main(int argc, char **argv)
 
             fprintf(stderr,
                 "wrote %s: %zu tables' columns, %zu measures, %zu calculated columns, "
-                "%zu relationships, %zu table sources, %zu pages, %zu visuals\n",
+                "%zu relationships, %zu table sources, %zu shared expressions, %zu pages, "
+                "%zu visuals\n",
                 out_path, spec.column_count, spec.measure_count, spec.calculated_column_count,
-                spec.relationship_count, spec.source_count, layout.page_count, visual_total);
+                spec.relationship_count, spec.source_count, spec.expression_count, layout.page_count,
+                visual_total);
         }
     } else {
         if (fwrite(out.data, 1, out.size, stdout) != out.size) {

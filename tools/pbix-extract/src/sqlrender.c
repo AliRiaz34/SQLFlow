@@ -210,6 +210,90 @@ static int append_in(
     return buffer_append_str(out, ")");
 }
 
+/* True when `text` is a plain decimal or scientific number: an optional sign, digits with an optional
+ * fraction, and an optional exponent. */
+static int is_plain_number(const char *text, size_t length)
+{
+    size_t i = 0;
+    int digits = 0;
+
+    if (i < length && (text[i] == '-' || text[i] == '+')) {
+        i++;
+    }
+    while (i < length && text[i] >= '0' && text[i] <= '9') {
+        i++;
+        digits++;
+    }
+    if (i < length && text[i] == '.') {
+        i++;
+        while (i < length && text[i] >= '0' && text[i] <= '9') {
+            i++;
+            digits++;
+        }
+    }
+    if (digits == 0) {
+        return 0;
+    }
+    if (i < length && (text[i] == 'E' || text[i] == 'e')) {
+        i++;
+        if (i < length && (text[i] == '-' || text[i] == '+')) {
+            i++;
+        }
+        if (i >= length || text[i] < '0' || text[i] > '9') {
+            return 0;
+        }
+        while (i < length && text[i] >= '0' && text[i] <= '9') {
+            i++;
+        }
+    }
+    return i == length;
+}
+
+/*
+ * Writes a Power BI query literal as T-SQL. Power BI types its literals with a suffix or a prefix
+ * (2020L, 1.5D, 3.25M, datetime'2020-01-01T00:00:00', true), none of which T-SQL parses, so each is
+ * written in its T-SQL form: the bare number, the quoted date text, 1 or 0, NULL. A text literal is
+ * already T-SQL ('it''s', with the quote doubled) and is written as it is, as is any form not listed.
+ */
+static int append_literal(Buffer *out, const char *literal)
+{
+    static const char *const typed_prefixes[] = { "datetimeoffset'", "datetime'", "date'", "time'" };
+    size_t length;
+    size_t i;
+
+    if (literal == NULL) {
+        return buffer_append_str(out, "NULL");
+    }
+    length = strlen(literal);
+
+    if (strcmp(literal, "true") == 0) {
+        return buffer_append_str(out, "1");
+    }
+    if (strcmp(literal, "false") == 0) {
+        return buffer_append_str(out, "0");
+    }
+    if (strcmp(literal, "null") == 0) {
+        return buffer_append_str(out, "NULL");
+    }
+
+    for (i = 0; i < sizeof(typed_prefixes) / sizeof(typed_prefixes[0]); i++) {
+        size_t prefix_length = strlen(typed_prefixes[i]);
+
+        if (length > prefix_length && strncmp(literal, typed_prefixes[i], prefix_length) == 0) {
+            /* Keep the quote that ends the prefix: the rest is the quoted value. */
+            return buffer_append_str(out, literal + prefix_length - 1);
+        }
+    }
+
+    if (length > 1
+        && (literal[length - 1] == 'L' || literal[length - 1] == 'D' || literal[length - 1] == 'M')
+        && is_plain_number(literal, length - 1)) {
+        return buffer_append(out, literal, length - 1);
+    }
+
+    return buffer_append_str(out, literal);
+}
+
 static int append_expression(
     Buffer *out, const QueryExpr *expression, const AliasMap *aliases, RenderStatus *status)
 {
@@ -257,7 +341,7 @@ static int append_expression(
         return 0;
 
     case EXPR_LITERAL:
-        return buffer_append_str(out, expression->literal);
+        return append_literal(out, expression->literal);
 
     case EXPR_IN:
         return append_in(out, expression, aliases, status);

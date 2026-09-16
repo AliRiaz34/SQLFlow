@@ -682,10 +682,68 @@ static void test_folds_split_format_filters_into_the_query(void)
         const char *sql = layout.pages[0].visuals[0].sql;
 
         /* Both filters apply: the page's narrows every visual on it, the visual's only itself. */
-        check(contains(sql, "WHERE ([d].[Fiscal Year] >= 2020L)"),
-            "the page filter reaches the WHERE clause");
+        check(contains(sql, "WHERE ([d].[Fiscal Year] >= 2020)"),
+            "the page filter reaches the WHERE clause, its typed literal written as T-SQL");
         check(contains(sql, "AND [r].[Business Type] IN ('Warehouse')"),
             "the visual's own filter is ANDed onto it");
+    }
+    report_layout_free(&layout);
+}
+
+/*
+ * Power BI types its literals (2020L, 1.5D, 2.25M, datetime'...', true), and none of those parse as
+ * T-SQL. Each is written in its T-SQL form, so the rendered question is a statement a T-SQL parser
+ * (and a translation to the source tables) can read; a text literal is already T-SQL and is kept.
+ */
+static void test_writes_typed_literals_as_tsql(void)
+{
+    static const SplitMember MEMBERS[] = {
+        { "Report/definition/pages/pages.json", "{\"pageOrder\":[\"p1\"]}" },
+        { "Report/definition/pages/p1/page.json",
+          "{\"name\":\"p1\",\"displayName\":\"Page 1\",\"filterConfig\":{\"filters\":[{"
+          "\"name\":\"f\",\"filter\":{\"From\":[{\"Name\":\"s\",\"Entity\":\"Sales\"}],"
+          "\"Where\":["
+          "{\"Condition\":{\"Comparison\":{\"ComparisonKind\":1,\"Left\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Source\":\"s\"}},\"Property\":\"Order Date\"}},"
+          "\"Right\":{\"Literal\":{\"Value\":\"datetime'2020-01-01T00:00:00'\"}}}}},"
+          "{\"Condition\":{\"Comparison\":{\"ComparisonKind\":2,\"Left\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Source\":\"s\"}},\"Property\":\"Discount\"}},"
+          "\"Right\":{\"Literal\":{\"Value\":\"1.5D\"}}}}},"
+          "{\"Condition\":{\"Comparison\":{\"ComparisonKind\":3,\"Left\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Source\":\"s\"}},\"Property\":\"Price\"}},"
+          "\"Right\":{\"Literal\":{\"Value\":\"-2.25M\"}}}}},"
+          "{\"Condition\":{\"Comparison\":{\"ComparisonKind\":0,\"Left\":{\"Column\":"
+          "{\"Expression\":{\"SourceRef\":{\"Source\":\"s\"}},\"Property\":\"Returned\"}},"
+          "\"Right\":{\"Literal\":{\"Value\":\"true\"}}}}},"
+          "{\"Condition\":{\"In\":{\"Expressions\":[{\"Column\":{\"Expression\":"
+          "{\"SourceRef\":{\"Source\":\"s\"}},\"Property\":\"Customer\"}}],"
+          "\"Values\":[[{\"Literal\":{\"Value\":\"'O''Brien'\"}}],[{\"Literal\":{\"Value\":\"null\"}}]]}}}"
+          "]}}]}}" },
+        { "Report/definition/pages/p1/visuals/v1/visual.json",
+          "{\"name\":\"v1\",\"visual\":{\"visualType\":\"card\",\"query\":{\"queryState\":{"
+          "\"Values\":{\"projections\":[{\"field\":{\"Column\":{\"Expression\":{\"SourceRef\":"
+          "{\"Entity\":\"Sales\"}},\"Property\":\"Price\"}},"
+          "\"queryRef\":\"Sales.Price\"}]}}}}}" }
+    };
+    ReportLayout layout;
+
+    if (read_split_layout(MEMBERS, sizeof(MEMBERS) / sizeof(MEMBERS[0]), &layout) != 0) {
+        return;
+    }
+
+    check(layout.page_count == 1 && layout.pages[0].visual_count == 1,
+        "the visual with typed literals is kept");
+    if (layout.page_count == 1 && layout.pages[0].visual_count == 1) {
+        const char *sql = layout.pages[0].visuals[0].sql;
+
+        check(contains(sql, "([s].[Order Date] > '2020-01-01T00:00:00')"),
+            "a datetime literal becomes its quoted text");
+        check(contains(sql, "([s].[Discount] >= 1.5)"), "a double literal loses its D suffix");
+        check(contains(sql, "([s].[Price] < -2.25)"), "a decimal literal loses its M suffix");
+        check(contains(sql, "([s].[Returned] = 1)"), "true becomes 1");
+        check(contains(sql, "IN ('O''Brien', NULL)"), "text stays quoted and null becomes NULL");
+        check(!contains(sql, "datetime'") && !contains(sql, "true"),
+            "no Power BI literal form survives");
     }
     report_layout_free(&layout);
 }
@@ -752,6 +810,7 @@ int main(void)
     test_a_report_with_no_sections_is_not_an_error();
     test_reads_the_split_report_format();
     test_folds_split_format_filters_into_the_query();
+    test_writes_typed_literals_as_tsql();
     test_a_split_visual_with_no_query_states_no_question();
     test_a_file_with_no_report_part_at_all_fails();
 

@@ -148,6 +148,9 @@ public sealed record CollectedSubscriberQuery
 
     public required string Sql { get; init; }
 
+    /// <summary>The report file whose visual the query is; null for a declared query.</summary>
+    public string? ReportFile { get; init; }
+
     /// <summary>The identities the query reads, as the SQL spelled them; the builder resolves each with the
     /// same completion and synonym follow every other identity gets.</summary>
     public required IReadOnlyList<ModelObjectRef> Objects { get; init; }
@@ -289,6 +292,46 @@ public sealed record SynonymLink
     public required string TargetName { get; init; }
 }
 
+/// <summary>A schema registration flow (flowType: sch) as the collector saw it: which database it registers and
+/// through which connection. The connected pass harvests it; the builder attributes the harvest to the flow.</summary>
+public sealed record CollectedSchemaRegistration
+{
+    public required string Flow { get; init; }
+
+    /// <summary>The server identity the registered objects are keyed under.</summary>
+    public required string ServerRef { get; init; }
+
+    /// <summary>The connection reference as written, which the connected pass resolves.</summary>
+    public required string RawReference { get; init; }
+
+    public required Core.Connections.DataSourceKind Kind { get; init; }
+
+    public required Core.SchemaRegistration.SchemaRegistrationScope Scope { get; init; }
+}
+
+/// <summary>
+/// One object a schema registration flow registered: read live by this build's connected pass, or remembered from
+/// the catalog (a registration any repo made earlier). A registered-source subscriber's reads resolve onto these.
+/// </summary>
+public sealed record CollectedRegisteredObject
+{
+    /// <summary>The schema registration flow that registered the object.</summary>
+    public required string Flow { get; init; }
+
+    public required string ServerRef { get; init; }
+
+    public required string Database { get; init; }
+
+    public required string Schema { get; init; }
+
+    public required string Name { get; init; }
+
+    /// <summary>True for a remembered registration made by the repository this build is for. Such an entry is
+    /// superseded by this build's own harvest of the same flow, and dropped when the repository no longer
+    /// declares the flow.</summary>
+    public bool FromCurrentRepo { get; init; }
+}
+
 /// <summary>What one collector hands the builder.</summary>
 public sealed class CollectionResult
 {
@@ -323,6 +366,17 @@ public sealed class CollectionResult
     public List<CollectedModelConstraint> ModelConstraints { get; } = [];
 
     public List<SynonymLink> Synonyms { get; } = [];
+
+    /// <summary>Every schema registration flow the estate declares.</summary>
+    public List<CollectedSchemaRegistration> SchemaRegistrations { get; } = [];
+
+    /// <summary>The objects this build's connected pass registered, per schema registration flow.</summary>
+    public List<CollectedRegisteredObject> RegisteredObjects { get; } = [];
+
+    /// <summary>The registrations the catalog already holds (from any repository), supplied by the caller before the
+    /// build so a registered-source subscriber resolves even when this build is offline or the registering flow lives
+    /// in another repository.</summary>
+    public List<CollectedRegisteredObject> PriorRegistrations { get; } = [];
 
     /// <summary>Server identities proven equal at connect time (two references resolving to the same
     /// canonical connection string): alias identity to canonical identity. Offline, distinct references
@@ -365,6 +419,9 @@ public sealed class CollectionResult
         KeyHints.AddRange(other.KeyHints);
         ModelConstraints.AddRange(other.ModelConstraints);
         Synonyms.AddRange(other.Synonyms);
+        SchemaRegistrations.AddRange(other.SchemaRegistrations);
+        RegisteredObjects.AddRange(other.RegisteredObjects);
+        PriorRegistrations.AddRange(other.PriorRegistrations);
         Warnings.AddRange(other.Warnings);
         DegradedServers.UnionWith(other.DegradedServers);
         if (SubscriberInputHash.Length == 0)
@@ -416,6 +473,12 @@ public static class ServerIdentity
     /// segment can never collide with a real reference, which is always a <c>${...}</c>, an <c>@alias</c>, or
     /// an <c>inline:</c> hash.</summary>
     public const string Subscriber = "subscriber";
+
+    /// <summary>The identity a registered-source subscriber's reads start on: the subscriber declares no connection,
+    /// so its objects are named only by database, schema, and name until the graph builder matches them to an object
+    /// a schema registration flow registered and re-keys them under that flow's connection. Like
+    /// <see cref="Subscriber"/>, it can never collide with a real reference.</summary>
+    public const string Registered = "registered";
 
     public static string From(string connectionReference)
     {

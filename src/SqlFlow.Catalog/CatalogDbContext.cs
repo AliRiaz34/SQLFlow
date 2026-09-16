@@ -337,6 +337,7 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(q => q.Name).HasMaxLength(250).IsRequired();
             entity.Property(q => q.ServerRef).HasMaxLength(400).IsRequired();
             entity.Property(q => q.Sql).IsRequired();
+            entity.Property(q => q.TranslationProblem).HasMaxLength(CatalogSync.TranslationProblemMaxLength);
             entity.HasIndex(q => q.SubscriberKey);
             entity.HasIndex(q => q.RepoId);
         });

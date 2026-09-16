@@ -363,14 +363,20 @@ public static class QuestionExampleEndpoints
 
         // An example stored without a datasource still says where it runs through the objects it reads; only when
         // those do not point at exactly one declared datasource is there nothing to run it against.
+        // The database comes from the same evidence: objects a schema registration flow registered run in the
+        // database they were registered in, which the connection may not open on by default.
         var sourceRef = example.SourceRef;
+        var objectKeys = example.ObjectKeys.Split(
+            '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var inferred = await DatasourceInference.InferAsync(db, example.Sql, objectKeys, ct).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(sourceRef))
         {
-            var objectKeys = example.ObjectKeys.Split(
-                '\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            sourceRef = (await DatasourceInference.InferAsync(db, example.Sql, objectKeys, ct).ConfigureAwait(false))
-                .Reference;
+            sourceRef = inferred.Reference;
         }
+
+        var database = string.Equals(sourceRef, inferred.Reference, StringComparison.OrdinalIgnoreCase)
+            ? inferred.Database
+            : null;
 
         if (string.IsNullOrWhiteSpace(sourceRef))
         {
@@ -403,6 +409,7 @@ public static class QuestionExampleEndpoints
         {
             Operation = ComputeOperations.RunQuery,
             SourceRef = sourceRef,
+            Database = database,
             Sql = sql,
             MaxRows = autoRun.MaxRows,
             TimeoutSeconds = autoRun.TimeoutSeconds,
@@ -569,13 +576,10 @@ public static class QuestionExampleEndpoints
             return null;
         }
 
-        var known = await db.Pipelines.AsNoTracking()
-            .AnyAsync(p => p.SourceServer == sourceRef || p.TargetServer == sourceRef, ct)
-            .ConfigureAwait(false);
-        return known
+        return await DatasourceInference.IsDeclaredAsync(db, sourceRef, ct).ConfigureAwait(false)
             ? null
             : Problem(
-                $"No pipeline in the catalog declares the datasource reference '{sourceRef}'.",
+                $"No active pipeline in the catalog declares the datasource reference '{sourceRef}'.",
                 StatusCodes.Status404NotFound);
     }
 

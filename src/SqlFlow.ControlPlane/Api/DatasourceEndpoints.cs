@@ -420,18 +420,13 @@ public static class DatasourceEndpoints
         // writes through it), so this surface can only inspect datasources the reviewed git estate names; it can
         // never point a worker at a novel connection. An @alias is exempt: it resolves only against the
         // full-mode registry (flw.DataSource) on the node, which is itself a curated allowlist.
-        if (!payload.SourceRef.StartsWith('@'))
+        if (!payload.SourceRef.StartsWith('@')
+            && !await DatasourceInference.IsDeclaredAsync(db, payload.SourceRef, ct).ConfigureAwait(false))
         {
-            var known = await db.Pipelines.AsNoTracking()
-                .AnyAsync(p => p.SourceServer == payload.SourceRef || p.TargetServer == payload.SourceRef, ct)
-                .ConfigureAwait(false);
-            if (!known)
-            {
-                return Problem(
-                    $"No pipeline in the catalog declares the datasource reference '{payload.SourceRef}'. Ad-hoc " +
-                    "compute is limited to datasources the estate already uses (or an @alias from the registry).",
-                    StatusCodes.Status404NotFound, "Not found");
-            }
+            return Problem(
+                $"No active pipeline in the catalog declares the datasource reference '{payload.SourceRef}'. Ad-hoc " +
+                "compute is limited to datasources the estate already uses (or an @alias from the registry).",
+                StatusCodes.Status404NotFound, "Not found");
         }
 
         var requestedBy = user.FindFirst("sub")?.Value ?? user.Identity?.Name;

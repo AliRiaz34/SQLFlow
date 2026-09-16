@@ -158,7 +158,11 @@ public sealed class YamlSubscriberLibraryLoader
             }
 
             var defaultServer = string.IsNullOrWhiteSpace(entry.Server) ? null : entry.Server.Trim();
-            var queries = MapQueries(name, entry.Queries, defaultServer, connections, source, warnings);
+
+            // A library that declares no connection reads registered databases: its queries run wherever the objects
+            // they name were registered, which the lineage graph works out.
+            var registeredSource = connections.Count == 0;
+            var queries = MapQueries(name, entry.Queries, defaultServer, registeredSource, connections, source, warnings);
 
             // An undeclared default is reported once here for the subscriber itself; each query that relied on it
             // has already said so above, but a report-backed subscriber may have no query to say it.
@@ -191,6 +195,7 @@ public sealed class YamlSubscriberLibraryLoader
                 Notes = Trimmed(entry.Notes),
                 Url = Trimmed(entry.Url),
                 Server = defaultServer,
+                IsRegisteredSource = registeredSource,
                 Pbix = Trimmed(entry.Pbix),
                 Queries = queries,
             });
@@ -206,6 +211,7 @@ public sealed class YamlSubscriberLibraryLoader
         string subscriber,
         List<QueryYaml?>? block,
         string? defaultServer,
+        bool registeredSource,
         Dictionary<string, DataSource> connections,
         string source,
         List<string> warnings)
@@ -237,6 +243,17 @@ public sealed class YamlSubscriberLibraryLoader
             }
 
             var server = string.IsNullOrWhiteSpace(query.Server) ? defaultServer : query.Server.Trim();
+            if (string.IsNullOrEmpty(server) && registeredSource)
+            {
+                queries.Add(new SubscriberQuery
+                {
+                    Name = queryName,
+                    Server = DataSubscriber.RegisteredSource,
+                    Sql = query.Sql,
+                });
+                continue;
+            }
+
             if (string.IsNullOrEmpty(server))
             {
                 warnings.Add(

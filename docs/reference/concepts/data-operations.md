@@ -158,6 +158,18 @@ for PowerAI's confirmed examples and retrieval matches, where the lineage object
 the connection reference) are consulted before the SQL. An inferred reference passes the same known-reference
 gate an explicit one does, so inference cannot reach a connection the estate does not declare.
 
+Registered objects come first. A table or view that a [schema registration flow](../flow/sch.md)
+(`flowType: sch`) registered carries a `Registers` edge to that flow, and an active registration's source server
+is where its data is fetched from: inference follows those edges before anything else (for the caller's object
+keys, then for the tables the SQL names), and when every registered object lives in one database it also fills
+the query's `database`, so the query runs where the objects were registered even if the connection opens
+elsewhere. A registration's connection is therefore a declared datasource like any pipeline's.
+
+The known-reference gate is one check, `DatasourceInference.IsDeclaredAsync`, used by prepare, by confirming an
+example with an explicit datasource, and by the datasource compute tasks: a whole `${...}` reference passes only
+when an **active** pipeline declares it as its source or target (an `@alias` resolves against the node's registry
+instead). A deactivated pipeline no longer opens its connection to ad-hoc queries.
+
 ### Running a query from the chat GUI
 
 The two-step surface above is not MCP-only: the chat thread (`docs/reference/guides/chat-assistant.md`) can

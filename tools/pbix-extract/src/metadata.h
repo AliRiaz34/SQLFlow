@@ -52,6 +52,15 @@ typedef struct {
     char *expression;   /* Power Query / M */
 } TableSource;
 
+/*
+ * A shared Power Query expression: a named query the model keeps but does not load as a table
+ * (Power BI Desktop's "Enable load" turned off), such as a dimension another table merges in.
+ */
+typedef struct {
+    char *name;
+    char *expression;   /* Power Query / M */
+} SharedExpression;
+
 typedef struct {
     Measure *measures;
     size_t measure_count;
@@ -67,6 +76,9 @@ typedef struct {
 
     TableSource *sources;
     size_t source_count;
+
+    SharedExpression *expressions;
+    size_t expression_count;
 } ModelSpec;
 
 /*

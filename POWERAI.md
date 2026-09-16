@@ -637,5 +637,22 @@ In roughly the order it would need to land, since each depends on groundwork the
    the extractor is added to `deploy/compose`, but the Azure estate still needs its container app created (a
    `pbix-extractor.bicep` module is provided) before `ControlPlane:PowerAI:ReportExtraction` can be enabled there.
 
+9. ~~**Questions about a database no flow loads.**~~ **Done.** A query could only run on a connection an active
+   pipeline declares, so a dashboard over a database SQLFlow does not load could be searched but never run. A
+   schema registration flow (`flowType: sch`, [docs/reference/flow/sch.md](docs/reference/flow/sch.md)) now
+   registers that database's tables and views in the catalog; its connection is a declared datasource, a
+   subscriber library with no connections links onto the registered tables by database, schema, and name, and
+   datasource inference follows the `Registers` edges to the connection and database. The dashboard, not the
+   registration, supplies joins and measures. See
+   [docs/wiki/decisions/schema-registration-flows.md](docs/wiki/decisions/schema-registration-flows.md).
+10. ~~**Dashboard matches whose SQL cannot run.**~~ **Done.** A visual's rendered SQL names the report's model,
+   not the database, so a dashboard match could be found but not run. Each sync now translates every visual's
+   query into T-SQL over the source tables its model loads from (`VisualSqlTranslator`: Power Query column
+   lineage including merged queries, joins along the model's active relationships, and a stated DAX subset),
+   stores it as `SourceSql` beside the report's query, and serves it as the match's runnable `sql`. A visual
+   outside the subset carries a `translationProblem` and stays a lead. See
+   [docs/reference/flow/subscribers.md](docs/reference/flow/subscribers.md#source-sql-per-visual) and
+   [docs/wiki/decisions/visual-sql-translation.md](docs/wiki/decisions/visual-sql-translation.md).
+
 Each item is scoped so it can be picked up, implemented, and landed independently; nothing here
 should be treated as a single large batch of work.

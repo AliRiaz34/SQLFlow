@@ -48,6 +48,10 @@ public enum LineageRelation
     Requires = 3,
 
     Destroys = 4,
+
+    /// <summary>A schema registration flow (flowType: sch) recorded the object's metadata in the catalog. Metadata
+    /// only: it implies no dependency, orders nothing, and moves no data.</summary>
+    Registers = 5,
 }
 
 /// <summary>One pipeline (flow document) participating in the graph.</summary>
@@ -134,6 +138,20 @@ public sealed record LineageSubscriberModel
     public required IReadOnlyList<LineageSubscriberModelTable> Tables { get; init; }
 
     public required IReadOnlyList<LineageSubscriberModelRelationship> Relationships { get; init; }
+
+    /// <summary>The model's shared Power Query expressions: queries it keeps without loading them as tables, which a
+    /// table's own query can merge in by name.</summary>
+    public IReadOnlyList<LineageSubscriberExpression> Expressions { get; init; } = [];
+}
+
+/// <summary>One shared Power Query expression of a report's semantic model.</summary>
+public sealed record LineageSubscriberExpression
+{
+    /// <summary>The query's name, as another query refers to it.</summary>
+    public required string Name { get; init; }
+
+    /// <summary>Its Power Query (M) text.</summary>
+    public required string PowerQuery { get; init; }
 }
 
 /// <summary>One table of a report's semantic model.</summary>
@@ -284,6 +302,14 @@ public sealed record LineageSubscriberQuery
 
     /// <summary>The node keys this query reads, ordinal-sorted and deduplicated.</summary>
     public required IReadOnlyList<string> ObjectKeys { get; init; }
+
+    /// <summary>For a query a report visual asks: the same question as T-SQL over the source tables the report's
+    /// model loads from, runnable on the connection those tables were resolved to. Null when the query is not a
+    /// visual's, or when it could not be translated (see <see cref="TranslationProblem"/>).</summary>
+    public string? SourceSql { get; init; }
+
+    /// <summary>Why a visual's query has no <see cref="SourceSql"/>; null otherwise.</summary>
+    public string? TranslationProblem { get; init; }
 }
 
 /// <summary>One catalog or file object participating in the graph. The key is the canonical node identity:

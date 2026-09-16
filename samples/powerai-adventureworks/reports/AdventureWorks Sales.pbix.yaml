@@ -295,6 +295,38 @@ subscribers:
     - id: AdventureWorks_Sales#AdventureWorks Sales.pbix#col:Table.Sorting
       kind: column
       dataType: int64
+    - id: AdventureWorks_Sales#AdventureWorks Sales.pbix#expr:DimGeography
+      kind: expression
+      powerQuery: >-
+        let
+            Source = Sql.Database("<redacted>", "AdventureWorks"),
+            dbo_DimGeography = Source{[Schema="dbo",Item="DimGeography"]}[Data],
+            #"Removed Other Columns" = Table.SelectColumns(dbo_DimGeography,{"GeographyKey", "City", "StateProvinceName", "EnglishCountryRegionName", "PostalCode"}),
+            #"Renamed Columns" = Table.RenameColumns(#"Removed Other Columns",{{"StateProvinceName", "State-Province"}, {"EnglishCountryRegionName", "Country-Region"}, {"PostalCode", "Postal Code"}})
+        in
+            #"Renamed Columns"
+    - id: AdventureWorks_Sales#AdventureWorks Sales.pbix#expr:DimProductCategory
+      kind: expression
+      powerQuery: >-
+        let
+            Source = Sql.Database("<redacted>", "AdventureWorks"),
+            dbo_DimProductCategory = Source{[Schema="dbo",Item="DimProductCategory"]}[Data],
+            #"Removed Other Columns" = Table.SelectColumns(dbo_DimProductCategory,{"ProductCategoryKey", "EnglishProductCategoryName"})
+        in
+            #"Removed Other Columns"
+    - id: AdventureWorks_Sales#AdventureWorks Sales.pbix#expr:DimProductSubcategory
+      kind: expression
+      powerQuery: >-
+        let
+            Source = Sql.Database("<redacted>", "AdventureWorks"),
+            dbo_DimProductSubcategory = Source{[Schema="dbo",Item="DimProductSubcategory"]}[Data],
+            #"Removed Other Columns" = Table.SelectColumns(dbo_DimProductSubcategory,{"ProductSubcategoryKey", "EnglishProductSubcategoryName", "ProductCategoryKey"}),
+            #"Merged Queries" = Table.NestedJoin(#"Removed Other Columns", {"ProductSubcategoryKey"}, DimProductCategory, {"ProductCategoryKey"}, "DimProductCategory", JoinKind.LeftOuter),
+            #"Expanded DimProductCategory" = Table.ExpandTableColumn(#"Merged Queries", "DimProductCategory", {"ProductCategoryKey", "EnglishProductCategoryName"}, {"ProductCategoryKey.1", "EnglishProductCategoryName"}),
+            #"Renamed Columns" = Table.RenameColumns(#"Expanded DimProductCategory",{{"EnglishProductCategoryName", "Category"}, {"EnglishProductSubcategoryName", "Subcategory"}}),
+            #"Removed Columns" = Table.RemoveColumns(#"Renamed Columns",{"ProductCategoryKey", "ProductCategoryKey.1"})
+        in
+            #"Removed Columns"
     - id: AdventureWorks_Sales#AdventureWorks Sales.pbix#measure:Sales.Sales Amount by Due Date
       kind: measure
       dax: CALCULATE(SUM(Sales[Sales Amount]), USERELATIONSHIP(Sales[DueDateKey],'Date'[DateKey]))

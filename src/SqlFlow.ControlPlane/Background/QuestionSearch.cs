@@ -11,7 +11,9 @@ namespace SqlFlow.ControlPlane.Background;
 /// query can sound exactly as confident as a right one).
 /// </summary>
 /// <param name="Question">The stored question text.</param>
-/// <param name="Sql">The query that answers it, empty when the visual's query could not be resolved.</param>
+/// <param name="Sql">The runnable query that answers it: a confirmed example's SQL, or a report visual's query translated
+/// into T-SQL over its source tables. Empty when there is none (the visual's query could not be resolved or
+/// translated; see <paramref name="TranslationProblem"/>).</param>
 /// <param name="ObjectKeys">The warehouse objects <paramref name="Sql"/> reads.</param>
 /// <param name="Provenance">Where the example came from: <see cref="SemanticExampleProvenance.PowerBi"/> for a
 /// question derived from an extracted report visual, <see cref="SemanticExampleProvenance.UserConfirmed"/> for
@@ -29,8 +31,8 @@ namespace SqlFlow.ControlPlane.Background;
 /// for a question derived from a report visual, which no person has individually stood behind.</param>
 /// <param name="SourceRef">The datasource <paramref name="Sql"/> runs against, in the whole-reference shape
 /// the DataOps query surface requires (a <c>${env:...}</c>/<c>${keyvault:...}</c> token or an <c>@alias</c>).
-/// Null when the confirmed example was stored without one, and always null for a PowerBI-derived question,
-/// which names a model entity rather than a live connection. This is what an auto-run caller reads to know
+/// Null when the confirmed example was stored without one, and for a PowerBI-derived question, whose connection
+/// the similar-questions endpoint works out from the tables its SQL reads. This is what an auto-run caller reads to know
 /// which connection to prepare <paramref name="Sql"/> against; without it the match still stands as precedent
 /// but cannot be run without a person choosing a datasource first.</param>
 /// <param name="ExampleId">The <c>CatalogSemanticExample.Id</c> behind this match, for an auto-run caller to
@@ -40,6 +42,10 @@ namespace SqlFlow.ControlPlane.Background;
 /// (stop words dropped, inflections folded), i.e. it is the same question reworded at most trivially. A term-count
 /// threshold alone can never trust a short question: "how many customers do we have?" has one meaningful word, so
 /// even its verbatim twin scores 1. This is what lets such a match be trusted on identity rather than on count.</param>
+/// <param name="ReportSql">For a report-derived question: the visual's own query, which names the report's model
+/// rather than the source tables and so is evidence, not something to run. Null for a confirmed example.</param>
+/// <param name="TranslationProblem">For a report-derived question with no runnable <paramref name="Sql"/>: why its
+/// query could not be translated. Null otherwise.</param>
 public sealed record QuestionMatch(
     string Question,
     string Sql,
@@ -52,7 +58,9 @@ public sealed record QuestionMatch(
     string? ConfirmedBy = null,
     string? SourceRef = null,
     long? ExampleId = null,
-    bool SameQuestion = false);
+    bool SameQuestion = false,
+    string? ReportSql = null,
+    string? TranslationProblem = null);
 
 /// <summary>The outcome of one search: the terms actually searched for (the expansion, or the question's own
 /// words when expansion is off or unavailable) and the trustworthy matches. The terms travel with the result
@@ -216,31 +224,39 @@ public static class QuestionSearch
         {
             return new VisualLookup(
                 new Dictionary<string, ResolvedVisual>(StringComparer.Ordinal),
-                new Dictionary<string, ResolvedQuery>(StringComparer.Ordinal));
+                new Dictionary<(Guid, string, string), ResolvedQuery>());
         }
 
-        var visuals = await db.SubscriberReportVisuals.AsNoTracking()
-            .Where(v => visualKeys.Contains(v.VisualKey))
-            .Select(v => new { v.VisualKey, v.QueryName, v.Title })
+        // A visual's query is found by its repo, its subscriber, and its name together: two reports can give
+        // same-named visuals different queries, and a name alone would hand one report's SQL to the other.
+        var visuals = await (
+                from visual in db.SubscriberReportVisuals.AsNoTracking()
+                where visualKeys.Contains(visual.VisualKey)
+                join page in db.SubscriberReportPages.AsNoTracking()
+                    on new { visual.RepoId, visual.PageKey } equals new { page.RepoId, page.PageKey }
+                select new { visual.VisualKey, visual.QueryName, visual.Title, visual.RepoId, page.SubscriberKey })
             .ToListAsync(ct).ConfigureAwait(false);
 
         var queryNames = visuals.Select(v => v.QueryName).Distinct().ToList();
+        var subscriberKeys = visuals.Select(v => v.SubscriberKey).Distinct().ToList();
         var queries = await db.SubscriberQueries.AsNoTracking()
-            .Where(q => queryNames.Contains(q.Name))
-            .Select(q => new { q.Name, q.Sql, q.ObjectKeys, q.SubscriberKey })
+            .Where(q => queryNames.Contains(q.Name) && subscriberKeys.Contains(q.SubscriberKey))
+            .Select(q => new { q.RepoId, q.SubscriberKey, q.Name, q.Sql, q.SourceSql, q.TranslationProblem, q.ObjectKeys })
             .ToListAsync(ct).ConfigureAwait(false);
 
         return new VisualLookup(
-            visuals.ToDictionary(
-                v => v.VisualKey,
-                v => new ResolvedVisual(v.QueryName, v.Title),
-                StringComparer.Ordinal),
-            queries
-                .GroupBy(q => q.Name, StringComparer.Ordinal)
+            visuals
+                .GroupBy(v => v.VisualKey, StringComparer.Ordinal)
                 .ToDictionary(
                     g => g.Key,
-                    g => new ResolvedQuery(g.First().Sql, g.First().ObjectKeys, g.First().SubscriberKey),
-                    StringComparer.Ordinal));
+                    g => new ResolvedVisual(g.First().RepoId, g.First().SubscriberKey, g.First().QueryName, g.First().Title),
+                    StringComparer.Ordinal),
+            queries
+                .GroupBy(q => (q.RepoId, q.SubscriberKey, q.Name))
+                .ToDictionary(
+                    g => g.Key,
+                    g => new ResolvedQuery(
+                        g.First().Sql, g.First().SourceSql, g.First().TranslationProblem, g.First().ObjectKeys, g.First().SubscriberKey)));
     }
 
     /// <summary>Loads the winning confirmed examples' own SQL, objects, and confirming user. An example carries
@@ -269,20 +285,25 @@ public static class QuestionSearch
     {
         var visualKey = row.VisualKey ?? string.Empty;
         lookup.Visuals.TryGetValue(visualKey, out var visual);
-        var query = visual is not null && lookup.Queries.TryGetValue(visual.QueryName, out var found)
+        var query = visual is not null
+                    && lookup.Queries.TryGetValue((visual.RepoId, visual.SubscriberKey, visual.QueryName), out var found)
             ? found
             : null;
 
         return new QuestionMatch(
             row.Question,
-            query?.Sql ?? string.Empty,
+            query?.SourceSql ?? string.Empty,
             SplitObjectKeys(query?.ObjectKeys),
             row.Provenance,
             score,
             matched,
             query?.SubscriberKey ?? SubscriberKeyFromVisualKey(visualKey),
             visual?.Title,
-            SameQuestion: sameQuestion);
+            SameQuestion: sameQuestion,
+            ReportSql: query?.Sql,
+            TranslationProblem: query is null
+                ? "the visual's query was not found"
+                : query.SourceSql is null ? query.TranslationProblem ?? "the visual's query has not been translated yet" : null);
     }
 
     /// <summary>Builds the match for a confirmed example, whose answer lives on its own row.</summary>
@@ -480,9 +501,10 @@ public static class QuestionSearch
     /// non-zero id is what says which.</summary>
     private sealed record QuestionRow(string Question, string Provenance, string? VisualKey, long ExampleId);
 
-    private sealed record ResolvedVisual(string QueryName, string? Title);
+    private sealed record ResolvedVisual(Guid RepoId, string SubscriberKey, string QueryName, string? Title);
 
-    private sealed record ResolvedQuery(string Sql, string ObjectKeys, string SubscriberKey);
+    private sealed record ResolvedQuery(
+        string Sql, string? SourceSql, string? TranslationProblem, string ObjectKeys, string SubscriberKey);
 
     private sealed record ResolvedExample(string Sql, string ObjectKeys, string? ConfirmedBy, string? SourceRef);
 
@@ -490,7 +512,7 @@ public static class QuestionSearch
     /// returns one value rather than a tuple of dictionaries.</summary>
     private sealed record VisualLookup(
         IReadOnlyDictionary<string, ResolvedVisual> Visuals,
-        IReadOnlyDictionary<string, ResolvedQuery> Queries);
+        IReadOnlyDictionary<(Guid RepoId, string SubscriberKey, string Name), ResolvedQuery> Queries);
 
     private static System.Linq.Expressions.Expression<Func<T, bool>> Or<T>(
         System.Linq.Expressions.Expression<Func<T, bool>> left,

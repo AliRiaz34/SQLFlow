@@ -676,6 +676,14 @@ public class CatalogSubscriberQuery
     /// <summary>The object keys this one query reads, newline-joined. Empty when the query named nothing
     /// lineage could resolve.</summary>
     public string ObjectKeys { get; set; } = string.Empty;
+
+    /// <summary>For a report visual's query: the same question as T-SQL over the source tables the report's model
+    /// loads from, runnable on <see cref="ServerRef"/>. Null for a declared query, and for a visual whose query could
+    /// not be translated (see <see cref="TranslationProblem"/>).</summary>
+    public string? SourceSql { get; set; }
+
+    /// <summary>Why a visual's query has no <see cref="SourceSql"/>; null otherwise.</summary>
+    public string? TranslationProblem { get; set; }
 }
 
 /// <summary>

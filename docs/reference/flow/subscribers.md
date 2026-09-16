@@ -35,14 +35,18 @@ keywords:
   - report specification
   - sqlflow powerbi extract
   - uploaded report
+  - registered source
+  - schema registration
 yamlPath: subscribers
 related:
+  - flow-sch
   - concept-lineage-graph-and-plan
   - concept-lineage-tiers
   - flow-schedule
   - flow-overview
 sourceRefs:
   - src/SqlFlow.Core/Subscribers/DataSubscriber.cs
+  - src/SqlFlow.Lineage/Collection/SchemaRegistrationCollector.cs
   - docs/reference/flow/keys.subscribers.json
   - src/SqlFlow.Yaml/YamlSubscriberLibraryLoader.cs
   - src/SqlFlow.Lineage/Collection/FlowSetCollector.cs
@@ -113,7 +117,7 @@ Like `schedules.yaml`, these files are NOT flow documents: they are excluded fro
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `connections` | yes, when any query names a server | The same `connections:` block every flow document uses: alias to a SQL Server reference. A bare alias resolves `${env:SQLFLOW_CONN_<NAME>}` by the canonical convention, so the file can stay reference-free. |
+| `connections` | yes, when any query names a server | The same `connections:` block every flow document uses: alias to a SQL Server reference. A bare alias resolves `${env:SQLFLOW_CONN_<NAME>}` by the canonical convention, so the file can stay reference-free. A library with no `connections:` at all is a [registered-source library](#registered-source-subscribers). |
 | `subscribers` | yes | Maps a subscriber's NAME to its declaration. The name is its identity across the estate and the label on its graph node. |
 | `subscribers.<name>.type` | no (warns) | What consumes the data (legacy `SubscriberType`): `PowerBI`, `Tableau`, `Excel`, `Notebook`, `Application`, or any label the estate uses. Free text, as the legacy column was. Omitted records `Unknown` with a warning. |
 | `subscribers.<name>.owner` | no | Who to contact before a breaking change to a table it reads (legacy `CreatedBy`). |
@@ -218,9 +222,14 @@ edges:
     to: "Analyse_Bysykkel#analyse_bysykkel.pbix#col:Trips.StationName"
     kind: "projects"
     role: "Category"
+  - id: "Analyse_Bysykkel#analyse_bysykkel.pbix#expr:Stations"
+    kind: "expression"
+    powerQuery: "let\n    Source = Sql.Database(\"dwh\", \"OdsDb\"),\n    ..."
 ```
 
-Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
+An `expression` node is a Power Query query the model defines but does not load as a table (a lookup a loaded table merges in, for example). It is read from the model's shared expressions, carries its M redacted like a table's, and has no edges; a loaded table's M refers to it by name.
+
+Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `expression`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
 
 The collector reads this specification (from the tool's standard output, or from any of the other places listed below) and both halves are stored in the catalog: the report layer (pages, visuals, projected fields, and each visual's rendered SQL) and the model layer (tables with their Power Query source, columns, calculated columns, measures, and relationships). See [What lands in the catalog](#what-lands-in-the-catalog). `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
 
@@ -264,9 +273,60 @@ Intervening transform steps and formatting variation are tolerated (the navigati
 
 The server string in `sourceServer` is reported for a reader but is **not** used as an estate identity. How a connection string inside a report maps onto a declared `connections:` reference is a question only the estate's own configuration can answer, so the resolved object keeps the subscriber's own `server:` identity and takes only the database, schema, and table name from the M expression.
 
+### Registered-source subscribers
+
+A dashboard often reads a database SQLFlow does not load. Its library then declares **no `connections:` block at all**, and a [schema registration flow](sch.md) (`flowType: sch`) registers that database's tables and views instead:
+
+```yaml
+# subscribers/adventureworks_sales.subscribers.yaml
+subscribers:
+  AdventureWorks_Sales:
+    type: PowerBI
+    owner: analytics@example.com
+    pbix: reports/AdventureWorks Sales.pbix.yaml
+```
+
+Such a subscriber's queries need no `server`, and its report is read without one. Every object its queries name, and every model table its report resolves (above), starts on a synthetic `registered` identity carrying only database, schema, and name. The lineage build matches each one to the object a schema registration flow registered with the same database, schema, and name (schema and name when the reference names no database), and re-keys it under that flow's connection, so the report's read edges and its model tables land on the registered objects. A query whose objects all resolved to one connection records that connection as its `ServerRef`.
+
+Registrations made by any repository count, whether this build read them or an earlier sync did. Nothing is guessed: a name no registration has, or one registered in two databases, stays on the `registered` identity with a warning naming why, and a one-part name is a model entity the report itself resolves or reports.
+
+The split is deliberate. The registration says where the data is (its connection and database); the dashboard says how it fits together (its relationships, measures, and calculated columns). A registration therefore reads no foreign keys, and the model a question is answered from is the report's.
+
+### Source SQL per visual
+
+A visual's `sql` is written against the report's model: it names model tables and model columns, lists its tables without join predicates, and may name DAX measures, so it cannot run on a database. The lineage build therefore translates each visual's query into one T-SQL statement over the source tables its model loads from, and stores it beside the report's own query as the query's `SourceSql`. The output is T-SQL only; no DAX survives into it.
+
+How each part translates:
+
+| Part | Translation |
+| --- | --- |
+| Model table | Its Power Query source (`Sql.Database` plus navigation) as a three-part name, with the joins its M adds |
+| Model column | The source column its M maps it to, or the scalar expression an added column computes |
+| Tables a visual names | `LEFT JOIN`s along the model's active relationships, rooted at a table that reaches all of them (many side to one side) |
+| Plain select items | Grouped (`GROUP BY`) |
+| `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` | Kept, over the mapped column |
+| Measure | Its DAX translated, see below |
+| Filters (`WHERE`) and `ORDER BY` | Rewritten with the same mapping; `ORDER BY` names the output aliases, which keep the visual's own select names |
+| Literals | Plain T-SQL (`2020`, `1.5`, `'2020-01-01T00:00:00'`, `1`/`0` for true/false) |
+
+The Power Query steps understood are `Table.SelectColumns`, `RemoveColumns`, `RenameColumns`, `DuplicateColumn`, `ReorderColumns`, `TransformColumnTypes`, `AddColumn` (with column references, text and number literals, `&`, `+ - * /`, `Text.From` and `Number.From`), and `Table.NestedJoin` (left outer or inner) followed by `Table.ExpandTableColumn`, where the joined query is another table or an `expression` node.
+
+The DAX subset is `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `DISTINCTCOUNT` of a column, `COUNTROWS` of the visual's root table, `DIVIDE` (a division guarded with `NULLIF`, and `COALESCE` for its alternate result), `BLANK()`, arithmetic, references to other measures, and `CALCULATE` whose only filters are `USERELATIONSHIP`. When measures need different join paths (a `USERELATIONSHIP` on an inactive relationship), each join path becomes its own CTE grouped by the visual's keys, and the CTEs are joined with a null-safe `FULL OUTER JOIN` on those keys (a `CROSS JOIN` when there are none).
+
+Anything else is refused rather than approximated, and the query stores a `TranslationProblem` naming what stopped it instead of `SourceSql`:
+
+- a Power Query step not listed above, or one that changes rows (`Table.SelectRows`, `Table.Distinct`, `Table.Group`, ...), which makes the whole table untranslatable because its rows are no longer the source rows;
+- a source other than `Sql.Database` (`Json.Document`, a file, a web call);
+- any other DAX function (filters inside `CALCULATE`, iterators, time intelligence);
+- tables that no active relationship connects;
+- a mapped column the source table does not have, when the build knows that table's columns (from a schema registration or a live inventory);
+- a report connected live to a published dataset, which has no model to translate from.
+
+A declared query in `subscribers.yaml` is already source SQL and is not translated. Every translation is parsed with the same guard ad-hoc queries go through before it is stored.
+
 ## What lands in the catalog
 
-`sqlflow db sync` mirrors subscribers into `catalog.Subscriber` and their queries into `catalog.SubscriberQuery`, repo-scoped and replaced wholesale on each sync, so a subscriber deleted from the YAML stops being listed as a consumer. `FirstSeenUtc` survives the replacement, so the catalog can still say how long a report has been reading the warehouse. Query text is redacted on the same path module bodies take, since authored SQL can embed a literal credential.
+`sqlflow db sync` mirrors subscribers into `catalog.Subscriber` and their queries into `catalog.SubscriberQuery`, repo-scoped and replaced wholesale on each sync, so a subscriber deleted from the YAML stops being listed as a consumer. `FirstSeenUtc` survives the replacement, so the catalog can still say how long a report has been reading the warehouse. Query text is redacted on the same path module bodies take, since authored SQL can embed a literal credential. A report visual's query also stores its `SourceSql` or its `TranslationProblem` (see [Source SQL per visual](#source-sql-per-visual)), redacted the same way.
 
 The consumption itself is not stored twice: the read edges are ordinary `catalog.LineageEdge` rows, so "what consumes table X" is the same edge query as "what writes table X".
 

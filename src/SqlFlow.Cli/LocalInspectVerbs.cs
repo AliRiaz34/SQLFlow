@@ -113,6 +113,7 @@ internal static class LocalInspectVerbs
         InvokeFlowDocument doc => ("inv", doc.Document.Definition.InvokeAlias),
         HealthCheckFlowDocument doc => ("hc", doc.Document.Flow.SysAlias),
         SourceControlFlowDocument doc => ("scm", doc.Document.Flow.SysAlias),
+        SchemaRegistrationFlowDocument doc => ("sch", doc.Document.Flow.SysAlias),
         BatchFlowDocument doc => ("batch", doc.Document.Flow.SysAlias),
         AcquireFlowDocument doc => ("api", doc.Flow.Name),
         CopyFlowDocument doc => ("cpy", doc.Flow.Name),

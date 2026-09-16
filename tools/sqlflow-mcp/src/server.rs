@@ -121,7 +121,7 @@ pub struct ValidateFlowInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct FlowTypeInput {
-    /// The flow kind: omit for the file flow, or one of ing, exp, sp, inv, hc, scm, batch, api, cpy, sftp, cal, trl.
+    /// The flow kind: omit for the file flow, or one of ing, exp, sp, inv, hc, scm, sch, batch, api, cpy, sftp, cal, trl.
     #[serde(rename = "flowType")]
     pub flow_type: Option<String>,
 }
@@ -2123,7 +2123,9 @@ and fix every finding first."
             \"what does this dashboard use\" or \"where does this report get its data\". The consumption-side \
             twin of describe_object: that answers 'who consumes this table', this answers 'what does this \
             report consume'. Use it for impact analysis before changing a table, and to see the SQL a report \
-            actually runs. For the report's PAGES, VISUALS, and each field's ROLE (the axis a chart is broken \
+            actually runs. A report visual's query carries two texts: `sql`, its query against the report's \
+            model, and `sourceSql`, the same question translated into T-SQL over the source tables (the one \
+            prepare_query can run), or a `translationProblem` saying why there is none. For the report's PAGES, VISUALS, and each field's ROLE (the axis a chart is broken \
             down BY versus the value it plots, which this payload's query texts alone do not label), use \
             describe_subscriber_report instead. Takes the `key` from list_subscribers."
     )]
@@ -2202,7 +2204,12 @@ and fix every finding first."
             `exampleId` should be run immediately with auto_run_trusted_match, without asking the person, \
             skipping the prepare_query/run_query approval round trip entirely, because this exact SQL was \
             already confirmed by a person when it was stored; a trusted match without an `exampleId` (a \
-            dashboard question) still needs prepare_query/run_query. \
+            dashboard question) still needs prepare_query/run_query. A dashboard match's `sql` is the \
+            report visual translated into T-SQL over the source tables, so it runs as it is; `reportSql` is the \
+            visual's own query against the report's model and never runs. A dashboard match that carries a \
+            `translationProblem` (and an empty `sql`) could not be translated: treat it as a lead only, telling \
+            you which question a report answers and which fields it uses, and compose the query yourself from \
+            the semantic layer. \
             When a person, after seeing the result, explicitly tells you your answer was \
             right, or tells you how to fix it, record that with confirm_question so the next similar question \
             finds it; agreeing to run a query is not that. An empty `matches` \

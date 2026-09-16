@@ -30,6 +30,7 @@ referenceRefs:
 related:
   - wiki-pbix-split-report-format
   - wiki-powerbi-report-specifications
+  - wiki-schema-registration-flows
 updated: 2026-09-16
 ---
 

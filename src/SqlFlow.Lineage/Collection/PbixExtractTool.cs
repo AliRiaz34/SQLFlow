@@ -380,7 +380,7 @@ internal static class PbixExtractTool
 
     /// <summary>
     /// One YAML graph node. This one type models every node kind the tool can emit (table, column, measure,
-    /// calculatedColumn, report, page, visual), since YamlDotNet has no polymorphic-by-discriminator mapping for
+    /// calculatedColumn, expression, report, page, visual), since YamlDotNet has no polymorphic-by-discriminator mapping for
     /// a plain sequence item; a property a given <see cref="Kind"/> does not use is simply left null. Both the
     /// report-layer kinds and the model-layer kinds are read back out into typed records (see
     /// <see cref="SpecGraph"/>).
@@ -418,8 +418,8 @@ internal static class PbixExtractTool
         /// three: a partial resolution is reported as unresolved rather than half-applied.</summary>
         public string? SourceName { get; set; }
 
-        /// <summary>On a <c>table</c> node: the Power Query (M) expression that loads it, as the tool emits it
-        /// (with the server literal already redacted).</summary>
+        /// <summary>On a <c>table</c> node: the Power Query (M) expression that loads it; on an <c>expression</c>
+        /// node: the shared query's M. As the tool emits it, with the server literal already redacted.</summary>
         public string? PowerQuery { get; set; }
 
         /// <summary>On a <c>column</c> node: the model's data type (<c>string</c>, <c>int64</c>, and so on).</summary>
@@ -731,7 +731,15 @@ file static class SpecGraph
             }
         }
 
-        return new PbixModel(tables, relationships);
+        var expressions = nodes
+            .Where(n => n.Kind == "expression" && !string.IsNullOrEmpty(n.PowerQuery))
+            .Select(n => (Name: ModelQualifier(n.Id, "expr"), n.PowerQuery))
+            .Where(e => e.Name is { Length: > 0 })
+            .Select(e => new PbixModelExpression(e.Name!, e.PowerQuery!))
+            .OrderBy(e => e.Name, StringComparer.Ordinal)
+            .ToList();
+
+        return new PbixModel(tables, relationships, expressions);
     }
 
     /// <summary>Lists a table's plain columns first, then its calculated columns, then its measures.</summary>
@@ -791,7 +799,14 @@ internal sealed record PbixExtractResult(
 
 /// <summary>A report's semantic model: its tables (with the fields defined on each) and the relationships between
 /// them. Empty for a report connected live to a published dataset, which carries no model of its own.</summary>
-internal sealed record PbixModel(IReadOnlyList<PbixModelTable> Tables, IReadOnlyList<PbixModelRelationship> Relationships);
+internal sealed record PbixModel(
+    IReadOnlyList<PbixModelTable> Tables, IReadOnlyList<PbixModelRelationship> Relationships,
+    IReadOnlyList<PbixModelExpression> Expressions);
+
+/// <summary>One shared Power Query expression: a query the model keeps without loading it as a table.</summary>
+/// <param name="Name">The query's name, as a table's query refers to it.</param>
+/// <param name="PowerQuery">Its M text.</param>
+internal sealed record PbixModelExpression(string Name, string PowerQuery);
 
 /// <summary>One model table.</summary>
 /// <param name="Name">The model entity name, as a visual and a DAX expression refer to it.</param>

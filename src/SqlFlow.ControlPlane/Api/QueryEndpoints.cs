@@ -153,21 +153,23 @@ public static class QueryEndpoints
             }
 
             reference = inferred.Reference;
+
+            // A registered database the connection does not open on by default is named explicitly, so the query
+            // runs where its objects were registered.
+            if (bounds.Database is null && inferred.Database is not null)
+            {
+                bounds = bounds with { Database = inferred.Database };
+            }
         }
 
         // The same reference gate the compute path uses: a query may only reach a datasource the reviewed git
         // estate already declares, so this surface can never be pointed at a novel connection.
-        if (!reference.StartsWith('@'))
+        if (!reference.StartsWith('@')
+            && !await DatasourceInference.IsDeclaredAsync(db, reference, ct).ConfigureAwait(false))
         {
-            var known = await db.Pipelines.AsNoTracking()
-                .AnyAsync(p => p.SourceServer == reference || p.TargetServer == reference, ct)
-                .ConfigureAwait(false);
-            if (!known)
-            {
-                return Problem(
-                    $"No pipeline in the catalog declares the datasource reference '{reference}'.",
-                    StatusCodes.Status404NotFound, "Not found");
-            }
+            return Problem(
+                $"No active pipeline in the catalog declares the datasource reference '{reference}'.",
+                StatusCodes.Status404NotFound, "Not found");
         }
 
         var now = clock.GetUtcNow().UtcDateTime;

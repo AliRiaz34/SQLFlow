@@ -90,6 +90,12 @@ to narrow a search to one kind of page.
 - [A Power BI report travels as its specification](decisions/powerbi-report-specifications.md) - why the
   extractor stayed put while its output moved into committed files and the semantic layer, why uploads are read by
   an isolated service, and the silent model loss on control plane syncs that forced it.
+- [An external database is registered by a flow, and the dashboard supplies the model](decisions/schema-registration-flows.md) -
+  why `flowType: sch` exists instead of reusing scm, why it reads only tables and views and leaves joins and
+  measures to the dashboard, and why subscribers link to it by name.
+- [A report visual's query is translated into T-SQL at sync, or refused with a reason](decisions/visual-sql-translation.md) -
+  why the output is T-SQL only, why a stated Power Query and DAX subset refuses rather than approximates, why it
+  runs in the graph builder, and why the translation is served as a dashboard match's SQL.
 
 ### Incidents
 

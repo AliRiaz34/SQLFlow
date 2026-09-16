@@ -238,3 +238,21 @@ the `AddSemanticReportSpecs` migration), GUI uploads are read by the isolated `S
 change (the managed sync erasing a model a developer sync had written) and the subscriber-library fingerprint that
 closed a second gap found on the way. The surfaces are documented in `flow-subscribers`, `concept-semantic-layer`,
 and `cli-control-plane`.
+
+## [2026-09-16] ingest | Schema registration flows (flowType: sch)
+
+Wrote [An external database is registered by a flow, and the dashboard supplies the model](decisions/schema-registration-flows.md)
+from the design settled with the human while closing PowerAI's gap on databases no flow loads: a new `sch` flow
+kind instead of scm or inv, the catalog rather than the semantic layer, only tables and views because the
+dashboard supplies joins and computed values, and linking registered-source subscribers by database metadata. It
+also records the harvester and object-write extractions and the alias remap that had been dropping subscribers.
+The surfaces are documented in `flow-sch`, `flow-subscribers`, `concept-data-operations`, and
+`concept-lineage-graph-and-plan`.
+
+## [2026-09-16] ingest | Visual SQL translation
+
+Wrote [A report visual's query is translated into T-SQL at sync, or refused with a reason](decisions/visual-sql-translation.md)
+from the choices the human made while closing the gap schema registration left open: T-SQL as the only output, a
+common DAX subset, and the translation served as a dashboard match's runnable SQL. It records the refusal rules for
+Power Query and DAX, the shared expressions and literal rendering added to `pbix-extract`, and the per-subscriber
+query lookup fixed on the way. The surfaces are documented in `flow-subscribers` and `guide-chat-assistant`.

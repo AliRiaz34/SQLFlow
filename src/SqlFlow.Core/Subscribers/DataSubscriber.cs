@@ -9,6 +9,14 @@ namespace SqlFlow.Core.Subscribers;
 /// </summary>
 public sealed record DataSubscriber
 {
+    /// <summary>
+    /// The connection alias a registered-source subscriber's queries and report run on. Such a subscriber's library
+    /// declares no <c>connections:</c> at all: it reads a database that a schema registration flow (flowType: sch)
+    /// registers, and the lineage graph links its reads to those registered objects by database, schema, and name.
+    /// The value can never be a declared connection name, which admits only letters, digits, and <c>_ . -</c>.
+    /// </summary>
+    public const string RegisteredSource = "(registered)";
+
     /// <summary>The subscriber's name, unique across the estate (legacy <c>SubscriberName</c>). This is what the
     /// lineage graph shows as the consuming node, so it should read as the thing a person would look for: the
     /// report name, the workbook name, the application name.</summary>
@@ -41,6 +49,10 @@ public sealed record DataSubscriber
     /// <c>connections:</c> block, or null when it declares none. A report's visuals name model entities rather than
     /// a server, so this is what they are resolved against.</summary>
     public string? Server { get; init; }
+
+    /// <summary>True when the subscriber's library declares no connection, so its queries and report are resolved
+    /// against the objects schema registration flows registered (see <see cref="RegisteredSource"/>).</summary>
+    public bool IsRegisteredSource { get; init; }
 
     /// <summary>The queries the subscriber runs against the warehouse. Every one is parsed, and the objects it
     /// touches become the subscriber's lineage edges; a subscriber with no queries is a node nothing connects
@@ -79,10 +91,16 @@ public sealed record SubscriberQuery
     /// <summary>The connection alias the query runs against (legacy <c>srcServer</c>, a
     /// <c>flw.SysDataSource.Alias</c>), keyed into the document's <c>connections:</c> block. This is what pins
     /// the query's two-part object names to the right server and database, so a subscriber reading
-    /// <c>arc.Bysykkel_Bikes</c> lands on the same node the ingestion flow writes.</summary>
+    /// <c>arc.Bysykkel_Bikes</c> lands on the same node the ingestion flow writes. A registered-source
+    /// subscriber's query carries <see cref="DataSubscriber.RegisteredSource"/> instead.</summary>
     public required string Server { get; init; }
 
     /// <summary>The query text, as the subscriber runs it (legacy <c>FullyQualifiedQuery</c>). Any T-SQL the
     /// parser accepts: a SELECT, a set of them, or the whole dataset script a report tool emits.</summary>
     public required string Sql { get; init; }
+
+    /// <summary>The report file whose visual this query is, when it was extracted from one; null for a query the
+    /// document declares. A visual's query names the report's model rather than the source tables, which is what
+    /// makes it a candidate for translation into source SQL.</summary>
+    public string? ReportFile { get; init; }
 }

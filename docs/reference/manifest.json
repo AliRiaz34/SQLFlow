@@ -2144,6 +2144,51 @@
       ]
     },
     {
+      "id": "flow-sch",
+      "corpus": "reference",
+      "path": "flow/sch.md",
+      "title": "Schema registration flow (flowType: sch)",
+      "type": "flow-reference",
+      "summary": "flowType: sch registers an external database's tables and views in the catalog so subscribers link to them and questions know where to run.",
+      "keywords": [
+        "schema registration",
+        "flowtype sch",
+        "external database",
+        "registered source",
+        "metadata only",
+        "registers relation",
+        "subscriber linking",
+        "datasource inference",
+        "powerai",
+        "chat with data"
+      ],
+      "yamlPath": "(root, flowType: sch)",
+      "related": [
+        "flow-overview",
+        "flow-schedule",
+        "flow-subscribers",
+        "concept-shadow-catalog",
+        "concept-lineage-graph-and-plan",
+        "concept-data-operations"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.Yaml/YamlSchemaRegistrationFlowLoader.cs",
+        "src/SqlFlow.Core/SchemaRegistration/SchemaRegistrationFlow.cs",
+        "src/SqlFlow.Core/SchemaRegistration/SchemaRegistrationResult.cs",
+        "src/SqlFlow.SqlServer/Catalog/SqlServerObjectHarvester.cs",
+        "src/SqlFlow.SqlServer/Catalog/SchemaRegistrationReader.cs",
+        "src/SqlFlow.SqlServer/SchemaRegistration/SchemaRegistrationRunner.cs",
+        "src/SqlFlow.Lineage/Collection/FlowDocumentHeaders.cs",
+        "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
+        "src/SqlFlow.Lineage/Collection/SchemaRegistrationCollector.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
+        "src/SqlFlow.Catalog/CatalogSync.cs",
+        "src/SqlFlow.Catalog/RunQueueStore.cs",
+        "src/SqlFlow.ControlPlane/Api/DatasourceInference.cs",
+        "src/SqlFlow.Execution/DocumentExecutor.cs"
+      ]
+    },
+    {
       "id": "flow-schedule",
       "corpus": "reference",
       "path": "flow/schedule.md",
@@ -2429,10 +2474,13 @@
         "pbix.yaml",
         "report specification",
         "sqlflow powerbi extract",
-        "uploaded report"
+        "uploaded report",
+        "registered source",
+        "schema registration"
       ],
       "yamlPath": "subscribers",
       "related": [
+        "flow-sch",
         "concept-lineage-graph-and-plan",
         "concept-lineage-tiers",
         "flow-schedule",
@@ -2440,6 +2488,7 @@
       ],
       "sourceRefs": [
         "src/SqlFlow.Core/Subscribers/DataSubscriber.cs",
+        "src/SqlFlow.Lineage/Collection/SchemaRegistrationCollector.cs",
         "docs/reference/flow/keys.subscribers.json",
         "src/SqlFlow.Yaml/YamlSubscriberLibraryLoader.cs",
         "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
@@ -3692,7 +3741,8 @@
       ],
       "related": [
         "wiki-pbix-split-report-format",
-        "wiki-powerbi-report-specifications"
+        "wiki-powerbi-report-specifications",
+        "wiki-schema-registration-flows"
       ],
       "sourceRefs": [
         "tools/pbix-extract/src/msource.c",
@@ -4127,6 +4177,43 @@
       "sourceRefs": []
     },
     {
+      "id": "wiki-schema-registration-flows",
+      "corpus": "wiki",
+      "path": "decisions/schema-registration-flows.md",
+      "title": "An external database is registered by a flow, and the dashboard supplies the model",
+      "type": "decision",
+      "summary": "Why flowType sch registers only an external database's tables and views, links dashboards to them by name, and leaves joins and measures to the dashboard.",
+      "keywords": [
+        "schema registration",
+        "flowType sch",
+        "registered source",
+        "registers relation",
+        "datasource gate",
+        "external database",
+        "chat with data",
+        "subscriber is the key"
+      ],
+      "related": [
+        "wiki-powerbi-model-entity-resolution",
+        "wiki-semantic-layer-is-the-allow-list",
+        "wiki-powerbi-report-specifications",
+        "wiki-visual-sql-translation"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.Yaml/YamlSchemaRegistrationFlowLoader.cs",
+        "src/SqlFlow.Core/SchemaRegistration/SchemaRegistrationFlow.cs",
+        "src/SqlFlow.SqlServer/Catalog/SqlServerObjectHarvester.cs",
+        "src/SqlFlow.SqlServer/Catalog/SchemaRegistrationReader.cs",
+        "src/SqlFlow.Lineage/Collection/SchemaRegistrationCollector.cs",
+        "src/SqlFlow.Lineage/Collection/CatalogCollector.cs",
+        "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
+        "src/SqlFlow.Catalog/CatalogSync.cs",
+        "src/SqlFlow.ControlPlane/Api/DatasourceInference.cs",
+        "samples/powerai-adventureworks/TESTING.md"
+      ]
+    },
+    {
       "id": "wiki-semantic-layer-is-the-allow-list",
       "corpus": "wiki",
       "path": "decisions/semantic-layer-is-the-allow-list.md",
@@ -4213,6 +4300,42 @@
         "wiki-pattern-catalog"
       ],
       "sourceRefs": []
+    },
+    {
+      "id": "wiki-visual-sql-translation",
+      "corpus": "wiki",
+      "path": "decisions/visual-sql-translation.md",
+      "title": "A report visual's query is translated into T-SQL at sync, or refused with a reason",
+      "type": "decision",
+      "summary": "Why each Power BI visual query is stored as T-SQL over its source tables, why only a stated M and DAX subset translates, and why matches serve it.",
+      "keywords": [
+        "visual sql translation",
+        "source sql",
+        "translation problem",
+        "dax to t-sql",
+        "power query lineage",
+        "dashboard match",
+        "userelationship",
+        "shared expressions"
+      ],
+      "related": [
+        "wiki-schema-registration-flows",
+        "wiki-powerbi-report-specifications",
+        "wiki-powerbi-model-entity-resolution"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.Lineage/PowerBi/VisualSqlTranslator.cs",
+        "src/SqlFlow.Lineage/PowerBi/DaxTranslator.cs",
+        "src/SqlFlow.Lineage/PowerBi/Relational.cs",
+        "src/SqlFlow.Lineage/PowerQuery/MSyntax.cs",
+        "src/SqlFlow.Lineage/PowerQuery/PowerQueryLineage.cs",
+        "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
+        "src/SqlFlow.Catalog/CatalogSync.cs",
+        "src/SqlFlow.ControlPlane/Background/QuestionSearch.cs",
+        "tools/pbix-extract/src/metadata.c",
+        "tools/pbix-extract/src/sqlrender.c",
+        "tests/SqlFlow.Core.Tests/PowerBi/VisualSqlTranslatorTests.cs"
+      ]
     }
   ]
 }

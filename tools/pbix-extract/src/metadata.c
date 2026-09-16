@@ -517,6 +517,70 @@ static int read_sources(sqlite3 *db, ModelSpec *spec, char *error, size_t error_
     return 0;
 }
 
+/*
+ * Reads the model's shared expressions: Power Query queries kept in the model but not loaded as
+ * tables. A table's M merges them in by name (Table.NestedJoin(..., DimGeography, ...)), so a
+ * consumer mapping a model column back to its source needs their text too. Kind 0 is an M
+ * expression; parameters and other kinds are skipped. A schema without the table, or without a
+ * Kind column to tell M from anything else, simply has none to report.
+ */
+static int read_expressions(sqlite3 *db, ModelSpec *spec, char *error, size_t error_size)
+{
+    sqlite3_stmt *statement;
+    char *raw;
+    int status;
+
+    if (!table_exists(db, "Expression") || !column_exists(db, "Expression", "Kind")
+        || !column_exists(db, "Expression", "Name") || !column_exists(db, "Expression", "Expression")) {
+        return 0;
+    }
+
+    if (sqlite3_prepare_v2(db,
+            "SELECT Name, Expression FROM Expression "
+            "WHERE Kind = 0 AND Name IS NOT NULL AND Expression IS NOT NULL AND Expression <> '' "
+            "ORDER BY Name",
+            -1, &statement, NULL) != SQLITE_OK) {
+        set_errorf(error, error_size, "the model's shared expressions could not be read: %s",
+            sqlite3_errmsg(db));
+        return -1;
+    }
+
+    while ((status = sqlite3_step(statement)) == SQLITE_ROW) {
+        SharedExpression *expression = (SharedExpression *)push_row(
+            (void **)&spec->expressions, &spec->expression_count, sizeof(*spec->expressions));
+
+        if (expression == NULL) {
+            set_error(error, error_size, "out of memory reading the model's shared expressions");
+            sqlite3_finalize(statement);
+            return -1;
+        }
+
+        expression->name = dup_column(statement, 0);
+
+        /* Redacted as it is read, exactly like a table's own M. */
+        raw = dup_column(statement, 1);
+        if (raw != NULL) {
+            expression->expression = redact_m_expression(raw);
+            free(raw);
+            if (expression->expression == NULL) {
+                set_error(error, error_size, "out of memory reading the model's shared expressions");
+                sqlite3_finalize(statement);
+                return -1;
+            }
+        }
+    }
+
+    sqlite3_finalize(statement);
+
+    if (status != SQLITE_DONE) {
+        set_errorf(error, error_size, "the model's shared expressions could not be read: %s",
+            sqlite3_errmsg(db));
+        return -1;
+    }
+
+    return 0;
+}
+
 /* ---- Public interface -------------------------------------------------------------------- */
 
 int model_spec_read(const DataModel *model, ModelSpec *spec, char *error, size_t error_size)
@@ -583,7 +647,8 @@ int model_spec_read(const DataModel *model, ModelSpec *spec, char *error, size_t
         || read_calculated_columns(db, spec, error, error_size) != 0
         || read_relationships(db, spec, error, error_size) != 0
         || read_columns(db, spec, error, error_size) != 0
-        || read_sources(db, spec, error, error_size) != 0) {
+        || read_sources(db, spec, error, error_size) != 0
+        || read_expressions(db, spec, error, error_size) != 0) {
         goto done;
     }
 
@@ -637,6 +702,12 @@ void model_spec_free(ModelSpec *spec)
         free(spec->sources[i].expression);
     }
     free(spec->sources);
+
+    for (i = 0; i < spec->expression_count; i++) {
+        free(spec->expressions[i].name);
+        free(spec->expressions[i].expression);
+    }
+    free(spec->expressions);
 
     memset(spec, 0, sizeof(*spec));
 }

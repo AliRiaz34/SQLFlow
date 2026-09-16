@@ -22,7 +22,7 @@ public sealed class FlowSetCollector
         new YamlStoredProcedureFlowLoader(), new YamlInvokeFlowLoader(), new YamlHealthCheckFlowLoader(),
         new YamlSourceControlFlowLoader(), new YamlBatchFlowLoader(), new YamlAcquireFlowLoader(),
         new YamlCopyFlowLoader(), new YamlSftpFlowLoader(), new YamlCalendarFlowLoader(),
-        new YamlTranslateFlowLoader());
+        new YamlTranslateFlowLoader(), new YamlSchemaRegistrationFlowLoader());
 
     private readonly YamlScheduleLibraryLoader _scheduleLibraries = new();
 
@@ -244,7 +244,7 @@ public sealed class FlowSetCollector
         foreach (var query in subscriber.Queries.Concat(extracted.Queries))
         {
             // The loader already rejected a query whose server is not declared, so the lookup cannot miss.
-            var serverRef = ServerIdentity.From(connections[query.Server].ConnectionRef);
+            var serverRef = SubscriberServerRef(query.Server, connections);
             var label = $"subscriber '{subscriber.Name}' query '{query.Name}'";
 
             var deps = TSqlLineageExtractor.Extract(query.Sql, label, defaultDatabase: null);
@@ -285,6 +285,7 @@ public sealed class FlowSetCollector
                 Name = query.Name,
                 ServerRef = serverRef,
                 Sql = query.Sql,
+                ReportFile = query.ReportFile,
                 Objects = objects,
             });
         }
@@ -354,11 +355,15 @@ public sealed class FlowSetCollector
         }
 
         // The report's queries run against the subscriber's own connection, since a visual names model entities
-        // rather than a server. Without a usable one there is nothing to resolve them against.
-        var server = subscriber.Server
-            ?? (subscriber.Queries.Count > 0 ? subscriber.Queries[0].Server : null)
-            ?? (connections.Count == 1 ? connections.Keys.First() : null);
-        if (server is null || !connections.ContainsKey(server))
+        // rather than a server; a registered-source subscriber's report resolves against the registered databases.
+        // Without either there is nothing to resolve them against.
+        var server = subscriber.IsRegisteredSource
+            ? Core.Subscribers.DataSubscriber.RegisteredSource
+            : subscriber.Server
+                ?? (subscriber.Queries.Count > 0 ? subscriber.Queries[0].Server : null)
+                ?? (connections.Count == 1 ? connections.Keys.First() : null);
+        if (server is null
+            || (!subscriber.IsRegisteredSource && !connections.ContainsKey(server)))
         {
             var what = declaresReport ? $"declares 'pbix: {subscriber.Pbix}'" : "has an uploaded report";
             result.Warnings.Add(
@@ -611,12 +616,13 @@ public sealed class FlowSetCollector
         IReadOnlyDictionary<string, Core.Connections.DataSource> connections,
         PbixExtractResult extracted)
     {
-        if (extracted.ModelSources.Count == 0 || !connections.TryGetValue(server, out var connection))
+        if (extracted.ModelSources.Count == 0
+            || (server != Core.Subscribers.DataSubscriber.RegisteredSource && !connections.ContainsKey(server)))
         {
             return;
         }
 
-        var serverRef = ServerIdentity.From(connection.ConnectionRef);
+        var serverRef = SubscriberServerRef(server, connections);
 
         foreach (var source in extracted.ModelSources)
         {
@@ -708,6 +714,7 @@ public sealed class FlowSetCollector
                     Name = queryName,
                     Server = server,
                     Sql = sql,
+                    ReportFile = reportFile,
                 });
 
                 visuals.Add(new Core.Lineage.LineageSubscriberVisual
@@ -747,8 +754,8 @@ public sealed class FlowSetCollector
 
         // The connection identity the report reads through: the server segment a resolved source's node key carries,
         // the same one its model-source synonyms are declared under.
-        var serverRef = connections.TryGetValue(server, out var connection)
-            ? ServerIdentity.From(connection.ConnectionRef)
+        var serverRef = server == Core.Subscribers.DataSubscriber.RegisteredSource || connections.ContainsKey(server)
+            ? SubscriberServerRef(server, connections)
             : null;
         if (model.Tables.Count > 0 || model.Relationships.Count > 0)
         {
@@ -786,6 +793,9 @@ public sealed class FlowSetCollector
                         Cardinality = r.Cardinality,
                         IsActive = r.IsActive,
                     })
+                    .ToList(),
+                Expressions = model.Expressions
+                    .Select(e => new Core.Lineage.LineageSubscriberExpression { Name = e.Name, PowerQuery = e.PowerQuery })
                     .ToList(),
             });
         }
@@ -953,6 +963,14 @@ public sealed class FlowSetCollector
             }
         }
     }
+
+    /// <summary>The server identity a subscriber alias stands for: the declared connection's reference, or
+    /// <see cref="ServerIdentity.Registered"/> for a registered-source subscriber.</summary>
+    private static string SubscriberServerRef(
+        string alias, IReadOnlyDictionary<string, Core.Connections.DataSource> connections)
+        => alias == Core.Subscribers.DataSubscriber.RegisteredSource
+            ? ServerIdentity.Registered
+            : ServerIdentity.From(connections[alias].ConnectionRef);
 
     /// <summary>Registers a document's connections in the server inventory the derived tier connects to.</summary>
     private static void RegisterServers(CollectionResult result, IEnumerable<Core.Connections.DataSource> connections)
@@ -1291,6 +1309,25 @@ public sealed class FlowSetCollector
                     }
                 }
 
+                break;
+            }
+
+            case SchemaRegistrationFlowDocument doc:
+            {
+                // A schema registration contributes no facts and no server to the derived tier (whose module
+                // parsing and join inference a registration deliberately does without): it is recorded so the
+                // connected pass harvests exactly its database's tables and views, attributed to the flow.
+                var flow = doc.Document.Flow;
+                var connection = doc.Document.Connections.First(c =>
+                    string.Equals(c.Alias, flow.Server, StringComparison.OrdinalIgnoreCase));
+                result.SchemaRegistrations.Add(new CollectedSchemaRegistration
+                {
+                    Flow = headers[0].Name,
+                    ServerRef = ServerIdentity.From(connection.ConnectionRef),
+                    RawReference = connection.ConnectionRef,
+                    Kind = connection.Kind,
+                    Scope = flow.Scope,
+                });
                 break;
             }
 

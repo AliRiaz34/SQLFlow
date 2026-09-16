@@ -193,9 +193,13 @@ public sealed record SubscriberDossierDto(
     IReadOnlyList<SubscriberQueryDto> Queries,
     IReadOnlyList<SubscriberObjectDto> Objects);
 
-/// <summary>One query a subscriber runs, and the objects parsing it proved it reads.</summary>
+/// <summary>One query a subscriber runs, and the objects parsing it proved it reads. For a report visual's query,
+/// <c>SourceSql</c> is the same question as T-SQL over the source tables (null with <c>TranslationProblem</c> saying
+/// why when it could not be translated); for a declared query both are null, since its SQL already names the source
+/// tables.</summary>
 public sealed record SubscriberQueryDto(
-    int Ordinal, string Name, string ServerRef, string Sql, IReadOnlyList<string> ObjectKeys);
+    int Ordinal, string Name, string ServerRef, string Sql, IReadOnlyList<string> ObjectKeys,
+    string? SourceSql = null, string? TranslationProblem = null);
 
 /// <summary>One warehouse object a subscriber reads, located and named from the global object registry, with
 /// the subscriber's own queries that reference it.</summary>
@@ -265,11 +269,18 @@ public sealed record SubscriberReportPageDto(
 /// user-confirmed one: pass it to <c>POST /api/v1/powerai/questions/{id}/auto-run</c> (the
 /// <c>auto_run_trusted_match</c> MCP tool) to run a TRUSTED match's SQL immediately, capped small, without a
 /// person confirming it again. Null for a PowerBI-derived question, which has no such row.
+/// </para>
+/// <para>
+/// For a PowerBI-derived question, <c>Sql</c> is the visual's query translated into T-SQL over the source tables the
+/// report's model loads from, runnable through <c>prepare_query</c>; <c>ReportSql</c> is the visual's own query
+/// (model names, no joins), kept as evidence and never run. When the visual's query could not be translated,
+/// <c>Sql</c> is empty and <c>TranslationProblem</c> says why, so the match is a lead rather than an answer.
 /// </para></summary>
 public sealed record SimilarQuestionDto(
     string Question, int Score, bool Trusted, IReadOnlyList<string> MatchedTerms, string Provenance,
     string Sql, IReadOnlyList<string> ObjectKeys, string SubscriberKey, string? VisualTitle,
-    string? ConfirmedBy, string? SourceRef = null, long? ExampleId = null);
+    string? ConfirmedBy, string? SourceRef = null, long? ExampleId = null,
+    string? ReportSql = null, string? TranslationProblem = null);
 
 /// <summary>The matches for a question, with the terms actually searched for (the LLM's expansion of the typed
 /// question, or its own words when expansion is off or unavailable) and the score threshold they were judged
@@ -1579,7 +1590,8 @@ public static class LineageEndpoints
             .ToListAsync(ct).ConfigureAwait(false);
 
         var queries = queryRows
-            .Select(q => new SubscriberQueryDto(q.Ordinal, q.Name, q.ServerRef, q.Sql, SplitKeys(q.ObjectKeys)))
+            .Select(q => new SubscriberQueryDto(
+                q.Ordinal, q.Name, q.ServerRef, q.Sql, SplitKeys(q.ObjectKeys), q.SourceSql, q.TranslationProblem))
             .ToList();
 
         // The object side: every key any of the queries read, with the queries that read it. Built from the
@@ -1705,7 +1717,7 @@ public static class LineageEndpoints
             matches.Add(new SimilarQuestionDto(
                 m.Question, m.Score, m.Score >= retrieval.RankThreshold || m.SameQuestion, m.MatchedTerms,
                 m.Provenance, m.Sql, m.ObjectKeys, m.SubscriberKey, m.VisualTitle, m.ConfirmedBy, sourceRef,
-                m.ExampleId));
+                m.ExampleId, m.ReportSql, m.TranslationProblem));
         }
 
         return TypedResults.Ok(new SimilarQuestionsDto(

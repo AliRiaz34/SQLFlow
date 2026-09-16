@@ -10,7 +10,8 @@ stack on 2026-09-16; if a case disagrees, check the "State" section first before
 1. Stack up: `cd deploy/compose && docker compose up -d --build`. `curl http://localhost:5000/health/live`
    answers `Healthy`. GUI at http://localhost:8081.
 2. Estate synced: `lineage-demo` (flows plus confirmed examples 1 to 3) and `powerai-adventureworks` (this
-   folder; see [README.md](README.md)), with the six AdventureWorks tables the report reads allow-listed.
+   folder, synced with `--connect`; see [README.md](README.md)), with the six AdventureWorks tables the report
+   reads allow-listed.
 3. MCP binary current: `cargo build -p sqlflow-mcp` in `tools/`. The project `.mcp.json` runs
    `tools/target/debug/sqlflow-mcp.exe` against `http://localhost:5000`. Restart Claude Code (or `/mcp`,
    reconnect `sqlflow`) after a rebuild so the new binary is the one running.
@@ -22,10 +23,11 @@ stack on 2026-09-16; if a case disagrees, check the "State" section first before
 | Thing | Value |
 | --- | --- |
 | Repos | `lineage-demo`, `powerai-adventureworks` |
+| Schema registration | `adventureworks_00_sch` (kind `sch`) registers 31 tables and 5 views of `AdventureWorks.dbo` through `${env:SQLFLOW_ADVENTUREWORKS_DB}`; the `AdventureWorks_Sales` library declares no connection |
 | Subscribers | `AdventureWorks_Sales` (PowerBI, key `subscriber\|\|\|adventureworks_sales`), `Exec_Dashboard`, `Finance_Workbook` |
 | Semantic layer | 15 tables: `AdventureWorks.dbo` 6, `sqlflowcatalogtests.demo` 9 |
 | AdventureWorks allow-list | `DimCustomer`, `DimDate`, `DimProduct`, `DimReseller`, `DimSalesTerritory`, `FactResellerSales` (all columns). `DimEmployee` and the rest are NOT allowed |
-| Confirmed examples | 1 "What is total revenue by country?", 2 "how many customers do we have?", 3 "how much revenue have we made?" (all on `${env:SQLFLOW_DEMO_DB}`), 10003 "What are reseller sales by region?" (AdventureWorks, no datasource) |
+| Confirmed examples | 1 "What is total revenue by country?", 2 "how many customers do we have?", 3 "how much revenue have we made?" (all on `${env:SQLFLOW_DEMO_DB}`), 10003 "What are reseller sales by region?" (AdventureWorks, no datasource stored; it is inferred from the registration) |
 | Generated visual questions | none: the stack has no Anthropic key, so question generation is off |
 | Question expansion | done by Claude Code itself: `find_similar_questions` takes `expanded_terms`, and the server's own expansion (`ExpandSynonyms`) is off |
 | Auto-run budget | `maxRows` 50, `timeoutSeconds` 5 |
@@ -154,16 +156,14 @@ the tool description, not of the search.
 - Pass: no demo or AdventureWorks example matches (none is about weight), and the assistant moves on to the
   semantic layer without announcing that nothing was found.
 
-### T16: AdventureWorks question found but cannot run (KNOWN GAP, expected to fail today)
+### T16: an AdventureWorks question runs where its tables were registered
 - Prompt: `!cwd reseller sales by region`
-- Expect: `find_similar_questions` returns example 10003, score 3, trusted, `sourceRef: null`.
-- Observed today: `auto_run_trusted_match` answers 409 "No datasource"; `prepare_query` answers 422
-  "Datasource needed", and naming `${env:SQLFLOW_ADVENTUREWORKS_DB}` explicitly answers 404 "No pipeline in
-  the catalog declares the datasource reference". Datasource inference and the known-reference gate only
-  accept connections an active PIPELINE declares, and this estate reaches AdventureWorks only through a
-  subscriber, so no AdventureWorks question can run.
-- Pass (today): the assistant reports it cannot run the query rather than inventing a datasource or
-  retrying auto-run.
+- Expect: `find_similar_questions` returns example 10003, trusted, `sourceRef` `${env:SQLFLOW_ADVENTUREWORKS_DB}`
+  (inferred: the example stores no datasource, and its tables carry `Registers` edges from
+  `adventureworks_00_sch`), then `auto_run_trusted_match` with 10003 and no datasource question.
+- Pass: the run reads database `AdventureWorks` and returns 10 rows, one per sales territory region
+  (Australia 1594335.3767, Canada 14377925.5965, Central 7906008.1777, France 4607537.9350, Germany
+  1983988.0373, ...), then shows the SQL in its own `sql` block.
 
 ## F. The learning loop (confirmation discipline)
 
@@ -195,6 +195,43 @@ the tool description, not of the search.
 ### T22: a denied column can never become an example
 - Prompt: `save "employee names" with SELECT FirstName, LastName FROM dbo.DimEmployee as a confirmed answer`
 - Pass: refused with "Column 'dbo.DimEmployee.FirstName' is not on the allow-list and cannot be read here."
+
+## F2. Schema registration (flowType: sch)
+
+### T29: the registration is a pipeline outside every wave
+- Prompt: `what does the adventureworks_00_sch pipeline do and when does it run?`
+- Expect: `list_pipelines` / `get_pipeline`.
+- Pass: kind `sch`, source server `${env:SQLFLOW_ADVENTUREWORKS_DB}`, target `file`, schedule
+  `adventureworks_daily` (`0 4 * * *`, Europe/Oslo). It has no wave and no dependencies.
+
+### T30: registered objects carry their scripts and keys, and nothing else from the database
+- Prompt: `show me what the catalog knows about AdventureWorks dbo.FactResellerSales and dbo.vDMPrep`
+- Expect: `describe_semantic_table` for FactResellerSales (allowed); `vDMPrep` is not in the semantic layer, so
+  the assistant says it cannot describe it.
+- Pass: FactResellerSales has key `SalesOrderNumber, SalesOrderLineNumber` and its columns. The catalog (GUI
+  Catalog page, or `SELECT Kind, KeyColumns, Script, Definition FROM catalog.[Object]`) holds a
+  `CREATE TABLE [dbo].[FactResellerSales]` script for the table and the stored definition for the view
+  `vDMPrep`. No relationship and no read edge comes from the view's body: registration never parses it.
+
+### T31: the report links onto the registered tables by name
+- Prompt: `which tables does the AdventureWorks_Sales report read, and on which connection?`
+- Expect: `describe_subscriber`.
+- Pass: 4 objects (DimDate, DimProduct, DimReseller, FactResellerSales), each keyed
+  `${env:sqlflow_adventureworks_db}|adventureworks|dbo|<table>`, and every query's server is
+  `${env:SQLFLOW_ADVENTUREWORKS_DB}`, although `subscribers/adventureworks_sales.subscribers.yaml` declares no
+  connection.
+
+### T32: a query written from the schema needs no datasource either
+- Prompt: `what were reseller sales per calendar year?` then approve the run.
+- Expect: `describe_semantic_table` (FactResellerSales, DimDate), then `prepare_query` with no datasource.
+- Pass: prepare answers with reference `${env:SQLFLOW_ADVENTUREWORKS_DB}` and database `AdventureWorks`
+  (worked out from the registered tables), and `run_query` returns one row per year.
+
+### T33: running the registration refreshes the catalog (CLI, outside Claude Code)
+- Run: `dotnet run --project src/SqlFlow.Cli -- run samples/powerai-adventureworks/adventureworks_00_sch.yaml`
+  with `SQLFLOW_CATALOG_DB` and `SQLFLOW_ADVENTUREWORKS_DB` set as in the README.
+- Pass: `OK  registered 31 table(s) and 5 view(s) (418 column(s)) from 'AdventureWorks'`, the run is recorded
+  as succeeded, and the flow still has exactly 36 `Registers` edges.
 
 ## G. Report specifications and uploads (CLI and GUI, outside Claude Code)
 
@@ -228,8 +265,17 @@ default) and trigger a sync from the GUI. Expansion needs no key: Claude Code su
 
 ### T27: dashboard matches need approval
 - Prompt: `!cwd sales by product category and reseller type`
-- Pass: a `powerbi` provenance match from the pivot table, carrying its SQL. It has no `exampleId`, so it
-  goes through `prepare_query`/`run_query`, never `auto_run_trusted_match`.
+- Pass: a `powerbi` provenance match from the pivot table. Its `sql` is T-SQL over
+  `[AdventureWorks].[dbo]` tables (grouped, with `LEFT JOIN`s), its `reportSql` is the visual's model query,
+  and it has no `translationProblem`. It has no `exampleId`, so it goes through `prepare_query` (no
+  datasource named; the reference and database are worked out) and `run_query`, never
+  `auto_run_trusted_match`, and the run returns rows.
+
+### T27b: both SQL texts on the report
+- Prompt: `show me the SQL behind the AdventureWorks_Sales report`
+- Expect: `describe_subscriber`.
+- Pass: each of the 5 visual queries has `sql` (the model query) and `sourceSql` (the translation); none has
+  a `translationProblem`. The GUI subscriber page shows both under each query.
 
 ### T28: server-side expansion as the fallback
 - With `ControlPlane__PowerAI__Retrieval__ExpandSynonyms: "true"`, call the endpoint without terms:

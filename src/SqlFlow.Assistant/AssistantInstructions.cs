@@ -159,8 +159,12 @@ public static class AssistantInstructions
               this store exists. When a match is trusted, carries an `exampleId`, and auto_run_trusted_match
               is among your tools, call it straight away: do not ask the person for permission and do not
               ask which datasource or database to use, since a person already confirmed that exact SQL and
-              the datasource is worked out from the tables it reads. Only an untrusted match, or no match at
-              all, is a lead rather than an answer; only then fall through to search_semantic_layer/describe_semantic_table to
+              the datasource is worked out from the tables it reads. A dashboard match's `sql` is the report
+              visual translated into T-SQL over the source tables and runs as it is; its `reportSql` is the
+              visual's own query against the report's model and never runs. A dashboard match carrying a
+              `translationProblem` (and an empty `sql`) is only a lead: it says which question a report answers
+              and which fields it uses, and you compose the query from the semantic layer. Only an untrusted
+              match, a match with a `translationProblem`, or no match at all, is a lead rather than an answer; only then fall through to search_semantic_layer/describe_semantic_table to
               compose or verify something yourself. When prepare_query is among your tools, prepare such a
               query WITHOUT naming a datasource (it is worked out from the tables the query reads) and name
               one only if prepare reports it cannot tell. On this path, never ask the person which database

@@ -55,8 +55,11 @@ public sealed class QuestionSearchTests
                 $"the intended match ({best.Score}) should outrank the runner-up ({result.Matches[1].Score})");
             Assert.DoesNotContain(result.Matches, m => m.Question.Contains("customers", StringComparison.Ordinal));
 
-            // A match must carry what ANSWERS the question, not just the question text.
-            Assert.Equal("SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region", best.Sql);
+            // A match must carry what ANSWERS the question, not just the question text: the visual's query translated
+            // to the source tables as the runnable SQL, and the report's own query as evidence.
+            Assert.Equal(SourceSqlOf("SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region"), best.Sql);
+            Assert.Equal("SELECT Region, SUM(Revenue) FROM Sales GROUP BY Region", best.ReportSql);
+            Assert.Null(best.TranslationProblem);
             Assert.Equal(["[Dw].[arc].[Sales]"], best.ObjectKeys);
             Assert.Equal(QuestionSearch.PowerBiProvenance, best.Provenance);
             Assert.Equal(subscriberKey, best.SubscriberKey);
@@ -402,9 +405,56 @@ public sealed class QuestionSearchTests
         }
     }
 
+    /// <summary>The source SQL <see cref="SeedAsync"/> stores for a visual whose report query is <paramref name="sql"/>.</summary>
+    private static string SourceSqlOf(string sql) => "/* source */ " + sql;
+
+    /// <summary>
+    /// Two reports can name their visuals identically ("Page 1 / Revenue") while asking different questions. A
+    /// match must carry its own report's query, found by repo and subscriber as well as by name, and a visual whose
+    /// query was not translated says so rather than offering the report's model SQL as something to run.
+    /// </summary>
+    [SkippableFact]
+    public async Task AVisualsQuery_IsTheOneOfItsOwnReport_AndAnUntranslatedOneIsNotRunnable()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var firstKey = $"subscriber|scope_a_{suffix}";
+        var secondKey = $"subscriber|scope_b_{suffix}";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, firstKey, $"{firstKey}#report.pbix#1",
+                [($"What is margin {suffix} by store?", "SELECT A FROM X", "[Dw].[arc].[X]", "Margin")]);
+            await SeedAsync(db, repoId, secondKey, $"{secondKey}#report.pbix#1",
+                [($"What is churn {suffix} by region?", "SELECT B FROM Y", "[Dw].[arc].[Y]", "Margin")],
+                translated: false);
+
+            var margin = await QuestionSearch.FindSimilarAsync(
+                db, "margin", topK: 3, ["margin", suffix], repoId, CancellationToken.None);
+            var match = Assert.Single(margin.Matches, m => m.Question.Contains("margin", StringComparison.Ordinal));
+            Assert.Equal(SourceSqlOf("SELECT A FROM X"), match.Sql);
+            Assert.Equal(firstKey, match.SubscriberKey);
+
+            var churn = await QuestionSearch.FindSimilarAsync(
+                db, "churn", topK: 3, ["churn", suffix], repoId, CancellationToken.None);
+            var untranslated = Assert.Single(churn.Matches, m => m.Question.Contains("churn", StringComparison.Ordinal));
+            Assert.Equal(string.Empty, untranslated.Sql);
+            Assert.Equal("SELECT B FROM Y", untranslated.ReportSql);
+            Assert.Equal("the report is not translatable here", untranslated.TranslationProblem);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
     private static async Task SeedAsync(
         CatalogDbContext db, Guid repoId, string subscriberKey, string pageKey,
-        IReadOnlyList<(string Question, string Sql, string ObjectKey, string Title)> rows)
+        IReadOnlyList<(string Question, string Sql, string ObjectKey, string Title)> rows, bool translated = true)
     {
         db.SubscriberReportPages.Add(new CatalogSubscriberReportPage
         {
@@ -428,6 +478,8 @@ public sealed class QuestionSearchTests
             {
                 RepoId = repoId, SubscriberKey = subscriberKey, Ordinal = i + 1, Name = queryName,
                 ServerRef = "dw", Sql = sql, ObjectKeys = objectKey,
+                SourceSql = translated ? SourceSqlOf(sql) : null,
+                TranslationProblem = translated ? null : "the report is not translatable here",
             });
             db.SubscriberReportVisualQuestions.Add(new CatalogSubscriberReportVisualQuestion
             {

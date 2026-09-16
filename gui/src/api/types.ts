@@ -1067,6 +1067,11 @@ export interface SubscriberQuery {
   name: string;
   serverRef: string;
   sql: string;
+  /** A report visual's query translated into T-SQL over the source tables; null for a declared query and for a
+   * visual that could not be translated. */
+  sourceSql: string | null;
+  /** Why a report visual's query has no source SQL; null otherwise. */
+  translationProblem: string | null;
   objectKeys: string[];
 }
 

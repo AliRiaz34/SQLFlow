@@ -12,7 +12,9 @@ namespace SqlFlow.ControlPlane.Api;
 /// </summary>
 /// <param name="Reference">The one datasource the query runs against, or null when it is not unambiguous.</param>
 /// <param name="Candidates">Every declared datasource the query's objects were found on, best known casing.</param>
-public sealed record DatasourceInferenceResult(string? Reference, IReadOnlyList<string> Candidates);
+/// <param name="Database">The database the query's objects live in, when a schema registration flow registered
+/// them all in one database on <see cref="Reference"/>; null otherwise (the connection's own database applies).</param>
+public sealed record DatasourceInferenceResult(string? Reference, IReadOnlyList<string> Candidates, string? Database = null);
 
 /// <summary>
 /// Works out which datasource a query runs against from what the catalog already knows, so a person is not asked
@@ -20,11 +22,13 @@ public sealed record DatasourceInferenceResult(string? Reference, IReadOnlyList<
 /// the ONE place that decision is made: question retrieval, confirming an example, auto-run, and preparing an
 /// ad-hoc query all call it rather than each guessing in its own way.
 /// <para>
-/// Two kinds of evidence, in order. First the object keys the caller already holds (a confirmed example's, or a
-/// PowerBI visual's query, whose model entities the lineage pass resolved to warehouse objects): a node key's
-/// first segment IS the connection reference the object was reached through. Only when those name no declared
-/// datasource is the SQL itself parsed and its tables looked up in the catalog by schema/name, the same way
-/// <see cref="ColumnPolicyGuard"/> resolves them.
+/// Three kinds of evidence, in order. First the schema registration flows (flowType: sch) that registered the
+/// objects: such an object is metadata only, and the registering pipeline's source server is the one place its data
+/// can be fetched from, in the database it was registered in. Then the object keys the caller already holds (a
+/// confirmed example's, or a PowerBI visual's query, whose model entities the lineage pass resolved to warehouse
+/// objects): a node key's first segment IS the connection reference the object was reached through. Only when those
+/// name no declared datasource is the SQL itself parsed and its tables looked up in the catalog by schema/name, the
+/// same way <see cref="ColumnPolicyGuard"/> resolves them, and the same two steps are applied to what it finds.
 /// </para>
 /// <para>
 /// The answer is only ever a datasource some active pipeline declares as its source or target, which is the same
@@ -52,7 +56,13 @@ public static class DatasourceInference
             return new DatasourceInferenceResult(null, []);
         }
 
-        var fromKeys = Resolve(declared, ServersFromKeys(objectKeys));
+        var keys = (objectKeys ?? []).Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()).ToList();
+        if (await FromRegistrationsAsync(db, declared, keys, ct).ConfigureAwait(false) is { } registered)
+        {
+            return registered;
+        }
+
+        var fromKeys = Resolve(declared, ServersFromKeys(keys));
         if (fromKeys.Count > 0)
         {
             return Result(fromKeys);
@@ -64,8 +74,75 @@ public static class DatasourceInference
         }
 
         var objects = await ObjectsFromSqlAsync(db, sql, ct).ConfigureAwait(false);
+        if (await FromRegistrationsAsync(db, declared, objects.Select(o => o.Key).ToList(), ct).ConfigureAwait(false)
+            is { } registeredFromSql)
+        {
+            return registeredFromSql;
+        }
+
         return Result(Resolve(declared, objects.Select(o => o.ServerRef)));
     }
+
+    /// <summary>Whether <paramref name="reference"/> is a datasource the reviewed estate declares: the one gate every
+    /// surface that runs or stores a query applies, so none of them can point a worker at a novel connection. An
+    /// <c>@alias</c> is not decided here; it resolves only against the node's curated registry.</summary>
+    public static async Task<bool> IsDeclaredAsync(CatalogDbContext db, string reference, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(db);
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference);
+        return (await DeclaredReferencesAsync(db, ct).ConfigureAwait(false)).ContainsKey(reference.Trim());
+    }
+
+    /// <summary>
+    /// The datasource the registering schema registration flows point at, for the objects among
+    /// <paramref name="objectKeys"/> that an active one registered; null when none of them is registered. Several
+    /// registering connections leave the reference open with them as candidates, and the database is named only when
+    /// every registered object lives in the same one.
+    /// </summary>
+    private static async Task<DatasourceInferenceResult?> FromRegistrationsAsync(
+        CatalogDbContext db, IReadOnlyDictionary<string, string> declared, IReadOnlyList<string> objectKeys,
+        CancellationToken ct)
+    {
+        if (objectKeys.Count == 0)
+        {
+            return null;
+        }
+
+        var registersRelation = nameof(Core.Lineage.LineageRelation.Registers);
+        var rows = new List<(string SourceServer, string? Database)>();
+        foreach (var chunk in objectKeys.Distinct(StringComparer.Ordinal).Chunk(RegistrationChunk))
+        {
+            var found = await (
+                    from edge in db.LineageEdges.AsNoTracking()
+                    where edge.Relation == registersRelation && edge.PipelineId != null && chunk.Contains(edge.ObjectKey)
+                    join pipeline in db.Pipelines.AsNoTracking() on edge.PipelineId equals pipeline.Id
+                    where pipeline.Active && pipeline.SourceServer != null
+                    join item in db.Objects.AsNoTracking() on edge.ObjectKey equals item.Key
+                    select new { pipeline.SourceServer, item.Database })
+                .ToListAsync(ct).ConfigureAwait(false);
+            rows.AddRange(found.Select(r => (r.SourceServer!, (string?)r.Database)));
+        }
+
+        if (rows.Count == 0)
+        {
+            return null;
+        }
+
+        var candidates = Resolve(declared, rows.Select(r => r.SourceServer));
+        if (candidates.Count != 1)
+        {
+            return new DatasourceInferenceResult(null, candidates);
+        }
+
+        var databases = rows
+            .Select(r => r.Database)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return new DatasourceInferenceResult(candidates[0], candidates, databases.Count == 1 ? databases[0] : null);
+    }
+
+    /// <summary>How many object keys one registration lookup binds, well under SQL Server's parameter limit.</summary>
+    private const int RegistrationChunk = 500;
 
     /// <summary>The keys of the catalog objects <paramref name="sql"/>'s tables resolve to, by the same schema/name
     /// lookup inference uses, so a question example stored without caller-supplied keys is still tied to the tables
