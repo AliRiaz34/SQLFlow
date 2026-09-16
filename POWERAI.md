@@ -1,13 +1,14 @@
 # PowerBI Metadata Harvesting and Text-to-Query: Design and Roadmap
 
-Status: partially implemented. Extraction is done and landed (both the `.pbix` semantic model and
-its report/visual layer), the report structure is retrievable over MCP
-(`describe_subscriber_report`), and every visual can now carry 1-3 LLM-generated business questions
-(Section 9, step 3). Retrieval over those questions is built, and so is the confirmed-example store
-behind it (`find_similar_questions` reads both halves, `confirm_question` writes the confirmed one);
-and the GUI now asks a person to confirm on every answer that hands back a query, closing the
-learning loop. Section 10
-states exactly what is built versus what remains. For the systems this feature builds on, see
+Status: implemented; what remains is breadth and deployment, not design. Extraction is done and
+landed (both the `.pbix` semantic model and its report/visual layer), the report structure is
+retrievable over MCP (`describe_subscriber_report`), and every visual can carry 1-3 LLM-generated
+business questions (Section 9, step 3). Retrieval over those questions is built, and so is the
+confirmed-example store behind it (`find_similar_questions` reads both halves, `confirm_question`
+writes the confirmed one); the GUI asks a person to confirm on every answer that hands back a query,
+closing the learning loop. Two items are open: extraction is proven against one report, one Power BI
+version, and one source shape (`Sql.Database`), and the isolated extractor is not yet deployed to the
+Azure estate. Section 10 states exactly what is built versus what remains. For the systems this feature builds on, see
 [docs/reference/flow/subscribers.md](reference/flow/subscribers.md) and
 [docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md).
 
@@ -356,7 +357,7 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
   measure, 1 calculated column, 8 relationships, 8 table sources, 3 pages, 5 visuals, every visual
   carrying its rendered SQL (recounted on 2026-09-16 by running the tool over the sample file; the
   committed `samples/powerbi/AdventureWorks_Sales.spec.yaml` holds the same counts).
-- Solution builds with 0 errors and no new warnings. 28 checks in the C tool's own suite (`make test`
+- Solution builds with 0 errors and 0 warnings. 73 checks in the C tool's own suite (`make test`
   / `make test-asan`, both clean), plus the collector-level suite in
   `LineagePowerBiSubscriberTests` (13 facts, running against the real tool in CI via a
   `pbix-extract` job, skipping loudly elsewhere when the binary is absent); the whole .NET suite

@@ -22,7 +22,7 @@ built by parsing each visual's synthesized SQL (`FROM [Sales] AS [s]`, verbatim 
 (`src/SqlFlow.Lineage/Extraction/TSqlLineageExtractor.cs`), which resolves `Sales` as a bare 1-part
 name with no default database (`FlowSetCollector.cs:208` passes `defaultDatabase: null` for every
 subscriber query). The resulting node lands on `NodeKey.For(serverRef, database: null, schema: null,
-"sales")` — a name-only node that never unifies with the fully-qualified node an ingestion flow
+"sales")`: a name-only node that never unifies with the fully-qualified node an ingestion flow
 writes, `NodeKey.For("dwh", "odsdb", "arc", "sales")` (`src/SqlFlow.Lineage/Collection/LineageFacts.cs:364-372`).
 
 Confirmed from the actual sample (`samples/powerbi/AdventureWorks_Sales.spec.yaml:198-208`): the one
@@ -37,7 +37,7 @@ in
 ```
 an Excel-backed table, not a SQL-backed one. This matters: **not every model table is resolvable to a
 warehouse object at all**, and the design must treat "cannot resolve" as a normal, reported outcome,
-not an error — exactly like `subscribers.yaml`'s existing "Incomplete dataset" convention
+not an error, exactly like `subscribers.yaml`'s existing "Incomplete dataset" convention
 (`docs/reference/flow/subscribers.md:141`) already does for a report reading objects lineage could not
 otherwise identify.
 
@@ -63,12 +63,12 @@ shapes a warehouse-fed report actually uses are a short, closed list:
 - `Sql.Database("server", "database")` (or `Sql.Databases("server")` then a database-name index),
   followed later in the `let` chain by a step that indexes `[Schema="dbo",Item="Sales"]` or
   `{[Schema="dbo",Item="Sales"]}[Data]` off the result (directly or via an intermediate step name).
-- `Sql.Database("server", "database", [Query="select ..."])` — a native-query source; the physical
+- `Sql.Database("server", "database", [Query="select ..."])`: a native-query source; the physical
   object(s) are inside the query text, not a schema/item pair, so this shape needs its `Query` value
   run back through `TSqlLineageExtractor` itself (already exists) rather than a schema/item pattern
-  match — effectively "this M table's source is itself parseable T-SQL."
+  match, effectively "this M table's source is itself parseable T-SQL."
 - `Odbc.DataSource("dsn-or-connection-string", ...)` with a similar downstream `[Schema=...,Item=...]`
-  navigation — the same match shape as `Sql.Database`, differing only in how the server identity is
+  navigation: the same match shape as `Sql.Database`, differing only in how the server identity is
   spelled (a DSN name or connection string rather than a bare server name), which needs its own
   server-identity handling (Section 5) since it will not already appear as a declared `connections:`
   entry the way a `server:`-referenced subscriber does.
@@ -96,7 +96,7 @@ Why here and not downstream: the tool already parses the M text into memory to e
 it reach the control plane's process" security boundary (POWERAI.md's own stated posture). Adding a
 second reader of the same M text in C# would recreate exactly the tool-duplication problem POWERAI.md
 Section 10 already recorded once and had to resolve by deleting a redundant reader. One parser, one
-place, feeding structured facts downstream — the Single Code Path Principle applied to this feature
+place, feeding structured facts downstream: the Single Code Path Principle applied to this feature
 specifically.
 
 This DOES mean the pattern-matcher is written in C, joining the existing hand-rolled JSON/XML/SQLite
@@ -150,8 +150,8 @@ having the tool guess at server equivalence.
 
 **This is the one part of the design with a strong, already-proven precedent, and it needs no new
 graph-builder mechanism.** `LineageGraphBuilder.Build` (`src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs:38-53`)
-already resolves exactly this shape of fact — a `SynonymLink` (`LineageFacts.cs:258-269`,
-`(ServerRef, Database, Schema, Name) -> (TargetDatabase?, TargetSchema?, TargetName?)`) — through
+already resolves exactly this shape of fact, a `SynonymLink` (`LineageFacts.cs:258-269`,
+`(ServerRef, Database, Schema, Name) -> (TargetDatabase?, TargetSchema?, TargetName?)`), through
 `ResolveSynonyms`, applied to every fact before it lands in the graph. A model-entity resolution is
 structurally identical: "this name means that other name," just sourced from a `.pbix`'s M expression
 rather than from a live `sys.synonyms` read.
@@ -162,27 +162,27 @@ Plan: `FlowSetCollector`'s PowerBI extraction path (`ExtractOneReport`,
 `SpecNode` gains them, mirroring how it already reads `visualType`/`title`/`sql`) and, for every
 resolved table, emits one `SynonymLink` into `CollectionResult.Synonyms` with:
 - `ServerRef`/`Database`/`Schema`/`Name` = the subscriber's own `server:` identity + the MODEL entity
-  name (the "from" side — what the bare `Sales` reference in the synthesized SQL resolves to today).
+  name (the "from" side: what the bare `Sales` reference in the synthesized SQL resolves to today).
 - `TargetDatabase`/`TargetSchema`/`TargetName` = the resolved physical object (the "to" side).
 
 No change to `LineageGraphBuilder` itself: it already merges every source's synonyms into one
 `synonymTargets` dictionary and applies them uniformly. A PowerBI-sourced synonym and a live
 `sys.synonyms`-sourced synonym are indistinguishable to the resolution pass, which is exactly the
-point — one mechanism, two producers.
+point: one mechanism, two producers.
 
 **Consequence for `defaultDatabase`:** `TSqlLineageExtractor.Extract` is still called with
-`defaultDatabase: null` for subscriber queries (`FlowSetCollector.cs:208`, unchanged) — the model
+`defaultDatabase: null` for subscriber queries (`FlowSetCollector.cs:208`, unchanged); the model
 entity's bare name still parses as a 1-part name at that stage. The synonym pass, which runs AFTER
 extraction (`LineageGraphBuilder.Build` line 38 onward, before the graph is finalized), is what
 rewrites the 1-part name onto the resolved 4-tuple. This means no change to the SQL rendering
-(`sqlrender.c`) or to `TSqlLineageExtractor` is needed at all — the fix is entirely additive
+(`sqlrender.c`) or to `TSqlLineageExtractor` is needed at all; the fix is entirely additive
 (new extracted data + new synonym facts), which is the cleanest possible integration into an existing,
 tested pipeline.
 
 ## 7. Catalog storage and reporting
 
 - `CatalogSubscriberReportField.TableName` (today: the bare model entity, per its own doc comment)
-  stays as-is — it is describing what the VISUAL projects, which is correctly the model's own
+  stays as-is; it is describing what the VISUAL projects, which is correctly the model's own
   vocabulary; resolution is a lineage-identity concern, not a display concern.
 - The resolved mapping itself does not need new dedicated catalog storage: it becomes ordinary
   `CatalogLineageEdge` rows once folded through the synonym pass, exactly like a live-synonym-derived
@@ -242,10 +242,10 @@ tested pipeline.
   identity handling (Section 5) distinct from `Sql.Database`, or should the first pass be
   `Sql.Database` (including its native-query form) only, with `Odbc.DataSource` as an explicit
   follow-up once real reports using it are seen? Recommendation: `Sql.Database` only for the first
-  pass — it is very likely the dominant shape for a warehouse-fed report, and narrowing scope keeps
+  pass; it is very likely the dominant shape for a warehouse-fed report, and narrowing scope keeps
   step 1 reviewable.
 - **Does a resolved mapping ever need to be REVOKED** (a report re-points its model source, the old
   mapping should stop applying)? Since extraction re-runs and re-emits the full spec on every sync
   (nothing here is incremental the way question generation's content-hash gate is), a stale mapping
-  cannot persist past the next sync — but this should be confirmed against `CatalogSync`'s existing
+  cannot persist past the next sync, but this should be confirmed against `CatalogSync`'s existing
   wholesale-replace behavior for lineage edges before assuming it "just works."
