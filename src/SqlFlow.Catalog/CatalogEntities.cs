@@ -953,7 +953,9 @@ public static class SubscriberReportVisualHash
 /// single column on the visual row. Generated and stored by a control-plane-only enrichment step that runs after
 /// a sync, never by <c>tools/pbix-extract</c> or <see cref="CatalogSync"/> itself; regenerated only when the
 /// owning visual's <see cref="CatalogSubscriberReportVisual.ContentHash"/> changes, so an unchanged visual keeps
-/// its previously generated questions across syncs instead of calling the LLM again.
+/// its previously generated questions across syncs instead of calling the LLM again. A person can also add, edit, and
+/// delete questions from the semantic layer page (<see cref="SubscriberQuestionOrigin.Manual"/>); generation never
+/// replaces those.
 /// </summary>
 public class CatalogSubscriberReportVisualQuestion
 {
@@ -969,6 +971,27 @@ public class CatalogSubscriberReportVisualQuestion
 
     /// <summary>The question text, as a person would actually type it.</summary>
     public string Question { get; set; } = string.Empty;
+
+    /// <summary><see cref="SubscriberQuestionOrigin.Generated"/> (a sync wrote it) or
+    /// <see cref="SubscriberQuestionOrigin.Manual"/> (a person added or edited it).</summary>
+    public string Origin { get; set; } = SubscriberQuestionOrigin.Generated;
+
+    /// <summary>Who last added or edited it; null for a generated question.</summary>
+    public string? UpdatedBy { get; set; }
+
+    /// <summary>When it was last added or edited by a person; null for a generated question.</summary>
+    public DateTime? UpdatedUtc { get; set; }
+}
+
+/// <summary>Where a <see cref="CatalogSubscriberReportVisualQuestion"/> came from, named once so the generator, the
+/// editor, and the API cannot drift into spelling the same value differently.</summary>
+public static class SubscriberQuestionOrigin
+{
+    /// <summary>Written by sync-time generation, and replaced by it when the visual changes.</summary>
+    public const string Generated = "generated";
+
+    /// <summary>Added or edited by a person. Generation never replaces it; it goes only with its visual.</summary>
+    public const string Manual = "manual";
 }
 
 /// <summary>
@@ -1656,6 +1679,18 @@ public class CatalogSemanticLayerSettings
 
     /// <summary>Markdown instructions for an assistant, or null when none are written yet.</summary>
     public string? Instructions { get; set; }
+
+    /// <summary>An admin's choice of whether a sync generates business questions for Power BI report visuals, or null
+    /// to follow the deployment's <c>ControlPlane:PowerAI:QuestionGeneration:Enabled</c>. Only takes effect where the
+    /// deployment has an Anthropic key to generate with.</summary>
+    public bool? QuestionGeneration { get; set; }
+
+    /// <summary>Who last set <see cref="QuestionGeneration"/>, kept apart from <see cref="UpdatedBy"/> so an
+    /// instructions edit does not claim the switch.</summary>
+    public string? QuestionGenerationUpdatedBy { get; set; }
+
+    /// <summary>When <see cref="QuestionGeneration"/> was last set.</summary>
+    public DateTime? QuestionGenerationUpdatedUtc { get; set; }
 
     public string? UpdatedBy { get; set; }
 

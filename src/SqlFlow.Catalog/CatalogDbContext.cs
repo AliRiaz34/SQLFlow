@@ -388,6 +388,10 @@ public sealed class CatalogDbContext : DbContext
             entity.HasKey(q => q.Id);
             entity.Property(q => q.VisualKey).HasMaxLength(1192).IsRequired();
             entity.Property(q => q.Question).HasMaxLength(400).IsRequired();
+            // Every question that predates the column was generated, so that is the default existing rows take.
+            entity.Property(q => q.Origin).HasMaxLength(16).IsRequired()
+                .HasDefaultValue(SubscriberQuestionOrigin.Generated);
+            entity.Property(q => q.UpdatedBy).HasMaxLength(256);
             entity.HasIndex(q => q.VisualKey);
             entity.HasIndex(q => q.RepoId);
         });
@@ -663,6 +667,7 @@ public sealed class CatalogDbContext : DbContext
             // The singleton's id is fixed by the application, never generated.
             entity.Property(s => s.Id).ValueGeneratedNever();
             entity.Property(s => s.UpdatedBy).HasMaxLength(256);
+            entity.Property(s => s.QuestionGenerationUpdatedBy).HasMaxLength(256);
         });
 
         modelBuilder.Entity<CatalogPipelineColumn>(entity =>

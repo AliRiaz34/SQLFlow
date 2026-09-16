@@ -23,7 +23,8 @@ import type {
   SemanticObjectCoverage, SemanticOverview, SemanticSchemaCoverage, SetSemanticAnnotationRequest,
   UpsertSemanticJoinRequest, UpsertSemanticMeasureRequest,
   ConfirmQuestionRequest, ConfirmedQuestion, SemanticExampleAdmin, UpdateSemanticExampleRequest,
-  DeleteSemanticReportSpecResult, ExtractedSemanticReport, SemanticReportCapabilities, SemanticReportSpec,
+  AddReportQuestionRequest, DeleteSemanticReportSpecResult, ExtractedSemanticReport, QuestionGeneration,
+  SemanticReportQuestion, SemanticReportCapabilities, SemanticReportSpec,
   SemanticReportSpecDetail, SemanticReportSubscriber, StoreSemanticReportSpecRequest, StoreSemanticReportSpecResult,
   PrepareQueryRequest, PreparedQuery,
   FlowParameters,
@@ -643,6 +644,18 @@ export const semanticLayerApi = {
   deleteRelationship: (id: number) => del<void>(`/api/v1/powerai/semantic-layer/relationships/${id}`),
   /** Whether a raw .pbix can be uploaded (the isolated extractor is configured), and the size limits. */
   reportCapabilities: () => get<SemanticReportCapabilities>("/api/v1/powerai/semantic-layer/reports/capabilities"),
+  /** Adds a person's question to a report visual; generation never replaces it. */
+  addReportQuestion: (request: AddReportQuestionRequest) =>
+    post<SemanticReportQuestion>("/api/v1/powerai/semantic-layer/reports/questions", request),
+  /** Rewrites a report question; a generated one becomes the person's. */
+  updateReportQuestion: (id: number, question: string) =>
+    put<SemanticReportQuestion>(`/api/v1/powerai/semantic-layer/reports/questions/${id}`, { question }),
+  deleteReportQuestion: (id: number) => del<void>(`/api/v1/powerai/semantic-layer/reports/questions/${id}`),
+  /** Whether a sync generates business questions for report visuals. */
+  questionGeneration: () => get<QuestionGeneration>("/api/v1/powerai/semantic-layer/reports/question-generation"),
+  /** Turns question generation on or off (`enabled: null` follows the deployment default). */
+  setQuestionGeneration: (enabled: boolean | null) =>
+    put<QuestionGeneration>("/api/v1/powerai/semantic-layer/reports/question-generation", { enabled }),
   /** The Power BI subscribers the repositories declare: what a report can be attached to. */
   reportSubscribers: () => get<SemanticReportSubscriber[]>("/api/v1/powerai/semantic-layer/reports/subscribers"),
   /** The Power BI reports the layer holds, uploads first. */

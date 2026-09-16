@@ -127,11 +127,13 @@ is refused with 409.
 | `POST /api/v1/powerai/semantic-layer/relationships`; `PUT`, `DELETE .../relationships/{id}` | Create, replace, delete curated relationships (`joinType` `Inner` or `Left`) |
 | `GET /api/v1/powerai/semantic-layer/examples?search=`; `GET`, `PUT`, `DELETE .../examples/{id}` | List (newest first, with state), read, correct, and delete saved answers. An edit takes `question`, `sql`, and `sourceRef` (blank to infer), is validated exactly as a confirmation is, re-resolves the tables it reads when the SQL changes, and answers 409 when it would duplicate another. Confirming a new one stays `POST /api/v1/powerai/questions/confirm` (operate scope) |
 
-| `GET /api/v1/powerai/semantic-layer/reports?repoId=&subscriber=`; `GET`, `DELETE .../reports/{id}` | List, read (with the specification and what it holds), and delete the Power BI report specifications the layer holds. Deleting queues the repo's managed sync |
+| `GET /api/v1/powerai/semantic-layer/reports?repoId=&subscriber=`; `GET`, `DELETE .../reports/{id}` | List, read (with the specification, what it holds, and `pages`: the pages and visuals the last sync served under that report's label, each visual with its generated `questions`; empty until a sync has read the report), and delete the Power BI report specifications the layer holds. Deleting queues the repo's managed sync |
+| `POST /api/v1/powerai/semantic-layer/reports/questions`; `PUT`, `DELETE .../reports/questions/{id}` | Curate a visual's business questions. `POST` takes `repoId`, `visualKey` (from the report detail), and `question`; `PUT` takes `question`. The text is trimmed, required, one line, and at most 400 characters; a question the visual already has (ignoring case) is refused (409), as is a `visualKey` the repo no longer has (404). Added and edited questions are `manual`: generation never replaces them, and they go only with their visual. An edit that races a sync regenerating the same generated question answers 409 |
 | `GET /api/v1/powerai/semantic-layer/reports/subscribers` | The PowerBI subscribers the repositories declare, which are what a report can be attached to |
 | `POST /api/v1/powerai/semantic-layer/reports` | Store a specification for a subscriber: `repoId`, `subscriber` (name), `reportFile` (the report's label), `spec`. It is validated and rewritten into canonical, credential-redacted form first (400 when it is not a readable specification); the subscriber must be declared by that repo and be of type PowerBI. Storing the same `reportFile` again replaces the upload (`replaced`). `syncQueued` says whether the repo's managed sync was queued to apply it |
 | `POST /api/v1/powerai/semantic-layer/reports/extract?reportFile=` | Body: the raw `.pbix` (`application/octet-stream`). Forwarded to the isolated extractor and answered with the validated specification and its counts, without storing it. 501 when `ControlPlane:PowerAI:ReportExtraction` is off; 413 over `MaxUploadMegabytes`; the extractor's own refusal is passed on (422) |
-| `GET /api/v1/powerai/semantic-layer/reports/capabilities` | Whether `.pbix` extraction is enabled, and the size limits |
+| `GET /api/v1/powerai/semantic-layer/reports/capabilities` | Whether `.pbix` extraction is enabled, the size limits, and whether sync-time question generation is on (`questionGenerationEnabled`) |
+| `GET`, `PUT /api/v1/powerai/semantic-layer/reports/question-generation` | Read or set whether a sync generates business questions for report visuals. `PUT` takes `enabled`: `true` or `false` overrides the deployment's `ControlPlane:PowerAI:QuestionGeneration:Enabled`, `null` follows it again. The answer carries `available` (the deployment has an Anthropic key), `deploymentDefault`, `override`, the effective `enabled`, who changed it and when, and `syncsQueued`. Turning generation on without a key is refused (409). A change that turns it on queues the managed sync of every repo holding report visuals, so the missing questions are generated |
 
 Column allow state, description, and synonyms are written through `PUT /api/v1/powerai/column-policies` (one
 column) and `PUT /api/v1/powerai/column-policies/objects` (every column of an object).
@@ -202,9 +204,12 @@ the people who use it. It has five tabs:
 - **Saved answers** (`?tab=examples`; `/saved-answers` redirects here): every saved answer across the layer, with a
   search over question and query text, its datasource, who last stood behind it, its served/withheld state, and
   edit and delete.
-- **Power BI reports** (`?tab=reports`): every report specification the layer holds, uploaded or kept by a sync,
-  with what it contains, who stored it, and whether its subscriber is still declared; view its specification, or
-  remove it. **Upload report** attaches a `.pbix` (read by the isolated extractor and shown for review before it is
+- **Power BI reports** (`?tab=reports`): a **Generate business questions at sync** switch (disabled without an
+  Anthropic key, with **Use deployment default** to drop an override), then every report specification the layer
+  holds, uploaded or kept by a sync,
+  with what it contains, who stored it, and whether its subscriber is still declared; open it to see the business
+  questions of each of its visuals (page by page, each marked generated or curated) and add, edit, or delete them,
+  see its specification, or remove it. **Upload report** attaches a `.pbix` (read by the isolated extractor and shown for review before it is
   saved) or a `.pbix.yaml` specification to a PowerBI subscriber.
 - **Blocked columns**: every column outside the layer, denied or never reviewed.
 

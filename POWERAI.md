@@ -283,8 +283,10 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
    runs after a sync, never by `tools/pbix-extract` or `CatalogSync` themselves, and regenerated
    only for visuals whose content changed (`CatalogSubscriberReportVisual.ContentHash`), so an
    unchanged visual keeps its questions across syncs with no LLM call. Independently toggleable
-   (`ControlPlane:PowerAI:QuestionGeneration:Enabled`, off by default) from the interactive chat
-   assistant, reusing its Anthropic API key/model.
+   (`ControlPlane:PowerAI:QuestionGeneration:Enabled`, off by default, overridable at runtime from the
+   semantic layer's Power BI reports tab) from the interactive chat assistant, reusing its Anthropic
+   API key/model. The same tab lets a person add, edit, and delete a visual's questions; those are
+   marked `manual` and generation never replaces them.
 4. ~~Extract measures.~~ **Done** (Section 5), via `tools/pbix-extract`, stored in
    `CatalogSubscriberModelField` (Section 8).
 5. ~~Extract declared model relationships and cardinality.~~ **Done** (Section 5), tagged `active`;
@@ -396,7 +398,8 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
   rather than hand-parsed JSON, and degrades to a warning (never a thrown exception) when generation
   fails, so a flaky LLM call never loses or blocks the visual/field rows the sync itself wrote. Off
   by default and independently toggleable from the interactive chat assistant
-  (`ControlPlane:PowerAI:QuestionGeneration:Enabled`), though it reuses
+  (`ControlPlane:PowerAI:QuestionGeneration:Enabled` as the default, which an admin overrides with the
+  switch on the semantic layer's Power BI reports tab), though it reuses
   `ControlPlane:Assistant:Anthropic`'s API key and model rather than declaring its own. Exposed over
   `describe_subscriber_report`/`GET /lineage/subscribers/report` as each visual's `questions` array.
 

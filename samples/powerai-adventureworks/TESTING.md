@@ -216,9 +216,10 @@ the tool description, not of the search.
 
 ## H. Needs an Anthropic key (skipped on this stack)
 
-Set `ControlPlane__Assistant__Anthropic__ApiKey` on the `controlplane` service, plus
-`ControlPlane__PowerAI__QuestionGeneration__Enabled: "true"`, then `docker compose up -d controlplane` and
-trigger a sync from the GUI. Expansion needs no key: Claude Code supplies it (section E).
+Set `ControlPlane__Assistant__Anthropic__ApiKey` on the `controlplane` service and run
+`docker compose up -d controlplane`. Then turn on **Generate business questions at sync** on the semantic layer's
+Power BI reports tab (or set `ControlPlane__PowerAI__QuestionGeneration__Enabled: "true"` to make it the
+default) and trigger a sync from the GUI. Expansion needs no key: Claude Code supplies it (section E).
 
 ### T26: questions generated per visual
 - Prompt: `show me the business questions each AdventureWorks visual answers`

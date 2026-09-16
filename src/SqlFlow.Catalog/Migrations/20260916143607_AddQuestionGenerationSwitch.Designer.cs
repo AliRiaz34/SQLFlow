@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using SqlFlow.Catalog;
 
@@ -11,9 +12,11 @@ using SqlFlow.Catalog;
 namespace SqlFlow.Catalog.Migrations
 {
     [DbContext(typeof(CatalogDbContext))]
-    partial class CatalogDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260916143607_AddQuestionGenerationSwitch")]
+    partial class AddQuestionGenerationSwitch
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -2747,13 +2750,6 @@ namespace SqlFlow.Catalog.Migrations
                     b.Property<int>("Ordinal")
                         .HasColumnType("int");
 
-                    b.Property<string>("Origin")
-                        .IsRequired()
-                        .ValueGeneratedOnAdd()
-                        .HasMaxLength(16)
-                        .HasColumnType("nvarchar(16)")
-                        .HasDefaultValue("generated");
-
                     b.Property<string>("Question")
                         .IsRequired()
                         .HasMaxLength(400)
@@ -2761,13 +2757,6 @@ namespace SqlFlow.Catalog.Migrations
 
                     b.Property<Guid>("RepoId")
                         .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("UpdatedBy")
-                        .HasMaxLength(256)
-                        .HasColumnType("nvarchar(256)");
-
-                    b.Property<DateTime?>("UpdatedUtc")
-                        .HasColumnType("datetime2");
 
                     b.Property<string>("VisualKey")
                         .IsRequired()

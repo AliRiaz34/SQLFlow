@@ -1226,7 +1226,8 @@ public sealed class AutoRunOptions
 /// </summary>
 public sealed class QuestionGenerationOptions
 {
-    /// <summary>Turns sync-time LLM question generation on for extracted PowerBI visuals. Off, a sync writes
+    /// <summary>The deployment's default for sync-time LLM question generation on extracted PowerBI visuals. An admin
+    /// can override it at runtime from the semantic layer page (<c>QuestionGenerationSwitch</c>). Off, a sync writes
     /// visuals/fields exactly as before: no questions, no Anthropic call.</summary>
     public bool Enabled { get; set; }
 

@@ -1605,10 +1605,53 @@ export interface SemanticReportSpec {
   updatedUtc: string;
 }
 
+/** Where a report question came from: a sync generated it (and may replace it when the visual changes), or a person
+ * added or edited it (and generation leaves it alone). */
+export type ReportQuestionOrigin = "generated" | "manual";
+
+/** One business question on a report visual. */
+export interface SemanticReportQuestion {
+  id: number;
+  question: string;
+  origin: ReportQuestionOrigin;
+  updatedBy: string | null;
+  updatedUtc: string | null;
+}
+
+/** One visual the last sync served for a report: the fields it shows and its business questions. `questions` is the
+ * plain text of `questionEntries`. */
+export interface SemanticReportVisual {
+  ordinal: number;
+  visualType: string;
+  title: string | null;
+  queryName: string;
+  fields: { role: string; tableName: string; columnOrMeasure: string; isMeasure: boolean }[];
+  questions: string[];
+  visualKey: string;
+  questionEntries: SemanticReportQuestion[];
+}
+
+/** Adds a person's question to a report visual. */
+export interface AddReportQuestionRequest {
+  repoId: string;
+  visualKey: string;
+  question: string;
+}
+
+/** One page of a served report, with its visuals in order. */
+export interface SemanticReportPage {
+  reportFile: string;
+  ordinal: number;
+  displayName: string;
+  visuals: SemanticReportVisual[];
+}
+
+/** `pages` is what the last sync served under the report's label; empty until a sync has read it. */
 export interface SemanticReportSpecDetail {
   report: SemanticReportSpec;
   spec: string;
   summary: ReportSpecSummary;
+  pages: SemanticReportPage[];
 }
 
 /** Stores a specification for a Power BI subscriber, replacing an earlier upload of the same report. */
@@ -1642,6 +1685,21 @@ export interface SemanticReportCapabilities {
   extractionEnabled: boolean;
   maxReportBytes: number;
   maxSpecBytes: number;
+  /** Whether a sync generates business questions for report visuals (a deployment setting). */
+  questionGenerationEnabled: boolean;
+}
+
+/** Whether a sync generates business questions for report visuals. `override` is an admin's choice (null follows
+ * `deploymentDefault`); nothing can turn generation on while `available` is false (no Anthropic key). */
+export interface QuestionGeneration {
+  available: boolean;
+  deploymentDefault: boolean;
+  override: boolean | null;
+  enabled: boolean;
+  updatedBy: string | null;
+  updatedUtc: string | null;
+  /** On a change that turned generation on, how many repos had a sync queued to generate the missing questions. */
+  syncsQueued: number;
 }
 
 export interface SemanticReportModelAdmin {

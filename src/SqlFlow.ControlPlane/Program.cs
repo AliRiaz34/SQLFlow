@@ -200,10 +200,14 @@ if (options.Assistant.Enabled)
 // ---- PowerAI: question generation and retrieval, each independent of the interactive chat assistant above and
 // of each other (a deployment may run any one without the others). Both reuse the same Anthropic account/model
 // rather than declaring their own, since both draw on the same subscription, so the resolved options are
-// registered once when EITHER needs them. Each consumer is registered only when its own switch is on, so an
-// unconfigured or disabled deployment never attempts an Anthropic call.
+// registered once when EITHER needs them. Question generation is switched at runtime (an admin can turn it on or
+// off from the semantic layer page, over the configured default), so its generator is registered wherever there is
+// a key to generate with and QuestionGenerationSwitch decides, per sync, whether it is called. Synonym expansion is
+// registered only when its own switch is on. A deployment without a key never attempts an Anthropic call.
+builder.Services.AddSingleton<QuestionGenerationSwitch>();
+var generationAvailable = !string.IsNullOrWhiteSpace(options.Assistant.Anthropic.ApiKey);
 var expandsSynonyms = options.PowerAI.Retrieval.Enabled && options.PowerAI.Retrieval.ExpandSynonyms;
-if (options.PowerAI.QuestionGeneration.Enabled || expandsSynonyms)
+if (generationAvailable || expandsSynonyms)
 {
     builder.Services.AddSingleton(sp =>
     {
@@ -218,7 +222,7 @@ if (options.PowerAI.QuestionGeneration.Enabled || expandsSynonyms)
     });
 }
 
-if (options.PowerAI.QuestionGeneration.Enabled)
+if (generationAvailable)
 {
     builder.Services.AddSingleton<SqlFlow.Assistant.QuestionGenerator>();
 }

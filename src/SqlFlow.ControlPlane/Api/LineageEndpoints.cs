@@ -215,11 +215,23 @@ public sealed record SubscriberReportFieldDto(
 /// projects with their roles, and the name of the <see cref="SubscriberQueryDto"/> it was rendered as, so a
 /// caller can go from "this visual plots Sales Amount as Y" to the actual SQL without matching text.
 /// <c>Questions</c> is 1-3 natural-language business questions this visual answers, generated from its title,
-/// chart type, and fields (POWERAI.md's "business-question field"); empty when question generation is disabled
-/// or has not yet run for this visual.</summary>
+/// chart type, and fields (POWERAI.md's "business-question field"), or written by a person; empty when neither has
+/// happened for this visual. <c>QuestionEntries</c> carries the same questions with what an editor needs (each one's
+/// id and origin), and <c>VisualKey</c> is the visual's catalog key, which a question is added under.</summary>
 public sealed record SubscriberReportVisualDto(
     int Ordinal, string VisualType, string? Title, string QueryName,
-    IReadOnlyList<SubscriberReportFieldDto> Fields, IReadOnlyList<string> Questions);
+    IReadOnlyList<SubscriberReportFieldDto> Fields, IReadOnlyList<string> Questions,
+    string VisualKey, IReadOnlyList<SubscriberReportQuestionDto> QuestionEntries);
+
+/// <summary>One business question on a report visual.</summary>
+/// <param name="Id">The question's id, which edits and deletes address.</param>
+/// <param name="Question">The question text.</param>
+/// <param name="Origin"><c>generated</c> (a sync wrote it, and may replace it when the visual changes) or
+/// <c>manual</c> (a person added or edited it, and generation leaves it alone).</param>
+/// <param name="UpdatedBy">Who last added or edited it; null for a generated question.</param>
+/// <param name="UpdatedUtc">When a person last added or edited it.</param>
+public sealed record SubscriberReportQuestionDto(
+    long Id, string Question, string Origin, string? UpdatedBy, DateTime? UpdatedUtc);
 
 /// <summary>One page of a report, with the visuals on it. <c>ReportFile</c> names which <c>.pbix</c> the page
 /// came from, which only distinguishes pages when a subscriber's <c>pbix:</c> names a directory of several
@@ -1704,13 +1716,7 @@ public static class LineageEndpoints
     /// examples stop grounding an answer and start crowding out the close ones.</summary>
     private const int MaxSimilarQuestions = 20;
 
-    /// <summary>
-    /// The report structure behind one subscriber: every page, the visuals on it, and each field's role. Built
-    /// from the three tables a sync writes keyed by derived string (<c>PageKey</c>/<c>VisualKey</c>), loaded
-    /// parent-to-child and grouped in memory rather than joined in SQL, since a report's total row count is
-    /// small enough per subscriber that the extra round trips cost nothing and the code stays as readable as
-    /// <see cref="GetSubscriberDossierAsync"/>'s own grouping.
-    /// </summary>
+    /// <summary>The report structure behind one subscriber: every page, the visuals on it, and each field's role.</summary>
     private static async Task<Results<Ok<SubscriberReportDto>, ProblemHttpResult>> GetSubscriberReportAsync(
         string key, CatalogDbContext db, CancellationToken ct)
     {
@@ -1721,8 +1727,32 @@ public static class LineageEndpoints
             return NotFound("subscriber", key);
         }
 
-        var pageRows = await db.SubscriberReportPages.AsNoTracking()
-            .Where(p => p.SubscriberKey == key)
+        var pages = await LoadSubscriberReportPagesAsync(db, repoId: null, key, reportFile: null, ct).ConfigureAwait(false);
+        return TypedResults.Ok(new SubscriberReportDto(subscriber.ObjectKey, subscriber.Name, pages));
+    }
+
+    /// <summary>
+    /// The pages, visuals, fields and business questions the last sync wrote for a subscriber, optionally narrowed to
+    /// one repo and to one report label. Built from the tables a sync writes keyed by derived string
+    /// (<c>PageKey</c>/<c>VisualKey</c>), loaded parent-to-child and grouped in memory rather than joined in SQL, since
+    /// a report's total row count is small enough per subscriber that the extra round trips cost nothing and the code
+    /// stays as readable as <see cref="GetSubscriberDossierAsync"/>'s own grouping.
+    /// </summary>
+    internal static async Task<IReadOnlyList<SubscriberReportPageDto>> LoadSubscriberReportPagesAsync(
+        CatalogDbContext db, Guid? repoId, string subscriberKey, string? reportFile, CancellationToken ct)
+    {
+        var pageQuery = db.SubscriberReportPages.AsNoTracking().Where(p => p.SubscriberKey == subscriberKey);
+        if (repoId is { } repo)
+        {
+            pageQuery = pageQuery.Where(p => p.RepoId == repo);
+        }
+
+        if (reportFile is not null)
+        {
+            pageQuery = pageQuery.Where(p => p.ReportFile == reportFile);
+        }
+
+        var pageRows = await pageQuery
             .OrderBy(p => p.ReportFile).ThenBy(p => p.Ordinal)
             .Take(MaxDossierRows)
             .ToListAsync(ct).ConfigureAwait(false);
@@ -1740,8 +1770,8 @@ public static class LineageEndpoints
             .Take(MaxDossierRows)
             .ToListAsync(ct).ConfigureAwait(false);
         var questionRows = await db.SubscriberReportVisualQuestions.AsNoTracking()
-            .Where(q => visualKeys.Contains(q.VisualKey))
-            .OrderBy(q => q.Ordinal)
+            .Where(q => visualKeys.Contains(q.VisualKey) && (repoId == null || q.RepoId == repoId))
+            .OrderBy(q => q.Ordinal).ThenBy(q => q.Id)
             .Take(MaxDossierRows)
             .ToListAsync(ct).ConfigureAwait(false);
 
@@ -1753,15 +1783,17 @@ public static class LineageEndpoints
                 fieldsByVisual[v.VisualKey]
                     .Select(f => new SubscriberReportFieldDto(f.Role, f.TableName, f.ColumnOrMeasure, f.IsMeasure))
                     .ToList(),
-                questionsByVisual[v.VisualKey].Select(q => q.Question).ToList())))
+                questionsByVisual[v.VisualKey].Select(q => q.Question).ToList(),
+                v.VisualKey,
+                questionsByVisual[v.VisualKey]
+                    .Select(q => new SubscriberReportQuestionDto(q.Id, q.Question, q.Origin, q.UpdatedBy, q.UpdatedUtc))
+                    .ToList())))
             .ToLookup(x => x.PageKey, x => x.Dto);
 
-        var pages = pageRows
+        return pageRows
             .Select(p => new SubscriberReportPageDto(
                 p.ReportFile, p.Ordinal, p.DisplayName, visualsByPage[p.PageKey].ToList()))
             .ToList();
-
-        return TypedResults.Ok(new SubscriberReportDto(subscriber.ObjectKey, subscriber.Name, pages));
     }
 
     /// <summary>The subscribers consuming one object, for its dossier: the read edges attributed to a subscriber
