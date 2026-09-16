@@ -207,6 +207,91 @@ public sealed class QuestionSearchTests
     }
 
     /// <summary>
+    /// A caller's own expansion is held to the bound the server's expander uses: each term is its own predicate,
+    /// so an assistant sending hundreds of terms must not turn one question into hundreds of index probes. Terms
+    /// past the bound are ignored, which is observable as a term that only appears past it finding nothing.
+    /// </summary>
+    [SkippableFact]
+    public async Task CallerTerms_PastTheExpanderBound_AreIgnored()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|termcap_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("What is our revenue by region?", "SELECT 1", "[Dw].[arc].[Sales]", "Revenue by Region"),
+            ]);
+
+            var fillers = Enumerable.Range(0, SqlFlow.Assistant.QuestionExpander.MaxTerms)
+                .Select(i => $"filler{suffix}x{i}")
+                .ToList();
+
+            var pastTheBound = await QuestionSearch.FindSimilarAsync(
+                db, "revenue", topK: 3, [.. fillers, "revenue"], repoId, CancellationToken.None);
+            Assert.Empty(pastTheBound.Matches);
+            Assert.Equal(SqlFlow.Assistant.QuestionExpander.MaxTerms, pastTheBound.SearchedTerms.Count);
+            Assert.DoesNotContain("revenue", pastTheBound.SearchedTerms);
+
+            var withinTheBound = await QuestionSearch.FindSimilarAsync(
+                db, "revenue", topK: 3, ["revenue", .. fillers], repoId, CancellationToken.None);
+            var match = Assert.Single(withinTheBound.Matches);
+            Assert.Equal("What is our revenue by region?", match.Question);
+            Assert.Equal(SqlFlow.Assistant.QuestionExpander.MaxTerms, withinTheBound.SearchedTerms.Count);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
+    /// <summary>
+    /// Several grammatical forms of one word are one match, not several: an expansion routinely sends
+    /// "customer" and "customers" together, and both hit the single word "customers" in a stored question.
+    /// Scored as two, one shared word would clear a threshold of 2 by itself and make an unrelated stored
+    /// query look trusted.
+    /// </summary>
+    [SkippableFact]
+    public async Task FormsOfOneWord_ScoreOnce()
+    {
+        var cs = CatalogTestDb.Require();
+        await CatalogDatabase.MigrateAsync(cs);
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repoId = Guid.NewGuid();
+        var subscriberKey = $"subscriber|forms_{suffix}";
+        var pageKey = $"{subscriberKey}#report.pbix#1";
+
+        await using var db = CatalogDatabase.Create(cs);
+        try
+        {
+            await SeedAsync(db, repoId, subscriberKey, pageKey,
+            [
+                ("How many customers do we have?", "SELECT 1", "[Dw].[arc].[Customer]", "Customer Count"),
+            ]);
+
+            var result = await QuestionSearch.FindSimilarAsync(
+                db, "total order amount for customers in Germany", topK: 3,
+                ["total", "order", "amount", "customer", "customers", "germany"], repoId, CancellationToken.None);
+
+            var match = Assert.Single(result.Matches);
+            Assert.Equal(1, match.Score);
+            Assert.Equal(["customer", "customers"], match.MatchedTerms);
+        }
+        finally
+        {
+            await CleanupAsync(db, repoId);
+        }
+    }
+
+    /// <summary>
     /// A short question has too few meaningful words for a term count to ever trust it: "how many customers do
     /// we have?" is one word ("customers") once stop words go, so even its verbatim twin scores 1. Identity is
     /// what closes that gap, and it must stay identity: a different question sharing the same word is not the

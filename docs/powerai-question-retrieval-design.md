@@ -130,8 +130,10 @@ Task<QuestionSearchResult> FindSimilarAsync(
    a real vocabulary match.
 2. Load the stored questions containing any of those terms, through the full-text index when the
    instance has one and a `LIKE` scan when it does not, bounded by a candidate ceiling.
-3. Score each by how many distinct terms it matches, on word boundaries so "sale" does not score
-   against "wholesale", and return the top `topK`.
+3. Score each by how many distinct word stems its matching terms reduce to, on word boundaries so
+   "sale" does not score against "wholesale", and return the top `topK`. Stems rather than terms,
+   because an expansion lists a concept in several forms ("customer", "customers") that all hit the
+   same stored word; counted separately, one shared word cleared the trust threshold alone.
 4. Resolve only the winners' SQL and object keys (via the visual's `QueryName` →
    `CatalogSubscriberQuery`), so a large corpus costs one expansion call and one scan rather than a
    join across every stored question.
@@ -149,9 +151,17 @@ query string, even though the model could easily produce one.
 
 ## 6. Where this runs
 
-- **Expansion and search both happen on demand**, in the control plane, when a question is asked.
-  There is no sync-time work at all, which is the main operational simplification over the embedding
-  design: nothing to backfill, nothing to re-embed, no second vendor credential held by the sync.
+- **Expansion and search both happen on demand**, when a question is asked. There is no sync-time work
+  at all, which is the main operational simplification over the embedding design: nothing to backfill,
+  nothing to re-embed, no second vendor credential held by the sync.
+- **The caller expands, when the caller is a model.** `find_similar_questions` takes `expanded_terms`
+  and sends them as repeated `expandedTerms` keys; the assistant already reading the question produces
+  the vocabulary, so the control plane makes no expansion call of its own and needs no Anthropic key for
+  retrieval. `QuestionExpander` remains the fallback for a caller that sends no terms (a script, a
+  future search box) where `ExpandSynonyms` is on; with it off, such a caller searches its typed words.
+  Either way the terms pass through the same normalization and the same `QuestionExpander.MaxTerms`
+  bound inside `QuestionSearch.FindSimilarAsync`, so a caller's expansion cannot widen the search beyond
+  what the server's own would.
 - **Reachable as `find_similar_questions`** over `GET /api/v1/lineage/subscribers/similar-questions`,
   on the shared MCP read surface so both the GUI chat and Slack get it (it reaches no datasource,
   returning only SQL text the catalog already stores and `describe_subscriber` already exposes).

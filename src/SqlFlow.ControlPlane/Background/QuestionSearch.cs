@@ -118,7 +118,9 @@ public static class QuestionSearch
     /// <summary>
     /// The same search against terms already decided, for a caller that has its own expansion (and for tests,
     /// which supply terms directly rather than depending on a model's vocabulary). The terms are normalized
-    /// here too, so a caller cannot accidentally search on stop words.
+    /// here too, so a caller cannot accidentally search on stop words, and only the first
+    /// <see cref="QuestionExpander.MaxTerms"/> distinct ones are kept, since each becomes its own predicate and a
+    /// caller's expansion is held to the same bound as the server's own.
     /// </summary>
     /// <param name="db">The catalog to search.</param>
     /// <param name="question">The typed question, for context only; matching is on <paramref name="terms"/>.</param>
@@ -134,7 +136,7 @@ public static class QuestionSearch
         ArgumentNullException.ThrowIfNull(terms);
         ArgumentOutOfRangeException.ThrowIfLessThan(topK, 1);
 
-        terms = Normalize(terms);
+        terms = Normalize(terms).Take(QuestionExpander.MaxTerms).ToList();
         if (terms.Count == 0)
         {
             return new QuestionSearchResult([], []);
@@ -159,9 +161,14 @@ public static class QuestionSearch
         // A confirmed example outranks a report-derived question on an equal score: both are real precedent,
         // but one of them a person actually checked. Shorter questions break the remaining ties, as the more
         // specific phrasing at the same score.
+        //
+        // The score counts distinct word STEMS matched, not terms: an expansion lists each concept in several
+        // grammatical forms ("customer", "customers"), and every one of them matches the same word of a stored
+        // question. Counting them separately would let one shared word clear the trust threshold on its own and
+        // auto-run an unrelated query. MatchedTerms still names every term that hit.
         var ranked = candidates
             .Select(c => (Row: c, Matched: terms.Where(t => MatchesTerm(c.Question, t)).ToList()))
-            .Select(c => (c.Row, c.Matched, Score: c.Matched.Count))
+            .Select(c => (c.Row, c.Matched, Score: c.Matched.Select(Stem).Distinct(StringComparer.Ordinal).Count()))
             .Where(c => c.Score > 0)
             .OrderByDescending(c => c.Score)
             .ThenByDescending(c => c.Row.ExampleId > 0)

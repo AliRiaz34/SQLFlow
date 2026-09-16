@@ -578,8 +578,10 @@ In roughly the order it would need to land, since each depends on groundwork the
    database, which is also what found the two bugs that had kept the chain from ever working; what
    it does not prove is breadth, since it rests on one report and one source shape.
 5. ~~**The confirmed-example store and retrieval** (Sections 6 and 8).~~ **Done.** Retrieval:
-   `QuestionExpander` turns a typed question into related business vocabulary using the Anthropic account
-   question generation already uses, `QuestionSearch.FindSimilarAsync` ranks the stored questions by how
+   the assistant calling `find_similar_questions` expands the typed question into related business
+   vocabulary itself and passes it as `expanded_terms` (`QuestionExpander`, on the Anthropic account
+   question generation already uses, is the server-side fallback for a caller that sends none),
+   `QuestionSearch.FindSimilarAsync` ranks the stored questions by how
    many of those terms they match (through a full-text index where the instance has one, a `LIKE` scan
    where it does not), and `find_similar_questions` exposes it to every assistant surface, returning each
    match with the SQL that already answers it, the terms that matched, and a score-derived confidence

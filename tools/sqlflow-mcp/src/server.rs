@@ -316,11 +316,39 @@ pub struct SimilarQuestionsInput {
     /// rest exactly as they typed it: the match is on meaning, so rewording it into schema terms first
     /// throws away the signal this searches on.
     pub question: String,
+    /// The business vocabulary to search for, expanded by YOU from the question: its own meaningful words
+    /// first, then the synonyms and closely related business terms a dashboard might have used for the
+    /// same thing, each also in its common grammatical forms (e.g. for "what drives our turnover":
+    /// turnover, revenue, sales, income, drive, drives, driver, drivers). Single words or short phrases,
+    /// lowercase, no stop words; at most 48 are used. Stored questions are ranked by how many of these they
+    /// contain, so a term that is only loosely related adds noise. Omit it and the server searches the
+    /// typed words alone (or expands them itself, where it is configured to).
+    pub expanded_terms: Option<Vec<String>>,
     /// How many matches to return (default 3, max 20).
     pub top_k: Option<u32>,
     /// Restrict to one repo by id. Omit to search the whole estate, which is usually right: a question
     /// about revenue is worth answering from whichever repo's report first asked it.
     pub repo_id: Option<String>,
+}
+
+/// The query string for `GET /lineage/subscribers/similar-questions`: every expanded term travels as its own
+/// repeated `expandedTerms` key, which the control plane binds to its term list. Blank terms are dropped here
+/// so an empty list sends none and the server falls back to its own term source.
+fn similar_questions_query(input: SimilarQuestionsInput) -> Vec<(&'static str, String)> {
+    let mut query: Vec<(&'static str, String)> = vec![("question", input.question)];
+    for term in input.expanded_terms.unwrap_or_default() {
+        let term = term.trim();
+        if !term.is_empty() {
+            query.push(("expandedTerms", term.to_string()));
+        }
+    }
+    if let Some(top_k) = input.top_k {
+        query.push(("topK", top_k.to_string()));
+    }
+    if let Some(repo_id) = input.repo_id {
+        query.push(("repoId", repo_id));
+    }
+    query
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2137,13 +2165,17 @@ and fix every finding first."
             search_semantic_layer/describe_semantic_table like any other question instead. A full question is \
             not an identifier to a schema search's index; it is what THIS tool matches, once `!cwd` has activated it. Finds \
             the business questions this estate's dashboards or a person ALREADY answered that mean the same \
-            thing as the one just typed. The question is first expanded into related business \
-            vocabulary, so wording need not match (\"what drives our turnover\" can find \"revenue by product \
-            category\"). Each match carries the SQL that already answers it, the warehouse objects that SQL \
+            thing as the one just typed. Wording need not match, because YOU expand the question first: \
+            pass `expanded_terms` with the question's own meaningful words plus the business synonyms and \
+            related terms a dashboard could have used for the same thing, in their common grammatical forms \
+            (\"what drives our turnover\" -> turnover, revenue, sales, income, drive, driver, ...), so it can \
+            find \"revenue by product category\". Always pass them: without them the server searches the typed \
+            words alone unless its own expansion is configured. Each match carries the SQL that already answers it, the warehouse objects that SQL \
             reads, and a `score`: a close match is a query a real report already runs in production, so \
             adapting it beats composing one from the schema, and beats searching the schema for the words in \
             the question. \
-            `score` (how many searched terms the question matched) is the ONLY trustworthy confidence signal \
+            `score` (how many distinct searched words the question matched, several forms of one word \
+            counting once) is the ONLY trustworthy confidence signal \
             here, and `trusted` reports whether it cleared this deployment's threshold or is the same \
             question as the one typed (the same meaningful words). Do not substitute \
             your own confidence for it: a query you wrote from a 1-term match can read exactly as \
@@ -2180,13 +2212,7 @@ and fix every finding first."
             offer to fix the query instead. Only correct, verified answers become precedent here."
     )]
     async fn find_similar_questions(&self, Parameters(i): Parameters<SimilarQuestionsInput>) -> String {
-        let mut q: Vec<(&str, String)> = vec![("question", i.question)];
-        if let Some(top_k) = i.top_k {
-            q.push(("topK", top_k.to_string()));
-        }
-        if let Some(repo_id) = i.repo_id {
-            q.push(("repoId", repo_id));
-        }
+        let q = similar_questions_query(i);
         done(
             self.cp
                 .get("/api/v1/lineage/subscribers/similar-questions", &q)
@@ -3671,6 +3697,45 @@ mod tests {
         attach_answer_format(&mut relative, &GuiLinks::new(""));
         assert!(relative.get("chartLink").is_none());
         assert!(relative.get("sqlBlock").is_some());
+    }
+
+    #[test]
+    fn expanded_terms_travel_as_repeated_keys_and_blanks_are_dropped() {
+        let query = similar_questions_query(SimilarQuestionsInput {
+            question: "what drives our turnover".into(),
+            expanded_terms: Some(vec![
+                "turnover".into(),
+                "  revenue ".into(),
+                "   ".into(),
+                "sales".into(),
+            ]),
+            top_k: Some(5),
+            repo_id: Some("r1".into()),
+        });
+
+        assert_eq!(
+            query,
+            vec![
+                ("question", "what drives our turnover".to_string()),
+                ("expandedTerms", "turnover".to_string()),
+                ("expandedTerms", "revenue".to_string()),
+                ("expandedTerms", "sales".to_string()),
+                ("topK", "5".to_string()),
+                ("repoId", "r1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_expanded_terms_only_the_question_is_sent() {
+        let query = similar_questions_query(SimilarQuestionsInput {
+            question: "revenue by country".into(),
+            expanded_terms: None,
+            top_k: None,
+            repo_id: None,
+        });
+
+        assert_eq!(query, vec![("question", "revenue by country".to_string())]);
     }
 
     #[test]

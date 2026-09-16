@@ -123,7 +123,8 @@ public sealed class QuestionExpander : IDisposable
     /// pull in unrelated questions rather than finding the right one. Set well above the count of distinct
     /// CONCEPTS a question carries, because each concept contributes several grammatical forms
     /// (sell/sells/selling/sold) on top of its synonyms, and truncating mid-concept would drop exactly the
-    /// inflection a stored question happened to use.
+    /// inflection a stored question happened to use. The search applies the same bound to terms a caller
+    /// expanded itself, so an assistant's expansion is held to the limit this one is.
     /// </summary>
-    private const int MaxTerms = 48;
+    public const int MaxTerms = 48;
 }
