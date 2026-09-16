@@ -17,15 +17,16 @@ import { PageHeader } from "../../components/PageHeader";
 import { PagedTable, type Column } from "../../components/PagedTable";
 import { RelativeTime } from "../../components/RelativeTime";
 import { MeasureDialog } from "./MeasureDialog";
+import { ReportsPanel } from "./ReportsPanel";
 import { SavedAnswersPanel } from "./SavedAnswersPanel";
 import { MeasuresTable, SemanticObjectPanel } from "./SemanticObjectPanel";
 import { SemanticTree } from "./SemanticTree";
 import { COLUMN_POLICY_ROOT, errorText, refreshSemanticLayer, SEMANTIC_ROOT, textOrNull } from "./shared";
 
-type PageTab = "tables" | "instructions" | "examples" | "blocked";
+type PageTab = "tables" | "instructions" | "examples" | "reports" | "blocked";
 
 const parseTab = (value: string | null): PageTab =>
-  value === "instructions" || value === "examples" || value === "blocked" ? value : "tables";
+  value === "instructions" || value === "examples" || value === "reports" || value === "blocked" ? value : "tables";
 
 /** The layer-wide instructions and every measure: what an assistant reads before writing any SQL. */
 function InstructionsPanel({ onOpenObject }: { onOpenObject: (key: string) => void }) {
@@ -164,7 +165,8 @@ function BlockedColumnsPanel({ onOpenObject }: { onOpenObject: (key: string) => 
  * allow-list is the layer, so this is also where columns are allowed or denied: an object is in the layer once any
  * of its columns is allowed, and the assistant's schema tools serve only that, with the business context described
  * here. Tables are browsed in an explorer tree (selection in the URL as ?object=, so it is deep-linkable), layer-wide
- * instructions and measures have their own tab, and the blocked-columns audit lists everything still outside.
+ * instructions and measures have their own tab, the Power BI reports the layer learns vocabulary from have theirs, and
+ * the blocked-columns audit lists everything still outside.
  */
 export default function SemanticLayerPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -192,8 +194,8 @@ export default function SemanticLayerPage() {
   return (
     <Page data-testid="page-semantic-layer">
       <PageHeader
-        title="Semantic layer"
-        subtitle="The tables, views, and columns the AI assistant may use, and what they mean. A column is in the layer only once it is allowed; everything else, including anything never reviewed, is invisible to the assistant's schema search and refused when a query runs."
+        title="AI knowledge"
+        subtitle="What the AI assistant knows about your data: which tables and columns it may use and what they mean, answers people have confirmed, and the Power BI reports it learns business terms from. A column is visible to the assistant only once it is allowed; anything never reviewed stays hidden and is refused when a query runs."
         actions={overview.data !== undefined && (
           <div className="flex items-center gap-2" data-testid="semantic-layer-stats">
             <Badge variant="secondary">{`${overview.data.tableCount} table${overview.data.tableCount === 1 ? "" : "s"}`}</Badge>
@@ -207,6 +209,7 @@ export default function SemanticLayerPage() {
           <TabsTrigger value="tables" data-testid="semantic-page-tab-tables">Tables</TabsTrigger>
           <TabsTrigger value="instructions" data-testid="semantic-page-tab-instructions">Instructions &amp; measures</TabsTrigger>
           <TabsTrigger value="examples" data-testid="semantic-page-tab-examples">Saved answers</TabsTrigger>
+          <TabsTrigger value="reports" data-testid="semantic-page-tab-reports">Power BI reports</TabsTrigger>
           <TabsTrigger value="blocked" data-testid="semantic-page-tab-blocked">Blocked columns</TabsTrigger>
         </TabsList>
 
@@ -235,6 +238,10 @@ export default function SemanticLayerPage() {
 
         <TabsContent value="examples">
           <SavedAnswersPanel />
+        </TabsContent>
+
+        <TabsContent value="reports">
+          <ReportsPanel />
         </TabsContent>
 
         <TabsContent value="blocked">

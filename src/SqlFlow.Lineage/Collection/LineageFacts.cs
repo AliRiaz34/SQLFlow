@@ -124,6 +124,19 @@ public sealed record CollectedSubscriber
     /// <summary>The semantic model behind each report file the collector read. Empty for a hand-authored subscriber
     /// and for a report connected live to a published dataset.</summary>
     public IReadOnlyList<Core.Lineage.LineageSubscriberModel> Models { get; init; } = [];
+
+    /// <summary>The specifications this pass produced by running the extractor over a declared <c>.pbix</c>, which a
+    /// catalog sync keeps (<see cref="ReportSpecOrigin.Extracted"/>) so a later pass that cannot extract still has
+    /// them.</summary>
+    public IReadOnlyList<ExtractedReportSpec> ExtractedSpecs { get; init; } = [];
+
+    /// <summary>
+    /// The report labels whose kept extraction is still wanted, when this pass could tell: the declared <c>.pbix</c>
+    /// files it found (extracted now, or kept because this one failed to extract). A kept extraction for any other
+    /// label belongs to a report the repository no longer declares. Null when the pass could not tell (the extractor
+    /// or the declared path is missing here), in which case every kept extraction stays as it is.
+    /// </summary>
+    public IReadOnlySet<string>? RetainedExtractedReports { get; init; }
 }
 
 /// <summary>One subscriber query as collected: its text and the raw identities parsing it proved it reads.</summary>
@@ -325,6 +338,14 @@ public sealed class CollectionResult
 
     public List<string> Warnings { get; } = [];
 
+    /// <summary>
+    /// A fingerprint of everything the consumption side was built from: every subscriber library's text and every
+    /// report specification read (from a committed file, the extractor, or the semantic layer). Equal fingerprints
+    /// mean the subscribers, their queries, and their reports are unchanged, which is how a catalog sync knows a new
+    /// upload or an edited <c>subscribers.yaml</c> needs the graph recomputed even when no flow changed.
+    /// </summary>
+    public string SubscriberInputHash { get; set; } = string.Empty;
+
     /// <summary>Server identities whose DERIVED collection was requested but failed (unreachable, unresolvable
     /// secret): the connected pass produced no module facts for them, so a consumer persisting this result must
     /// treat previously-derived knowledge for these servers as still authoritative rather than wiping it with
@@ -346,6 +367,10 @@ public sealed class CollectionResult
         Synonyms.AddRange(other.Synonyms);
         Warnings.AddRange(other.Warnings);
         DegradedServers.UnionWith(other.DegradedServers);
+        if (SubscriberInputHash.Length == 0)
+        {
+            SubscriberInputHash = other.SubscriberInputHash;
+        }
         foreach (var (key, value) in other.Servers)
         {
             Servers.TryAdd(key, value);

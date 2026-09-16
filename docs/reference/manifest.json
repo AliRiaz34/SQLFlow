@@ -120,7 +120,10 @@
         "lineage",
         "whoami",
         "doctor",
-        "completions"
+        "completions",
+        "powerbi",
+        "pbix",
+        "report specification"
       ],
       "cliCommand": "control-plane",
       "related": [
@@ -133,6 +136,8 @@
         "src/SqlFlow.Cli/Program.cs",
         "src/SqlFlow.Cli/Remote/RemoteVerbs.cs",
         "src/SqlFlow.Cli/Remote/RemoteVerbs.Estate.cs",
+        "src/SqlFlow.Cli/Remote/RemoteVerbs.PowerBi.cs",
+        "src/SqlFlow.Lineage/Collection/ReportSpecs.cs",
         "src/SqlFlow.Cli/Remote/ControlPlaneClient.cs"
       ]
     },
@@ -1337,7 +1342,10 @@
         "schema grounding",
         "get_semantic_layer",
         "search_semantic_layer",
-        "describe_semantic_table"
+        "describe_semantic_table",
+        "power bi upload",
+        "report specification",
+        "pbix-extractor"
       ],
       "related": [
         "concept-data-operations",
@@ -1348,6 +1356,12 @@
         "src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticReportEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ReportExtractionClient.cs",
+        "src/SqlFlow.PbixExtractor/ExtractionEndpoint.cs",
+        "src/SqlFlow.PbixExtractor/ExtractorOptions.cs",
+        "gui/src/features/semantic-layer/ReportsPanel.tsx",
+        "gui/src/features/semantic-layer/ReportUploadDialog.tsx",
         "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
         "src/SqlFlow.Catalog/CatalogSync.cs",
         "gui/src/features/semantic-layer/SavedAnswersPanel.tsx",
@@ -2411,7 +2425,11 @@
         "visual fields",
         "business question",
         "question generation",
-        "text-to-query"
+        "text-to-query",
+        "pbix.yaml",
+        "report specification",
+        "sqlflow powerbi extract",
+        "uploaded report"
       ],
       "yamlPath": "subscribers",
       "related": [
@@ -2427,6 +2445,7 @@
         "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
         "src/SqlFlow.Lineage/Collection/LineageFacts.cs",
         "src/SqlFlow.Lineage/Collection/PbixExtractTool.cs",
+        "src/SqlFlow.Lineage/Collection/ReportSpecs.cs",
         "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
         "src/SqlFlow.Core/Lineage/LineageReport.cs",
         "src/SqlFlow.Catalog/CatalogEntities.cs",
@@ -3672,7 +3691,8 @@
         "Sql.Database"
       ],
       "related": [
-        "wiki-pbix-split-report-format"
+        "wiki-pbix-split-report-format",
+        "wiki-powerbi-report-specifications"
       ],
       "sourceRefs": [
         "tools/pbix-extract/src/msource.c",
@@ -3682,6 +3702,44 @@
         "src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs",
         "src/SqlFlow.Lineage/Collection/LineageFacts.cs",
         "samples/powerbi/AdventureWorks_Sales.spec.yaml"
+      ]
+    },
+    {
+      "id": "wiki-powerbi-report-specifications",
+      "corpus": "wiki",
+      "path": "decisions/powerbi-report-specifications.md",
+      "title": "A Power BI report travels as its specification, and the semantic layer keeps the ones git does not",
+      "type": "decision",
+      "summary": "Why pbix-extract stayed put while its output moved into committed specs and the semantic layer, with uploads read by an isolated service.",
+      "keywords": [
+        "powerbi",
+        "pbix",
+        "pbix.yaml",
+        "report specification",
+        "semantic layer",
+        "upload",
+        "kept extraction",
+        "pbix-extractor",
+        "sandbox",
+        "managed sync",
+        "data loss"
+      ],
+      "related": [
+        "wiki-powerbi-model-entity-resolution",
+        "wiki-semantic-layer-is-the-allow-list"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.Lineage/Collection/ReportSpecs.cs",
+        "src/SqlFlow.Lineage/Collection/FlowSetCollector.cs",
+        "src/SqlFlow.Lineage/Collection/PbixExtractTool.cs",
+        "src/SqlFlow.Catalog/CatalogSync.cs",
+        "src/SqlFlow.Catalog/CatalogEntities.cs",
+        "src/SqlFlow.ControlPlane/Api/SemanticReportEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/ReportExtractionClient.cs",
+        "src/SqlFlow.PbixExtractor/ExtractionEndpoint.cs",
+        "src/SqlFlow.Cli/Remote/RemoteVerbs.PowerBi.cs",
+        "Dockerfile.pbix-extractor",
+        "deploy/compose/docker-compose.yml"
       ]
     },
     {

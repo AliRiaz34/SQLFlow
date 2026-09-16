@@ -225,7 +225,7 @@ public sealed class McpOptions
     /// thread can approve a query and every query and saved answer is attributed to the bot token's owner. What
     /// makes that acceptable holds whoever approves: a query is only ever a single read-only SELECT over
     /// allow-listed columns (ReadOnlyQueryGuard and ColumnPolicyGuard run on prepare, run, confirm, and auto-run),
-    /// a prepared plan is single-use, and saved answers are curated by admins on the Semantic layer page. The
+    /// a prepared plan is single-use, and saved answers are curated by admins on the AI knowledge page. The
     /// rest of the data-operations surface (the duplicate-key and baseline checks) stays GUI-only, since those are an
     /// engineer's diagnostics rather than a business answer, and nothing that starts work is allowed anywhere.
     /// </summary>

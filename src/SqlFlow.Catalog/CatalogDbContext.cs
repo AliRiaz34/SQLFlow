@@ -55,6 +55,9 @@ public sealed class CatalogDbContext : DbContext
     /// <summary>The semantic layer's example queries: every question/query pair a person confirmed (the saved answers).</summary>
     public DbSet<CatalogSemanticExample> SemanticExamples => Set<CatalogSemanticExample>();
 
+    /// <summary>The Power BI report specifications the semantic layer holds: uploaded ones, and the extractions a sync kept.</summary>
+    public DbSet<CatalogSemanticReportSpec> SemanticReportSpecs => Set<CatalogSemanticReportSpec>();
+
     public DbSet<CatalogFlowDependency> FlowDependencies => Set<CatalogFlowDependency>();
 
     public DbSet<CatalogRunFile> RunFiles => Set<CatalogRunFile>();
@@ -139,6 +142,7 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(r => r.Name).HasMaxLength(256).IsRequired();
             entity.Property(r => r.RemoteUrl).HasMaxLength(1024);
             entity.Property(r => r.RootPath).HasMaxLength(1024);
+            entity.Property(r => r.SubscriberInputHash).HasMaxLength(64);
             entity.HasIndex(r => r.Name).IsUnique();
         });
 
@@ -452,6 +456,25 @@ public sealed class CatalogDbContext : DbContext
             entity.HasIndex(e => e.RepoId);
             entity.HasIndex(e => e.Provenance);
             entity.Property(e => e.SourceRef).HasMaxLength(512);
+        });
+
+        modelBuilder.Entity<CatalogSemanticReportSpec>(entity =>
+        {
+            // Owned by the semantic layer and never part of the repo-scoped rows a sync deletes and rebuilds.
+            entity.ToTable("SemanticReportSpec");
+            entity.HasKey(s => s.Id);
+            entity.Property(s => s.SubscriberKey).HasMaxLength(900).IsRequired();
+            entity.Property(s => s.ReportFile).HasMaxLength(260).IsRequired();
+            entity.Property(s => s.Origin).HasMaxLength(16).IsRequired();
+            // A specification has no useful length bound below the reader's own cap, like SubscriberQuery.Sql.
+            entity.Property(s => s.Spec).IsRequired();
+            entity.Property(s => s.ContentHash).HasMaxLength(64).IsRequired();
+            entity.Property(s => s.IdentityHash).HasMaxLength(64).IsRequired();
+            entity.Property(s => s.UpdatedBy).HasMaxLength(256);
+            entity.HasIndex(s => s.IdentityHash).IsUnique();
+            // A sync reads its repo's specifications; the editor lists one subscriber's.
+            entity.HasIndex(s => s.RepoId);
+            entity.HasIndex(s => s.SubscriberKey);
         });
 
         modelBuilder.Entity<CatalogFlowDependency>(entity =>

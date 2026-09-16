@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import type { QueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isApiError } from "../../api/client";
+import type { ReportSpecSummary, StoreSemanticReportSpecResult } from "../../api/types";
 
 /** The query-key root of every semantic layer read, so one save refreshes the tree, the object, and the lists. */
 export const SEMANTIC_ROOT = "semantic-layer";
@@ -78,4 +80,26 @@ export function ServedBadge({ problem, testId }: { problem: string | null; testI
       <TooltipContent className="max-w-sm">{problem}</TooltipContent>
     </Tooltip>
   );
+}
+
+/** One line counting what a report holds. */
+export function describeReport(summary: Pick<ReportSpecSummary, "pages" | "visuals" | "tables" | "measures">): string {
+  const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+  return [
+    plural(summary.pages, "page"),
+    plural(summary.visuals, "visual"),
+    plural(summary.tables, "model table"),
+    plural(summary.measures, "measure"),
+  ].join(", ");
+}
+
+/** The toast after storing a report: whether it is being applied now, or needs a sync of a local repo. */
+export function announceStored(result: StoreSemanticReportSpecResult): void {
+  const { report } = result.report;
+  const verb = result.replaced ? "replaced" : "stored";
+  toast.success(`Report '${report.reportFile}' ${verb} for ${report.subscriberName}.`, {
+    description: result.syncQueued
+      ? `A sync of ${report.repoName} was queued; the report's pages and model appear once it finishes.`
+      : `${report.repoName} is synced from a local path; run 'sqlflow db sync' there to apply the report.`,
+  });
 }

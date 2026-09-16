@@ -203,7 +203,7 @@ An admin sets a column's allow state through the admin-scope API, never through 
 | `PUT /api/v1/powerai/column-policies` | Full upsert of one column's row (`objectKey`, `columnName`, `isAllowed`, `reason`, `description`, `synonyms`) |
 | `PUT /api/v1/powerai/column-policies/objects` | Allow or deny every column of one object (`objectKey`, `isAllowed`), keeping each row's reason and annotations |
 
-The GUI edits all of this on the Semantic layer page (`/semantic-layer`, Admin; the old `/column-policies` link
+The GUI edits all of this on the AI knowledge page (`/semantic-layer`, Admin; the old `/column-policies` link
 redirects there).
 
 A column that is not allowed disappears from every surface that could otherwise teach an assistant it exists or

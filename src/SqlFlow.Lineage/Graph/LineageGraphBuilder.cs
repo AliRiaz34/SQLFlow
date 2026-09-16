@@ -41,10 +41,33 @@ public static class LineageGraphBuilder
         }
 
         // ---- Synonym resolution: every fact lands on the base object. -------------------------------
-        var synonymTargets = collected.Synonyms.ToDictionary(
-            s => NodeKey.For(s.ServerRef, s.Database, s.Schema, s.Name),
-            s => (s.ServerRef, Database: s.TargetDatabase, Schema: s.TargetSchema, Name: s.TargetName),
+        // The same synonym can be declared more than once: two reports under one subscriber built on the same model
+        // each resolve its `Customer` table. Repeats pointing at the same object are one fact. Repeats that disagree
+        // are two reports on one connection calling different tables by the same model name, which lineage cannot
+        // tell apart by name alone, so the first declaration is kept and the conflict is reported.
+        var synonymTargets = new Dictionary<string, (string ServerRef, string? Database, string? Schema, string Name)>(
             StringComparer.Ordinal);
+        foreach (var synonym in collected.Synonyms)
+        {
+            var key = NodeKey.For(synonym.ServerRef, synonym.Database, synonym.Schema, synonym.Name);
+            var target = (synonym.ServerRef, Database: synonym.TargetDatabase, Schema: synonym.TargetSchema, Name: synonym.TargetName);
+            if (synonymTargets.TryGetValue(key, out var existing))
+            {
+                var kept = NodeKey.For(existing.ServerRef, existing.Database, existing.Schema, existing.Name);
+                var other = NodeKey.For(target.ServerRef, target.Database, target.Schema, target.Name);
+                if (!string.Equals(kept, other, StringComparison.Ordinal))
+                {
+                    warnings.Add(
+                        $"'{synonym.Name}' is declared as a synonym of two different objects on {synonym.ServerRef} "
+                        + $"({kept} and {other}); the first is used. Two reports reading through one connection give "
+                        + "the same model table name to different warehouse tables.");
+                }
+
+                continue;
+            }
+
+            synonymTargets.Add(key, target);
+        }
 
         // A synonym registered with NO database is a one-part name: a PowerBI model entity, which is what a
         // visual's synthesized `FROM [Sales]` lands on. The default-database pass below fills a database into

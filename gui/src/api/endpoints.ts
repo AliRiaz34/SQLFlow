@@ -23,6 +23,8 @@ import type {
   SemanticObjectCoverage, SemanticOverview, SemanticSchemaCoverage, SetSemanticAnnotationRequest,
   UpsertSemanticJoinRequest, UpsertSemanticMeasureRequest,
   ConfirmQuestionRequest, ConfirmedQuestion, SemanticExampleAdmin, UpdateSemanticExampleRequest,
+  DeleteSemanticReportSpecResult, ExtractedSemanticReport, SemanticReportCapabilities, SemanticReportSpec,
+  SemanticReportSpecDetail, SemanticReportSubscriber, StoreSemanticReportSpecRequest, StoreSemanticReportSpecResult,
   PrepareQueryRequest, PreparedQuery,
   FlowParameters,
   PipelineColumn, PipelineDetail, PipelineFile, PipelineFileStats, PipelineSummary, RegisterRepoSourceRequest, Repo, RepoDeletionResult, RepoSource, RepoSourceRegistered, RepoSyncResult, RepoTree, Role,
@@ -639,6 +641,22 @@ export const semanticLayerApi = {
   updateRelationship: (id: number, request: UpsertSemanticJoinRequest) =>
     put<SemanticCuratedJoin>(`/api/v1/powerai/semantic-layer/relationships/${id}`, request),
   deleteRelationship: (id: number) => del<void>(`/api/v1/powerai/semantic-layer/relationships/${id}`),
+  /** Whether a raw .pbix can be uploaded (the isolated extractor is configured), and the size limits. */
+  reportCapabilities: () => get<SemanticReportCapabilities>("/api/v1/powerai/semantic-layer/reports/capabilities"),
+  /** The Power BI subscribers the repositories declare: what a report can be attached to. */
+  reportSubscribers: () => get<SemanticReportSubscriber[]>("/api/v1/powerai/semantic-layer/reports/subscribers"),
+  /** The Power BI reports the layer holds, uploads first. */
+  reports: () => get<SemanticReportSpec[]>("/api/v1/powerai/semantic-layer/reports"),
+  report: (id: number) => get<SemanticReportSpecDetail>(`/api/v1/powerai/semantic-layer/reports/${id}`),
+  /** Has the isolated extractor read a .pbix; nothing is stored until storeReport is called with the answer. */
+  extractReport: (file: Blob, reportFile: string, signal?: AbortSignal) =>
+    postBinary<ExtractedSemanticReport>(
+      "/api/v1/powerai/semantic-layer/reports/extract", file, "application/octet-stream", { reportFile }, signal),
+  /** Stores a specification for a subscriber; the repo's managed sync is then asked to apply it. */
+  storeReport: (request: StoreSemanticReportSpecRequest) =>
+    post<StoreSemanticReportSpecResult>("/api/v1/powerai/semantic-layer/reports", request),
+  deleteReport: (id: number) =>
+    del<DeleteSemanticReportSpecResult>(`/api/v1/powerai/semantic-layer/reports/${id}`),
 };
 
 // ---- PowerAI confirmed examples (the learning loop's write half) ---------------------------------------------------

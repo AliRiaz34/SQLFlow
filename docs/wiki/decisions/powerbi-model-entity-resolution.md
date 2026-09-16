@@ -29,7 +29,8 @@ referenceRefs:
   - concept-lineage-graph-and-plan
 related:
   - wiki-pbix-split-report-format
-updated: 2026-09-13
+  - wiki-powerbi-report-specifications
+updated: 2026-09-16
 ---
 
 # A report's model entity becomes a warehouse object through the synonym pass

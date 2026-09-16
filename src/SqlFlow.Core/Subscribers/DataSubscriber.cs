@@ -37,18 +37,24 @@ public sealed record DataSubscriber
     /// is no addressable location.</summary>
     public string? Url { get; init; }
 
+    /// <summary>The subscriber's default connection alias (<c>server:</c>), keyed into its library's
+    /// <c>connections:</c> block, or null when it declares none. A report's visuals name model entities rather than
+    /// a server, so this is what they are resolved against.</summary>
+    public string? Server { get; init; }
+
     /// <summary>The queries the subscriber runs against the warehouse. Every one is parsed, and the objects it
     /// touches become the subscriber's lineage edges; a subscriber with no queries is a node nothing connects
     /// to, which the collector reports rather than silently accepting.</summary>
     public IReadOnlyList<SubscriberQuery> Queries { get; init; } = [];
 
     /// <summary>
-    /// The Power BI report file this subscriber is backed by, relative to the scanned folder, when it declares
-    /// one (<c>pbix: reports/Sales.pbix</c>). A report's own file already records which questions it asks, in
-    /// which fields and with which filters, so declaring the file lets the collector extract that instead of
-    /// asking a person to transcribe every visual's query by hand. The declaration stays small and authored
-    /// (identity, owner, URL, the connection alias); everything derived from the file is regenerated on each
-    /// sync rather than committed, so it cannot drift from the report.
+    /// The Power BI report this subscriber is backed by, relative to the scanned folder, when it declares one:
+    /// a <c>.pbix</c> file (<c>pbix: reports/Sales.pbix</c>), the report specification <c>pbix-extract</c> wrote
+    /// for it (<c>pbix: reports/Sales.pbix.yaml</c>), or a directory holding either. A report's own file already
+    /// records which questions it asks, in which fields and with which filters, so declaring it lets the
+    /// collector extract that instead of asking a person to transcribe every visual's query by hand. The
+    /// declaration stays small and authored (identity, owner, URL, the connection alias); everything derived from
+    /// the report is regenerated on each sync, so it cannot drift from it.
     /// <para>
     /// Null for a hand-authored subscriber, which carries its queries in <see cref="Queries"/> as before. The
     /// two are not exclusive: a report may declare both, and the extracted visual queries are appended to the

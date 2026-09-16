@@ -31,6 +31,10 @@ keywords:
   - business question
   - question generation
   - text-to-query
+  - pbix.yaml
+  - report specification
+  - sqlflow powerbi extract
+  - uploaded report
 yamlPath: subscribers
 related:
   - concept-lineage-graph-and-plan
@@ -44,6 +48,7 @@ sourceRefs:
   - src/SqlFlow.Lineage/Collection/FlowSetCollector.cs
   - src/SqlFlow.Lineage/Collection/LineageFacts.cs
   - src/SqlFlow.Lineage/Collection/PbixExtractTool.cs
+  - src/SqlFlow.Lineage/Collection/ReportSpecs.cs
   - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
   - src/SqlFlow.Core/Lineage/LineageReport.cs
   - src/SqlFlow.Catalog/CatalogEntities.cs
@@ -115,9 +120,9 @@ Like `schedules.yaml`, these files are NOT flow documents: they are excluded fro
 | `subscribers.<name>.description` | no | What the subscriber is FOR, in one line, for the catalog and the node's tooltip. |
 | `subscribers.<name>.notes` | no | Remarks about the subscriber's STATE rather than its purpose. Free text, multi-line via a block scalar. See [Notes](#notes). |
 | `subscribers.<name>.url` | no | Where the subscriber LIVES (as opposed to what it reads): the report URL, the workbook path, the share, the repository. Searchable. See [Location](#location). |
-| `subscribers.<name>.server` | no | The default connection alias for every query that does not name its own. |
-| `subscribers.<name>.pbix` | no | A `.pbix` file or a directory of them to extract automatically. See [Extracted from a .pbix report](#extracted-from-a-pbix-report). |
-| `subscribers.<name>.queries` | yes, in practice, unless `pbix` is set | The queries the subscriber runs. A subscriber with neither this nor `pbix` is a node nothing connects to, which is warned. |
+| `subscribers.<name>.server` | no | The default connection alias for every query that does not name its own, and the connection a report's visuals are resolved against. |
+| `subscribers.<name>.pbix` | no | A `.pbix` file, its committed specification (`<report>.pbix.yaml`), or a directory holding either. See [Extracted from a .pbix report](#extracted-from-a-pbix-report). |
+| `subscribers.<name>.queries` | yes, in practice, unless `pbix` is set | The queries the subscriber runs. A subscriber with none, no `pbix`, and no report uploaded to the semantic layer is a node nothing connects to, which is warned. |
 | `queries[].name` | no | The query's label (legacy `QueryName`): the dataset, page, or measure group. Defaults to `query<n>` by position. |
 | `queries[].server` | yes, unless the subscriber sets one | The connection alias this query runs against (legacy `srcServer`). It is what pins two-part names to the right server and database. |
 | `queries[].sql` | yes | The query text as the subscriber runs it (legacy `FullyQualifiedQuery`). Any T-SQL the parser accepts. |
@@ -217,7 +222,29 @@ edges:
 
 Every node carries a `kind` (`table`, `column`, `measure`, `calculatedColumn`, `report`, `page`, `visual`) and every edge a `kind` (`hasColumn`, `definedOn`, `relationship`, `hasPage`, `hasVisual`, `projects`) plus whatever properties that kind needs, so a consumer loads the file directly into an in-memory node/edge graph with no name-matching step: starting from one visual node and walking its `projects` edges reaches exactly the columns and measures it reads, with no unrelated table pulled in. A node id is always `<subscriberName>#<reportFile>#<kind-tag>:<qualifier>`, which keeps ids globally unique across every subscriber and every report a `pbix:` directory can hold, so graphs from many subscribers can be merged without collisions. A `.pbix` connected live to a published dataset carries no semantic model (it stays on the server), so only the report-layer nodes (`report`/`page`/`visual`) and their edges appear; the two halves degrade independently.
 
-The collector reads this specification from the tool's standard output during a sync (it is not written to a file) and both halves are stored in the catalog: the report layer (pages, visuals, projected fields, and each visual's rendered SQL) and the model layer (tables with their Power Query source, columns, calculated columns, measures, and relationships). See [What lands in the catalog](#what-lands-in-the-catalog). `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
+The collector reads this specification (from the tool's standard output, or from any of the other places listed below) and both halves are stored in the catalog: the report layer (pages, visuals, projected fields, and each visual's rendered SQL) and the model layer (tables with their Power Query source, columns, calculated columns, measures, and relationships). See [What lands in the catalog](#what-lands-in-the-catalog). `reportWarnings` stays a flat list naming anything the tool declined to extract (an unsupported filter expression, a dangling projection, a table whose source could not be resolved), since a warning is a diagnostic rather than a graph-shaped fact.
+
+### Where a report comes from
+
+The extractor only runs where it is installed, and a `.pbix` is often too large, or too private, to commit. So a
+report reaches a subscriber as a SPECIFICATION, read from whichever place holds one:
+
+| Source | What it is | Notes |
+| --- | --- | --- |
+| A committed specification | `pbix:` names `Sales.pbix.yaml` (or a directory holding `*.pbix.yaml` files), made with `sqlflow powerbi extract Sales.pbix` | Read the same on every machine, extractor or not. The report's label is the file name without `.yaml`, the same one extracting `Sales.pbix` directly gives, so switching between the two keeps every stored key. It wins over a `.pbix` of the same name beside it (warned), and is never parsed as a flow |
+| A `.pbix` | `pbix:` names `Sales.pbix` (or a directory holding `*.pbix` files) | Extracted by `pbix-extract` when this machine has it. The sync keeps what it extracted in the semantic layer |
+| A kept extraction | The copy an earlier sync kept of a declared `.pbix` | Used only where this machine cannot extract that report: no extractor (the control plane never has one), or the file is not here (a clone of a repo that git-ignores its reports). It is refreshed by the next sync that can extract the report, and dropped once the repository stops declaring it or commits its specification instead. A missing path or an empty directory is not taken as proof the report is gone |
+| An upload | A specification stored in the semantic layer for this subscriber, through the GUI or `sqlflow powerbi publish` | Needs no `pbix:` at all, only a PowerBI subscriber with a usable `server`. A report the repository declares under the same name wins over the upload (warned). It stays until someone removes it |
+
+A committed specification is the recommended form for a report that belongs to the repository: it is reviewed like
+code and the control plane reads it with no extractor. An upload suits a report that is maintained outside the
+repository. Every one of these goes through the same reader, and a malformed specification is a warning naming the
+report and the file, never a failed sync.
+
+A sync recomputes the consumption side whenever what it reads changes: the text of every subscriber library and of
+every report specification it used is fingerprinted, and a changed fingerprint recomputes the graph even when no
+flow changed. That is what applies an edited `subscribers.yaml`, a newly committed specification, or an upload on
+the next ordinary sync. An upload or deletion in the semantic layer also queues the repo's managed sync right away.
 
 ### Resolving a model table to a warehouse object
 
@@ -251,7 +278,9 @@ A subscriber whose `pbix:` report was extracted also stores the report's structu
 | `catalog.SubscriberModelField` | Column (with its data type), calculated column, or measure (with its DAX expression and description) on a model table |
 | `catalog.SubscriberModelRelationship` | Relationship between two model tables: their columns, the cardinality, and whether it is active |
 
-They are keyed by subscriber, report file, and table name, and replaced wholesale with the rest of the repo's subscriber rows. Power Query and DAX text is redacted on the same path query text takes. DAX is stored verbatim and never evaluated. The model is only present when the sync ran on a machine with `pbix-extract`.
+They are keyed by subscriber, report file, and table name, and replaced wholesale with the rest of the repo's subscriber rows. Power Query and DAX text is redacted on the same path query text takes. DAX is stored verbatim and never evaluated. Because every sync rebuilds them from the specifications described above, including the semantic layer's uploads and kept extractions, a sync on a machine without `pbix-extract` no longer drops a model an earlier sync extracted.
+
+The specifications themselves live in `catalog.SemanticReportSpec`, one row per subscriber, report, and origin (`upload` or `extracted`), in the canonical, credential-redacted form the semantic layer stores. They are not part of the rows a sync replaces wholesale. `catalog.Repo.SubscriberInputHash` records the fingerprint the stored graph was computed from.
 
 A model table's `ObjectKey` is resolved at sync through the same identity resolution lineage edges take, so it is the key of the catalog object the table loads from. The model is served from there, by the semantic layer: `describe_semantic_table` lists a table's Power BI measures, calculated columns, and relationships as `reportModels`, keeping only those whose every column is on the column allow-list (see [Semantic layer](../concepts/semantic-layer.md)).
 

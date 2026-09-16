@@ -1,6 +1,6 @@
 # The full SQLFlow stack for local/parity deployments: SQL Server (catalog + demo sink + the AdventureWorks
-# sample, restored once by adventureworks-init), the control plane, one scalable worker, and the GUI. Copy
-# .env.example to .env and set the secrets first.
+# sample, restored once by adventureworks-init), the control plane, the isolated Power BI extractor, one scalable
+# worker, and the GUI. Copy .env.example to .env and set the secrets first.
 #
 #   docker compose up -d --build
 #   docker compose up -d --scale worker=3        # more compute, no other change
@@ -76,16 +76,46 @@ services:
       ControlPlane__PowerAI__Retrieval__Enabled: "true"
       ControlPlane__PowerAI__Retrieval__ExpandSynonyms: "false"
       ControlPlane__PowerAI__Retrieval__AutoRun__Enabled: "true"
+      # Power BI uploads from the Semantic layer page are extracted by the isolated pbix-extractor service below,
+      # never inside this process.
+      ControlPlane__PowerAI__ReportExtraction__Enabled: "true"
+      ControlPlane__PowerAI__ReportExtraction__Endpoint: http://pbix-extractor:8080
+      ControlPlane__PowerAI__ReportExtraction__ApiKey: ${SQLFLOW_EXTRACTOR_KEY:?set SQLFLOW_EXTRACTOR_KEY in .env}
       # Flows in the demo estate reference this sink.
       SQLFlowSinkConStr: "Server=mssql;Database=SqlFlowDemo;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
     ports:
       - "5000:8080"
+    networks:
+      - default
+      - extraction
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/health/live || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 15s
+    restart: unless-stopped
+
+  # The isolated Power BI extractor: the only place an uploaded .pbix is parsed. It sits alone with the control
+  # plane on an internal network (no route out, nothing published), holds no credentials beyond the shared key,
+  # and runs read-only with every capability dropped, so a hostile report can at worst crash this container.
+  pbix-extractor:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.pbix-extractor
+    environment:
+      PbixExtractor__ApiKey: ${SQLFLOW_EXTRACTOR_KEY:?set SQLFLOW_EXTRACTOR_KEY in .env}
+    networks:
+      - extraction
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 128
     restart: unless-stopped
 
   worker:
@@ -114,6 +144,12 @@ services:
     ports:
       - "8081:8080"
     restart: unless-stopped
+
+networks:
+  default:
+  # No external route: only the control plane and the extractor are attached.
+  extraction:
+    internal: true
 
 volumes:
   mssql-data:

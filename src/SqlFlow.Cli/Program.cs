@@ -60,7 +60,7 @@ internal static class Program
         var needsFile = command is not ("healthcheck" or "auth" or "db" or "worker" or "runs" or "user" or "detect-unique-key"
             or "health" or "login" or "logout" or "trigger" or "groups"
             or "whoami" or "doctor" or "summary" or "nodes" or "schedules" or "repos" or "pipelines"
-            or "datasources" or "search" or "completions");
+            or "datasources" or "search" or "completions" or "powerbi");
         if (positional.Length < (needsFile ? 2 : 1) || args.Any(a => a is "-h" or "--help"))
         {
             PrintUsage();
@@ -512,6 +512,9 @@ internal static class Program
 
                 case "search":
                     return await RemoteVerbs.SearchAsync(positional, args).ConfigureAwait(false);
+
+                case "powerbi":
+                    return await RemoteVerbs.PowerBiAsync(positional, args).ConfigureAwait(false);
 
                 case "completions":
                     return CliCompletions.Print(positional);
@@ -2268,6 +2271,20 @@ internal static class Program
                                                  objects [--name --server --database --schema --kind]; edges --repo r
                                                  [--object key --relation read|write --tier t]; waves --repo r (the
                                                  execution plan); script <key|flow> (the code behind any node).
+              sqlflow powerbi extract <report.pbix> [--out <file>|-] [--report-file <label>] [--remote]
+                                                 Turn a Power BI report into the specification a subscriber can
+                                                 declare (default output: <report.pbix>.yaml beside it; commit it and
+                                                 set 'pbix:' to it or its folder). Read by the local pbix-extract when
+                                                 this machine has one (SQLFLOW_PBIX_EXTRACT, beside the CLI, or PATH),
+                                                 otherwise, or with --remote, by the control plane's isolated
+                                                 extractor (needs --url/SQLFLOW_URL and a sign-in).
+              sqlflow powerbi publish <report.pbix|spec.pbix.yaml> --repo <r> --subscriber <name> [--report-file <label>]
+                               [--remote]        Store a report in the semantic layer for a PowerBI subscriber the repo
+                                                 declares, instead of committing it; a git-synced repo is re-synced to
+                                                 apply it. Publishing the same report again replaces it.
+              sqlflow powerbi list [--repo r] [--subscriber s] | remove <id>
+                                                 The reports the semantic layer holds (uploads, and the copies syncs
+                                                 kept of declared .pbix files), and removing one.
               sqlflow doctor                     One pass over this machine's SQLFlow setup: the resolved .sqlflow/env,
                                                  which SQLFLOW_* variables are set (values never printed), control
                                                  plane live/ready + credential identity, and catalog DB reachability

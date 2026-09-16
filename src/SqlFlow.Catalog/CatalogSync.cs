@@ -171,8 +171,14 @@ public sealed class CatalogSync
 
         // ---- Phase one: pure computation and reads, before any transaction. The estate is collected once and
         // each present document read and parsed once; the parsed artifacts (the collected flow set, the loaded
-        // documents, the redacted text) flow into every consumer below, including the lineage computation.
-        var collected = _estate.Collect(root);
+        // documents, the redacted text) flow into every consumer below, including the lineage computation. The
+        // report specifications the semantic layer holds for this repo go in with it, so a report this machine
+        // cannot extract (or that was uploaded rather than committed) is read like any other.
+        var storedSpecs = await context.SemanticReportSpecs.AsNoTracking()
+            .Where(s => s.RepoId == repoId)
+            .Select(s => new StoredReportSpec(s.SubscriberKey, s.ReportFile, s.Origin, s.Spec))
+            .ToListAsync(ct).ConfigureAwait(false);
+        var collected = _estate.Collect(root, storedSpecs);
         warnings.AddRange(collected.Warnings);
 
         // Preview-first selection: flows the source deliberately excludes are not projected as pipelines (and, being
@@ -193,6 +199,10 @@ public sealed class CatalogSync
             .Where(p => p.RepoId == repoId && p.Active)
             .Select(p => new { p.Id, p.ContentHash })
             .ToDictionaryAsync(p => p.Id, p => p.ContentHash, ct).ConfigureAwait(false);
+        var storedSubscriberHash = await context.Repos.AsNoTracking()
+            .Where(r => r.Id == repoId)
+            .Select(r => r.SubscriberInputHash)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
 
         var (runs, runsSkipped, runsFailed) = await PrepareRunsAsync(root, repoId, knownRunIds, warnings, ct).ConfigureAwait(false);
         try
@@ -204,9 +214,12 @@ public sealed class CatalogSync
             // still contributes lineage (the graph spans the whole estate) but has no stored hash to compare,
             // so a selection-scoped sync recomputes too. When nothing changed, the stored lineage IS current.
             // A manual "sync now" forces a full recompute (the operator asked for a fresh result, including the
-            // offline object-body/column enrichment), so the unchanged-estate shortcut is bypassed.
+            // offline object-body/column enrichment), so the unchanged-estate shortcut is bypassed. The consumption
+            // side is an input too: an edited subscribers.yaml, a committed report specification, or a report
+            // uploaded to the semantic layer changes the fingerprint without touching any flow.
             var anyExcluded = collected.Flows.Count != flows.Count;
             var lineageNeeded = forceLineage || includeDerived || anyExcluded || runs.Count > 0
+                || !string.Equals(storedSubscriberHash, collected.SubscriberInputHash, StringComparison.Ordinal)
                 || LineageInputsChanged(pipelines, anyUnreadable, storedActiveHashes);
 
             LineageReport? report = null;
@@ -256,6 +269,8 @@ public sealed class CatalogSync
                 if (report is not null)
                 {
                     lineage = await ApplyLineageAsync(context, repoId, report, includeDerived, nowUtc, ct).ConfigureAwait(false);
+                    await ApplyExtractedReportSpecsAsync(context, repoId, collected, nowUtc, ct).ConfigureAwait(false);
+                    RecordSubscriberInputs(context, repoId, collected.SubscriberInputHash);
                 }
                 else
                 {
@@ -322,10 +337,85 @@ public sealed class CatalogSync
     // The retriable serializable-transaction wrapper lives in CatalogTransaction so the run-queue lifecycle shares
     // the exact same execution-strategy + change-tracker-reset semantics as the sync/write-back.
 
+    /// <summary>
+    /// Keeps this pass's own extractions in the semantic layer (<see cref="ReportSpecOrigin.Extracted"/>), so a later
+    /// pass that cannot run the extractor, or cannot see the <c>.pbix</c>, serves the same reports instead of dropping
+    /// them. A kept extraction is removed once its subscriber is no longer declared, or once a pass that could tell
+    /// finds the repository no longer declares that report. Uploaded specifications are a person's and are never
+    /// touched here. Runs inside the sync's transaction, reading the rows it changes there.
+    /// </summary>
+    private static async Task ApplyExtractedReportSpecsAsync(
+        CatalogDbContext context, Guid repoId, CollectionResult collected, DateTime nowUtc, CancellationToken ct)
+    {
+        var existing = await context.SemanticReportSpecs.AsTracking()
+            .Where(s => s.RepoId == repoId && s.Origin == ReportSpecOrigin.Extracted)
+            .ToListAsync(ct).ConfigureAwait(false);
+        var subscribers = collected.Subscribers.ToDictionary(s => s.NodeKey, StringComparer.Ordinal);
+
+        var live = new Dictionary<(string Subscriber, string Report), CatalogSemanticReportSpec>();
+        foreach (var row in existing)
+        {
+            var stale = !subscribers.TryGetValue(row.SubscriberKey, out var subscriber)
+                || (subscriber.RetainedExtractedReports is { } retained && !retained.Contains(row.ReportFile));
+            if (stale || !live.TryAdd((row.SubscriberKey, row.ReportFile), row))
+            {
+                context.SemanticReportSpecs.Remove(row);
+            }
+        }
+
+        foreach (var subscriber in collected.Subscribers)
+        {
+            foreach (var spec in subscriber.ExtractedSpecs)
+            {
+                var hash = ReportSpecs.Hash(spec.Yaml);
+                if (live.TryGetValue((subscriber.NodeKey, spec.ReportFile), out var row)
+                    && string.Equals(row.ContentHash, hash, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // The specification was produced and validated by this pass, so reading it again cannot fail.
+                var summary = ReportSpecs.Inspect(spec.Yaml, $"report '{spec.ReportFile}'");
+                if (row is null)
+                {
+                    row = new CatalogSemanticReportSpec
+                    {
+                        RepoId = repoId,
+                        SubscriberKey = subscriber.NodeKey,
+                        ReportFile = spec.ReportFile,
+                        Origin = ReportSpecOrigin.Extracted,
+                        IdentityHash = SemanticReportSpecIdentity.Compute(
+                            repoId, subscriber.NodeKey, ReportSpecOrigin.Extracted, spec.ReportFile),
+                    };
+                    context.SemanticReportSpecs.Add(row);
+                }
+
+                row.Spec = spec.Yaml;
+                row.ContentHash = hash;
+                row.Pages = summary.Pages;
+                row.Visuals = summary.Visuals;
+                row.Tables = summary.Tables;
+                row.Measures = summary.Measures;
+                row.UpdatedBy = null;
+                row.UpdatedUtc = nowUtc;
+            }
+        }
+    }
+
+    /// <summary>Records the consumption-side fingerprint the stored lineage now reflects, on the repo row
+    /// <see cref="UpsertRepoAsync"/> already staged in this transaction.</summary>
+    private static void RecordSubscriberInputs(CatalogDbContext context, Guid repoId, string fingerprint)
+    {
+        var repo = context.Repos.Local.First(r => r.Id == repoId);
+        repo.SubscriberInputHash = fingerprint;
+    }
+
     private static async Task UpsertRepoAsync(
         CatalogDbContext context, Guid repoId, string repoName, string? remoteUrl, string root, DateTime nowUtc, CancellationToken ct)
     {
-        var repo = await context.Repos.FindAsync([repoId], ct).ConfigureAwait(false);
+        // Tracked explicitly: the control plane's context defaults to no-tracking, and the updates below (and the
+        // subscriber fingerprint recorded later in the same transaction) must persist.
+        var repo = await context.Repos.AsTracking().FirstOrDefaultAsync(r => r.Id == repoId, ct).ConfigureAwait(false);
         if (repo is null)
         {
             context.Repos.Add(new CatalogRepo

@@ -227,3 +227,14 @@ decisions the human made: the saved answers are stored in the semantic layer (`Q
 auto-run routes kept), and a Power BI report's model is served on the warehouse table each model table loads from
 (`describe_semantic_table`'s `reportModels`), graded against the column allow-list, rather than imported as curated
 annotations or served ungraded. The surfaces are documented in `concept-semantic-layer` and `flow-subscribers`.
+
+## [2026-09-16] ingest | Power BI report specifications move into the semantic layer
+
+Wrote [A Power BI report travels as its specification](decisions/powerbi-report-specifications.md) from the
+human's question of whether `pbix-extract` should move into the semantic layer, and the design settled with them:
+the tool stays, its specification becomes the stored and shipped unit (`ReportSpecs.cs`, `CatalogSemanticReportSpec`,
+the `AddSemanticReportSpecs` migration), GUI uploads are read by the isolated `SqlFlow.PbixExtractor` service, and
+`sqlflow powerbi extract|publish` serves report owners without a C toolchain. It records the defect that forced the
+change (the managed sync erasing a model a developer sync had written) and the subscriber-library fingerprint that
+closed a second gap found on the way. The surfaces are documented in `flow-subscribers`, `concept-semantic-layer`,
+and `cli-control-plane`.

@@ -183,8 +183,9 @@ Per the Catalog Schema Changes Require a Migration rule. Landed:
   `CatalogSubscriberModelField`, and `CatalogSubscriberModelRelationship`, keyed by subscriber, report
   file, and table name the same way the report structure is. Each model table also records the
   warehouse object its source resolved to (`ObjectKey`), and `describe_semantic_table` serves the model
-  there as `reportModels`, keeping only definitions whose every column is on the column allow-list. It is never written to a YAML file: the only model-spec file in the repo is the
-  hand-committed sample under `samples/powerbi/`.
+  there as `reportModels`, keeping only definitions whose every column is on the column allow-list. The same specification is also the unit that is stored and shipped: `sqlflow powerbi extract` writes it to a
+  `<report>.pbix.yaml` a subscriber can declare instead of the `.pbix`, and the semantic layer keeps uploaded ones
+  and the copies syncs extracted (`CatalogSemanticReportSpec`, Section 10).
 - The YAML shape for that model spec, and for the report layer alongside it, is a flat `nodes:` and
   `edges:` graph rather than a name-keyed tree of `tables[].columns[]`, `measures[].table`,
   `relationships[].fromTable/toTable`, and `report[].visuals[].fields[].table/field`. The old shape
@@ -352,8 +353,9 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
   a folder becomes part of the same subscriber, so a team's workspace of several reports needs one
   hand-written subscriber entry, not one per file.
 - Verified end to end against a real report (AdventureWorks Sales): 8 tables / 57 columns, 1
-  measure, 1 calculated column, 9 relationships, 8 table sources, 3 pages, 6 visuals, every visual
-  carrying its rendered SQL.
+  measure, 1 calculated column, 8 relationships, 8 table sources, 3 pages, 5 visuals, every visual
+  carrying its rendered SQL (recounted on 2026-09-16 by running the tool over the sample file; the
+  committed `samples/powerbi/AdventureWorks_Sales.spec.yaml` holds the same counts).
 - Solution builds with 0 errors and no new warnings. 28 checks in the C tool's own suite (`make test`
   / `make test-asan`, both clean), plus the collector-level suite in
   `LineagePowerBiSubscriberTests` (13 facts, running against the real tool in CI via a
@@ -467,11 +469,10 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
   writes the split `Report/definition` form, so it is the split reader that a real file exercises and
   the older `Report/Layout` reader that only synthetic fixtures do. Both are covered by the C tool's
   suite (73 checks, clean under ASan/UBSan).
-- **The model spec is stored only where the sync ran the extractor.** Measures (with their DAX),
-  relationships, calculated columns, and table sources land in the catalog at sync and are served by
-  the semantic layer (`describe_semantic_table`'s `reportModels`), but the control plane container carries no
-  `pbix-extract` binary (by design, see above), so a report's model appears only after a sync on a
-  machine that has it. The DAX is stored verbatim and never evaluated.
+- **The DAX is stored verbatim and never evaluated.** Measures (with their DAX), relationships,
+  calculated columns, and table sources land in the catalog at sync and are served by the semantic layer
+  (`describe_semantic_table`'s `reportModels`). A model no longer depends on WHERE the sync ran: see
+  "Resolved: the model vanished on syncs that could not extract" below.
 - **A visual can project a field the model spec never resolved to a node.** A visual names its
   field independently of the model reader (for example a hierarchy level whose field name is not
   literally one of the model's declared columns, or any field on a report whose model half is
@@ -501,6 +502,31 @@ keeps its model on the server and so carries no `DataModel` part, which the tool
 fatal even though such a file still has a complete visual layer. The model and report halves now
 degrade independently, and only a file yielding neither is an error.
 
+### Resolved: the model vanished on syncs that could not extract
+
+Every sync deletes and rebuilds a repo's subscriber report and model rows. A sync that could not run the
+extractor (the control plane never can, by design) or could not see the `.pbix` (usually git-ignored) rebuilt
+them from nothing, so the managed sync erased, on its next poll, the model a developer's sync had just written.
+
+**Settled by making the specification the unit that moves, and giving the semantic layer a store for it.** The
+tool stays where it is; what changed is where its output lives:
+
+- A subscriber's `pbix:` may name the committed specification (`Sales.pbix.yaml`, written by
+  `sqlflow powerbi extract`) instead of the `.pbix`. Every machine reads it the same way, extractor or not.
+- `CatalogSemanticReportSpec` (migration `AddSemanticReportSpecs`) holds specifications the repository does not:
+  a person's UPLOADS, and the EXTRACTED copy a sync keeps of each declared `.pbix` it could read. A later sync
+  that cannot extract a declared report serves the kept copy instead of dropping it. Neither origin is part of the
+  rows a sync replaces wholesale; a kept copy is removed only once the repository stops declaring its report, and
+  an upload only by a person.
+- `CatalogRepo.SubscriberInputHash` fingerprints every subscriber library and specification a sync read, so a new
+  upload, a committed specification, or an edited `subscribers.yaml` recomputes the graph on the next ordinary
+  sync. Before this, a `subscribers.yaml` edit with no flow change was not applied until a forced sync.
+
+The consumption edges derived from a report stay where they were (lineage, repo-scoped, rebuilt each pass): they
+are simply rebuilt from a specification that is now always available. See
+[docs/wiki/decisions/powerbi-report-specifications.md](docs/wiki/decisions/powerbi-report-specifications.md) for
+the alternatives considered.
+
 ### The security posture: extraction does not run in the control plane
 
 Extraction runs where the report files live (a developer machine, a build agent), never inside the
@@ -513,11 +539,20 @@ decoder. Confining that parser to a laptop or an ephemeral build agent keeps a m
 from the process holding catalog credentials and warehouse reach, and keeps libzip, expat and
 sqlite3 out of the production runtime image.
 
-The consequence is stated rather than hidden: `sqlflow db sync` running inside the container will
-warn that a `pbix:` subscriber was not extracted, naming `SQLFLOW_PBIX_EXTRACT`, and the rest of the
-estate's lineage still resolves. If in-container extraction is ever needed, the right shape is a
-separate sandboxed job (its own minimal image, no catalog credentials) on top of this same code
-path, not linking the decoder into the server.
+The consequence is stated rather than hidden: a sync inside the container never runs the tool. It serves a
+declared report from its committed specification or from the copy an earlier sync kept, and only when neither
+exists does it warn that the report was not extracted, naming `SQLFLOW_PBIX_EXTRACT`.
+
+Uploading a `.pbix` from the GUI is served by exactly the separate sandboxed job this section anticipated:
+`SqlFlow.PbixExtractor` (`Dockerfile.pbix-extractor`), a small service in its own image that holds no catalog,
+warehouse, or git credential, is reachable only on a private network (compose: an `internal` network shared with
+the control plane alone, running read-only with every capability dropped), and requires a shared key. It writes
+the upload to a private temporary directory, runs the same `pbix-extract` through the same `ReportSpecs.Extract`
+path a developer sync uses, deletes the file, and answers with the specification. The control plane streams the
+upload through without reading it and validates the answer (size, no YAML anchors or aliases, a well-formed
+graph) before showing or storing it, so a compromised extractor can at worst hand back a specification that is
+refused. `sqlflow powerbi extract` uses the local tool when a machine has one and this service when it does not,
+which is how an analyst on Windows (where the tool is not built) produces a specification.
 
 ### What remains for a finished product
 
@@ -590,10 +625,11 @@ In roughly the order it would need to land, since each depends on groundwork the
 7. **Broader version coverage**: extraction is proven against one report from one PowerBI version.
    Widening this is a matter of running the tool against more real files as they turn up and fixing
    what the schema probes catch, not a design change.
-8. **In-container extraction, if ever needed.** Extraction currently runs only where the tool is
-   reachable (a developer machine, CI); the control plane warns and skips. Should that prove
-   insufficient, the right shape is a separate sandboxed job (its own minimal image, no catalog
-   credentials) invoking the same binary, not linking the decoder into the control plane.
+8. ~~**In-container extraction, if ever needed.**~~ **Done** (above): report specifications are stored in the
+   semantic layer and read by every sync, and a `.pbix` uploaded through the GUI or `sqlflow powerbi` is read by
+   the isolated `SqlFlow.PbixExtractor` service, never by the control plane. What remains of it is operational:
+   the extractor is added to `deploy/compose`, but the Azure estate still needs its container app created (a
+   `pbix-extractor.bicep` module is provided) before `ControlPlane:PowerAI:ReportExtraction` can be enabled there.
 
 Each item is scoped so it can be picked up, implemented, and landed independently; nothing here
 should be treated as a single large batch of work.

@@ -115,21 +115,48 @@ public static class RepoSourceEndpoints
     private static async Task<Results<Ok<RepoSourceDto>, ProblemHttpResult>> SyncNowAsync(
         Guid id, CatalogDbContext db, TimeProvider clock, CancellationToken ct)
     {
-        var outcome = await RepoSourceStore.TriggerNowAsync(db, id, clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
-        if (outcome == RepoSourceMutation.NotFound)
+        if (!await QueueSyncAsync(db, id, "Sync requested", clock, ct).ConfigureAwait(false))
         {
             return TypedResults.Problem(
                 detail: $"No enabled repo source '{id}'.", statusCode: StatusCodes.Status404NotFound, title: "Not found");
+        }
+
+        var row = await db.RepoSources.AsNoTracking().Where(s => s.Id == id).FirstAsync(ct).ConfigureAwait(false);
+        return TypedResults.Ok(ToDto(row));
+    }
+
+    /// <summary>
+    /// Asks the managed sync to run the repo synced from git as <paramref name="repoName"/> on its next tick, with a
+    /// full lineage recompute. False when the repo is not synced from an enabled git source (a local-path repo applies
+    /// such a change on its next <c>sqlflow db sync</c> instead).
+    /// </summary>
+    internal static async Task<bool> QueueSyncForRepoAsync(
+        CatalogDbContext db, string repoName, string reason, TimeProvider clock, CancellationToken ct)
+    {
+        var sourceId = await db.RepoSources.AsNoTracking()
+            .Where(s => s.Name == repoName && s.Enabled)
+            .Select(s => (Guid?)s.Id)
+            .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+        return sourceId is { } id && await QueueSyncAsync(db, id, reason, clock, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Queues one source's sync now (the single path behind "sync now" and every change that needs the graph
+    /// recomputed). False when no enabled source has the id.</summary>
+    private static async Task<bool> QueueSyncAsync(
+        CatalogDbContext db, Guid id, string reason, TimeProvider clock, CancellationToken ct)
+    {
+        var outcome = await RepoSourceStore.TriggerNowAsync(db, id, clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
+        if (outcome == RepoSourceMutation.NotFound)
+        {
+            return false;
         }
 
         // Post a non-terminal "queued" line to the activity trace so the panel a client opens on this click latches
         // onto a live trace right away: the background sync worker (which claims the source on its next tick) then
         // appends the real clone/reconcile/result trace, and the stream stays open until that attempt is terminal.
         var trace = await ActivityTrace.BeginAsync(db, ActivityKinds.RepoSync, id.ToString(), clock, ct).ConfigureAwait(false);
-        await trace.InfoAsync("queued", "Sync requested; waiting for a worker to pick it up.", ct).ConfigureAwait(false);
-
-        var row = await db.RepoSources.AsNoTracking().Where(s => s.Id == id).FirstAsync(ct).ConfigureAwait(false);
-        return TypedResults.Ok(ToDto(row));
+        await trace.InfoAsync("queued", $"{reason}; waiting for a worker to pick it up.", ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>

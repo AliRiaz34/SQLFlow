@@ -48,6 +48,8 @@ internal static class LocalInspectVerbs
             files = Directory.EnumerateFiles(root, "*.yaml", SearchOption.AllDirectories)
                 .Concat(Directory.EnumerateFiles(root, "*.yml", SearchOption.AllDirectories))
                 .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}.sqlflow{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+                // A Power BI report specification is read by the subscriber that declares it, never as a flow.
+                .Where(f => !Lineage.Collection.ReportSpecs.IsSpecFile(f))
                 .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }

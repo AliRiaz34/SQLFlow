@@ -54,6 +54,12 @@ public class CatalogRepo
     public DateTime FirstSeenUtc { get; set; }
 
     public DateTime LastSyncUtc { get; set; }
+
+    /// <summary>The fingerprint of the subscriber libraries and report specifications the stored lineage was last
+    /// computed from, or null before any sync recorded one. A sync whose fingerprint differs recomputes the graph even
+    /// when no flow changed, which is what applies an edited <c>subscribers.yaml</c>, a newly committed report
+    /// specification, or a report uploaded to the semantic layer.</summary>
+    public string? SubscriberInputHash { get; set; }
 }
 
 /// <summary>
@@ -1040,6 +1046,82 @@ public class CatalogSemanticExample
     /// connection to run <see cref="Sql"/> against, the same way a person picks a datasource from the GUI before
     /// asking a question.</summary>
     public string? SourceRef { get; set; }
+}
+
+/// <summary>
+/// One Power BI report specification held by the semantic layer for a subscriber: the canonical YAML
+/// <c>tools/pbix-extract</c> writes, which a sync reads exactly as it reads a specification committed to the
+/// repository. This is what lets a report's pages, visuals and semantic model reach the catalog on a machine that
+/// cannot extract the report itself, above all the control plane, which by design carries no extractor and syncs
+/// clones whose <c>.pbix</c> files are usually git-ignored.
+/// <para>
+/// Two origins share the row shape (<see cref="SqlFlow.Lineage.Collection.ReportSpecOrigin"/>). An <c>upload</c> is
+/// a person's: it was extracted in the isolated extractor or published from the CLI, and it stays until someone
+/// deletes it. An <c>extracted</c> row is a sync's own copy of a <c>.pbix</c> the repository declares, refreshed
+/// whenever a sync can extract that report and dropped once the repository stops declaring it. Neither is part of
+/// the repo-scoped subscriber rows a sync deletes and rebuilds, which is the point: the rows derived from these
+/// are rebuilt from them on every pass instead of vanishing when a pass cannot extract.
+/// </para>
+/// </summary>
+public class CatalogSemanticReportSpec
+{
+    public long Id { get; set; }
+
+    /// <summary>The repo whose subscriber the report belongs to.</summary>
+    public Guid RepoId { get; set; }
+
+    /// <summary>The subscriber's <see cref="CatalogSubscriber.ObjectKey"/>. A soft link: an upload for a subscriber
+    /// the repository no longer declares is kept (and listed as such) rather than silently deleted.</summary>
+    public string SubscriberKey { get; set; } = string.Empty;
+
+    /// <summary>The report label its pages carry (<c>Sales.pbix</c>, or a path under a directory of reports).</summary>
+    public string ReportFile { get; set; } = string.Empty;
+
+    /// <summary><c>upload</c> or <c>extracted</c>.</summary>
+    public string Origin { get; set; } = string.Empty;
+
+    /// <summary>The canonical, credential-redacted specification.</summary>
+    public string Spec { get; set; } = string.Empty;
+
+    /// <summary>The lowercase-hex SHA-256 of <see cref="Spec"/>, so a sync can tell an unchanged copy from a new one
+    /// without comparing the text.</summary>
+    public string ContentHash { get; set; } = string.Empty;
+
+    /// <summary>The lowercase-hex SHA-256 of the row's identity (repo, subscriber, origin, report), carrying a UNIQUE
+    /// index: the identity columns together are wider than an index key may be.</summary>
+    public string IdentityHash { get; set; } = string.Empty;
+
+    /// <summary>How many pages the report has, counted when the row was written.</summary>
+    public int Pages { get; set; }
+
+    /// <summary>How many question-asking visuals the report has.</summary>
+    public int Visuals { get; set; }
+
+    /// <summary>How many tables its semantic model has.</summary>
+    public int Tables { get; set; }
+
+    /// <summary>How many measures its semantic model defines.</summary>
+    public int Measures { get; set; }
+
+    /// <summary>Who wrote the row: the uploading user, or null for a sync's own copy.</summary>
+    public string? UpdatedBy { get; set; }
+
+    public DateTime UpdatedUtc { get; set; }
+}
+
+/// <summary>Computes <see cref="CatalogSemanticReportSpec.IdentityHash"/>, so every writer derives the same identity.</summary>
+public static class SemanticReportSpecIdentity
+{
+    /// <summary>The identity of one stored specification. Each part is on its own line so no part can run into the
+    /// next and hash alike.</summary>
+    public static string Compute(Guid repoId, string subscriberKey, string origin, string reportFile)
+    {
+        ArgumentNullException.ThrowIfNull(subscriberKey);
+        ArgumentNullException.ThrowIfNull(origin);
+        ArgumentNullException.ThrowIfNull(reportFile);
+        return CatalogProjection.Hash(
+            string.Join('\n', repoId.ToString("D"), subscriberKey, origin, reportFile));
+    }
 }
 
 /// <summary>The provenances a <see cref="CatalogSemanticExample"/> can carry, named once so the writer, the

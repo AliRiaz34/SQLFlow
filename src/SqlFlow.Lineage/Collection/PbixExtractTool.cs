@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -35,6 +36,15 @@ internal static class PbixExtractTool
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .IgnoreUnmatchedProperties()
+        .Build();
+
+    /// <summary>Writes the canonical form: absent values omitted (each reads back as its default), and any string that
+    /// would otherwise be read as another type or as YAML syntax quoted.</summary>
+    private static readonly ISerializer Serializer = new SerializerBuilder()
+        .WithQuotingNecessaryStrings(quoteYaml1_1Strings: true)
+        .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults)
+        .DisableAliases()
         .Build();
 
     /// <summary>
@@ -81,13 +91,14 @@ internal static class PbixExtractTool
     }
 
     /// <summary>
-    /// Extracts one report. <paramref name="reportFileLabel"/> is the name each page is tagged with, which is
-    /// the report's path relative to the subscriber's declared directory so two reports built from one template
-    /// (each with a "Page 1") stay distinguishable.
+    /// Runs the tool over one report and returns the specification it wrote, unparsed.
+    /// <paramref name="reportFileLabel"/> is the name each page is tagged with, which is the report's path relative
+    /// to the subscriber's declared directory so two reports built from one template (each with a "Page 1") stay
+    /// distinguishable.
     /// </summary>
-    /// <exception cref="PbixExtractException">The tool could not be run, failed, or produced output this cannot
-    /// read. Always carries a message naming the report and what went wrong.</exception>
-    public static PbixExtractResult Run(string executable, string pbixPath, string reportFileLabel)
+    /// <exception cref="PbixExtractException">The tool could not be run or failed. Always carries a message naming
+    /// what went wrong.</exception>
+    public static string RunToYaml(string executable, string pbixPath, string reportFileLabel)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -101,6 +112,8 @@ internal static class PbixExtractTool
         // Arguments go through ArgumentList rather than a concatenated string so a report path containing a
         // space or a quote is passed through exactly as written instead of being re-split by the runtime.
         startInfo.ArgumentList.Add(pbixPath);
+        startInfo.ArgumentList.Add("--name");
+        startInfo.ArgumentList.Add(SpecNameFor(reportFileLabel));
         startInfo.ArgumentList.Add("--report-file");
         startInfo.ArgumentList.Add(reportFileLabel);
 
@@ -136,15 +149,122 @@ internal static class PbixExtractTool
                 $"'{executable}' failed with exit code {process.ExitCode}: {Summarize(errors)}");
         }
 
-        return Parse(output, executable);
+        if (Encoding.UTF8.GetByteCount(output) > ReportSpecs.MaxBytes)
+        {
+            throw new PbixExtractException(
+                $"'{executable}' wrote a specification larger than {ReportSpecs.MaxBytes / (1024 * 1024)} MB");
+        }
+
+        return output;
     }
 
-    /// <summary>Maps the tool's YAML specification onto the typed result: the report layer, the model layer, the
-    /// resolved model sources, and the tool's warnings.</summary>
-    /// <exception cref="PbixExtractException">The text is not valid YAML, or holds no single report
-    /// specification.</exception>
-    internal static PbixExtractResult Parse(string yaml, string executable)
+    /// <summary>
+    /// The name the specification is written under, derived from the report's label exactly as the tool derives it
+    /// from a file path (the base name without its extension, spaces as underscores). Passing it explicitly means the
+    /// same report yields the same specification whatever the file on disk is called, which matters because the
+    /// isolated extractor saves every upload under one fixed temporary name.
+    /// </summary>
+    internal static string SpecNameFor(string reportFileLabel)
     {
+        var slash = reportFileLabel.LastIndexOf('/');
+        var baseName = slash >= 0 ? reportFileLabel[(slash + 1)..] : reportFileLabel;
+        var dot = baseName.LastIndexOf('.');
+        var stem = (dot >= 0 ? baseName[..dot] : baseName).Replace(' ', '_');
+        return stem.Length > 0 ? stem : "report";
+    }
+
+    /// <summary>Extracts one report and parses what the tool wrote. See <see cref="RunToYaml"/>.</summary>
+    /// <exception cref="PbixExtractException">The tool could not be run, failed, or produced output this cannot
+    /// read.</exception>
+    public static PbixExtractResult Run(string executable, string pbixPath, string reportFileLabel)
+        => Parse(RunToYaml(executable, pbixPath, reportFileLabel), $"'{executable}'");
+
+    /// <summary>Maps a report specification onto the typed result: the report layer, the model layer, the
+    /// resolved model sources, and the tool's warnings. <paramref name="source"/> names where the text came from
+    /// in every error (the tool, a specification file, an upload).</summary>
+    /// <exception cref="PbixExtractException">The text is not a well-formed specification.</exception>
+    internal static PbixExtractResult Parse(string yaml, string source)
+    {
+        var (_, spec) = ReadSingle(yaml, source);
+        var pages = SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], source);
+        return new PbixExtractResult(
+            pages, spec.ReportWarnings ?? [], SpecGraph.ModelSources(spec.Nodes ?? []),
+            SpecGraph.Model(spec.Nodes ?? [], spec.Edges ?? []));
+    }
+
+    /// <summary>
+    /// Rewrites a specification into the canonical form the semantic layer stores: only the properties this reader
+    /// consumes, with every free-text value passed through the same credential redaction subscriber SQL takes (an M
+    /// expression or a visual's SQL can quote a connection string). Storing the canonical form rather than the text
+    /// as received keeps a secret pasted into a specification out of the catalog, and means a stored specification
+    /// reads back exactly as it was validated.
+    /// </summary>
+    /// <exception cref="PbixExtractException">The text is not a well-formed specification.</exception>
+    internal static string Normalize(string yaml, string source)
+    {
+        var (name, spec) = ReadSingle(yaml, source);
+
+        // Validated before anything is emitted, so a specification whose graph the reader would refuse is refused
+        // here too rather than stored and then failing every sync.
+        SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], source);
+
+        var canonical = new SpecSubscriber
+        {
+            Type = "PowerBI",
+            Nodes = (spec.Nodes ?? []).Select(RedactNode).ToList(),
+            Edges = (spec.Edges ?? []).ToList(),
+            ReportWarnings = (spec.ReportWarnings ?? []).Select(Redact).OfType<string>().ToList(),
+        };
+
+        var text = Serializer.Serialize(new SpecDocument
+        {
+            Subscribers = new Dictionary<string, SpecSubscriber>(StringComparer.Ordinal) { [name] = canonical },
+        });
+        return "# A Power BI report specification in the canonical form SQLFlow stores. Generated from the output of\n"
+            + "# tools/pbix-extract; regenerate it rather than editing it by hand.\n"
+            + text;
+    }
+
+    private static SpecNode RedactNode(SpecNode node) => new()
+    {
+        Id = node.Id,
+        Kind = node.Kind,
+        DisplayName = node.DisplayName,
+        Name = node.Name,
+        ReportFile = node.ReportFile,
+        Ordinal = node.Ordinal,
+        VisualType = node.VisualType,
+        Title = node.Title,
+        Sql = Redact(node.Sql),
+        SourceServer = node.SourceServer,
+        SourceDatabase = node.SourceDatabase,
+        SourceSchema = node.SourceSchema,
+        SourceName = node.SourceName,
+        PowerQuery = Redact(node.PowerQuery),
+        DataType = node.DataType,
+        Dax = Redact(node.Dax),
+        Description = Redact(node.Description),
+    };
+
+    private static string? Redact(string? value)
+        => value is null ? null : Core.Secrets.SecretHygiene.RedactedMessage(value);
+
+    /// <summary>
+    /// Reads the single report a specification holds, with the key it is written under. The tool emits exactly one
+    /// subscriber keyed by the report's name; anything else means the text is not one of its specifications (or the
+    /// contract between the two has drifted), which is worth saying plainly rather than silently extracting nothing.
+    /// </summary>
+    private static (string Name, SpecSubscriber Spec) ReadSingle(string yaml, string source)
+    {
+        var (name, spec) = Deserialize(yaml, source).Subscribers!.First();
+        return (name, spec);
+    }
+
+    private static SpecDocument Deserialize(string yaml, string source)
+    {
+        ArgumentNullException.ThrowIfNull(yaml);
+        GuardShape(yaml, source);
+
         SpecDocument? document;
         try
         {
@@ -152,23 +272,58 @@ internal static class PbixExtractTool
         }
         catch (YamlException ex)
         {
-            throw new PbixExtractException(
-                $"'{executable}' produced output that is not valid YAML ({ex.Message})", ex);
+            throw new PbixExtractException($"{source} is not valid YAML ({ex.Message})", ex);
         }
 
-        // The tool emits one subscriber keyed by the report's name. Anything else means the contract between
-        // the two has drifted, which is worth saying plainly rather than silently extracting nothing.
-        if (document?.Subscribers is not { Count: 1 })
+        if (document?.Subscribers is not { Count: 1 } subscribers
+            || subscribers.Keys.First() is not { Length: > 0 }
+            || subscribers.Values.First() is null)
+        {
+            throw new PbixExtractException($"{source} holds no single report specification");
+        }
+
+        return document;
+    }
+
+    /// <summary>
+    /// Refuses a document before it is materialized when its shape could exhaust the reader: more than
+    /// <see cref="ReportSpecs.MaxBytes"/> of text, more parse events than a real report produces, or any anchor or
+    /// alias (the tool never writes one, and aliases are how a small YAML document expands into an enormous
+    /// object graph). A specification can arrive from an upload, so this is a trust boundary.
+    /// </summary>
+    private static void GuardShape(string yaml, string source)
+    {
+        if (Encoding.UTF8.GetByteCount(yaml) > ReportSpecs.MaxBytes)
         {
             throw new PbixExtractException(
-                $"'{executable}' produced no report specification; the report was not extracted");
+                $"{source} is larger than {ReportSpecs.MaxBytes / (1024 * 1024)} MB");
         }
 
-        var spec = document.Subscribers.Values.First();
-        var pages = SpecGraph.BuildPages(spec.Nodes ?? [], spec.Edges ?? [], executable);
-        return new PbixExtractResult(
-            pages, spec.ReportWarnings ?? [], SpecGraph.ModelSources(spec.Nodes ?? []),
-            SpecGraph.Model(spec.Nodes ?? [], spec.Edges ?? []));
+        const int maxEvents = 5_000_000;
+        var events = 0;
+        try
+        {
+            var parser = new Parser(new StringReader(yaml));
+            while (parser.MoveNext())
+            {
+                if (++events > maxEvents)
+                {
+                    throw new PbixExtractException($"{source} has more than {maxEvents} YAML elements");
+                }
+
+                switch (parser.Current)
+                {
+                    case YamlDotNet.Core.Events.AnchorAlias:
+                    case YamlDotNet.Core.Events.NodeEvent { Anchor.IsEmpty: false }:
+                        throw new PbixExtractException(
+                            $"{source} uses YAML anchors or aliases, which a report specification never contains");
+                }
+            }
+        }
+        catch (YamlException ex)
+        {
+            throw new PbixExtractException($"{source} is not valid YAML ({ex.Message})", ex);
+        }
     }
 
     private static void TryKill(Process process)
@@ -212,6 +367,10 @@ internal static class PbixExtractTool
     /// </summary>
     private sealed class SpecSubscriber
     {
+        /// <summary>Always <c>PowerBI</c> as the tool writes it; carried so the canonical form reads like the
+        /// tool's own output.</summary>
+        public string? Type { get; set; }
+
         public List<SpecNode>? Nodes { get; set; }
 
         public List<SpecEdge>? Edges { get; set; }
@@ -312,7 +471,7 @@ file static class SpecGraph
 {
     public static List<PbixPage> BuildPages(
         IReadOnlyList<PbixExtractTool.SpecNode> nodes, IReadOnlyList<PbixExtractTool.SpecEdge> edges,
-        string executable)
+        string source)
     {
         var byId = new Dictionary<string, PbixExtractTool.SpecNode>(StringComparer.Ordinal);
         foreach (var node in nodes)
@@ -320,11 +479,14 @@ file static class SpecGraph
             // A duplicate id would mean the tool emitted the same node twice, which is a real contract
             // violation between the two sides rather than something to silently paper over by keeping
             // whichever copy arrived first.
+            if (node is null || string.IsNullOrEmpty(node.Id) || string.IsNullOrEmpty(node.Kind))
+            {
+                throw new PbixExtractException($"{source} holds a graph node with no id or kind");
+            }
+
             if (!byId.TryAdd(node.Id, node))
             {
-                throw new PbixExtractException(
-                    $"'{executable}' produced a graph with a duplicate node id '{node.Id}'; the report was "
-                    + "not extracted");
+                throw new PbixExtractException($"{source} holds a graph with a duplicate node id '{node.Id}'");
             }
         }
 
@@ -333,6 +495,11 @@ file static class SpecGraph
         var projects = new Dictionary<string, List<PbixExtractTool.SpecEdge>>(StringComparer.Ordinal);
         foreach (var edge in edges)
         {
+            if (edge is null || string.IsNullOrEmpty(edge.From) || string.IsNullOrEmpty(edge.To))
+            {
+                throw new PbixExtractException($"{source} holds a graph edge with no endpoints");
+            }
+
             var bucket = edge.Kind switch
             {
                 "hasPage" => hasPage,
@@ -713,9 +880,10 @@ internal sealed class PbixField
     public bool IsMeasure { get; set; }
 }
 
-/// <summary>Raised when a report could not be extracted. The collector turns this into a warning, so one
-/// unreadable report leaves the rest of the estate's lineage intact.</summary>
-internal sealed class PbixExtractException : Exception
+/// <summary>Raised when a report could not be extracted, or a report specification could not be read. The collector
+/// turns this into a warning, so one unreadable report leaves the rest of the estate's lineage intact; the semantic
+/// layer turns it into a refused upload.</summary>
+public sealed class PbixExtractException : Exception
 {
     public PbixExtractException(string message)
         : base(message)

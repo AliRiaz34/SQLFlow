@@ -1564,6 +1564,86 @@ export interface SemanticReportRelationshipAdmin {
 }
 
 /** One report's model table that loads from the object: what the report defines on it, read-only. */
+/** What a report specification holds, counted. `warnings` are what the extractor declined to extract, and why. */
+export interface ReportSpecSummary {
+  pages: number;
+  visuals: number;
+  tables: number;
+  measures: number;
+  relationships: number;
+  resolvedTables: number;
+  warnings: string[];
+}
+
+/** A Power BI subscriber a report can be attached to. */
+export interface SemanticReportSubscriber {
+  repoId: string;
+  repoName: string;
+  subscriberKey: string;
+  name: string;
+  type: string;
+  owner: string | null;
+}
+
+/** A Power BI report the semantic layer holds. `origin` is "upload" (a person's) or "extracted" (the copy a sync
+ * kept of a report the repository declares). `subscriberDeclared` is false once the repository stops declaring the
+ * subscriber, and the report is then not served. */
+export interface SemanticReportSpec {
+  id: number;
+  repoId: string;
+  repoName: string;
+  subscriberKey: string;
+  subscriberName: string;
+  subscriberDeclared: boolean;
+  reportFile: string;
+  origin: "upload" | "extracted";
+  pages: number;
+  visuals: number;
+  tables: number;
+  measures: number;
+  updatedBy: string | null;
+  updatedUtc: string;
+}
+
+export interface SemanticReportSpecDetail {
+  report: SemanticReportSpec;
+  spec: string;
+  summary: ReportSpecSummary;
+}
+
+/** Stores a specification for a Power BI subscriber, replacing an earlier upload of the same report. */
+export interface StoreSemanticReportSpecRequest {
+  repoId: string;
+  subscriber: string;
+  reportFile: string;
+  spec: string;
+}
+
+/** `syncQueued` is false for a repo synced from a local path, which applies the report on its next `sqlflow db sync`. */
+export interface StoreSemanticReportSpecResult {
+  report: SemanticReportSpecDetail;
+  replaced: boolean;
+  syncQueued: boolean;
+}
+
+/** A report the isolated extractor read, not yet stored. */
+export interface ExtractedSemanticReport {
+  reportFile: string;
+  spec: string;
+  summary: ReportSpecSummary;
+}
+
+export interface DeleteSemanticReportSpecResult {
+  syncQueued: boolean;
+}
+
+/** Whether a raw .pbix can be uploaded here, and the size limits. */
+export interface SemanticReportCapabilities {
+  extractionEnabled: boolean;
+  maxReportBytes: number;
+  maxSpecBytes: number;
+}
+
 export interface SemanticReportModelAdmin {
   subscriberKey: string;
   subscriberName: string;

@@ -9,10 +9,19 @@ namespace SqlFlow.Yaml;
 
 /// <summary>What one subscriber library file declares: the consumers, the connections their queries run
 /// against, and any warnings raised parsing it.</summary>
+/// <param name="Subscribers">The subscribers the file declares.</param>
+/// <param name="Connections">The connection aliases their queries run against.</param>
+/// <param name="Warnings">Problems with the file itself.</param>
+/// <param name="UnlinkedWarnings">
+/// Per subscriber name, the warning that it declares neither a query nor a report, so nothing links it to the
+/// warehouse. Kept apart from <paramref name="Warnings"/> because whether it holds is only known once the estate is
+/// collected: a report specification uploaded to the semantic layer links a subscriber the file alone leaves bare.
+/// </param>
 public sealed record SubscriberLibrary(
     IReadOnlyList<DataSubscriber> Subscribers,
     IReadOnlyDictionary<string, DataSource> Connections,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    IReadOnlyDictionary<string, string> UnlinkedWarnings);
 
 /// <summary>
 /// Loads a subscriber library file: a <c>subscribers.yaml</c> (or <c>*.subscribers.yaml</c>) whose top-level
@@ -95,7 +104,7 @@ public sealed class YamlSubscriberLibraryLoader
         catch (YamlException ex)
         {
             warnings.Add($"{source}: invalid subscriber library - {ex.Message}");
-            return new SubscriberLibrary([], new Dictionary<string, DataSource>(StringComparer.OrdinalIgnoreCase), warnings);
+            return Empty(new Dictionary<string, DataSource>(StringComparer.OrdinalIgnoreCase), warnings);
         }
 
         Dictionary<string, DataSource> connections;
@@ -106,16 +115,17 @@ public sealed class YamlSubscriberLibraryLoader
         catch (FlowValidationException ex)
         {
             warnings.Add($"{source}: {ex.Message}");
-            return new SubscriberLibrary([], new Dictionary<string, DataSource>(StringComparer.OrdinalIgnoreCase), warnings);
+            return Empty(new Dictionary<string, DataSource>(StringComparer.OrdinalIgnoreCase), warnings);
         }
 
         if (parsed?.Subscribers is not { Count: > 0 } entries)
         {
             warnings.Add($"{source}: no 'subscribers:' entries; nothing is registered as consuming the warehouse.");
-            return new SubscriberLibrary([], connections, warnings);
+            return Empty(connections, warnings);
         }
 
         var subscribers = new List<DataSubscriber>(entries.Count);
+        var unlinked = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (rawName, entry) in entries)
@@ -150,16 +160,26 @@ public sealed class YamlSubscriberLibraryLoader
             var defaultServer = string.IsNullOrWhiteSpace(entry.Server) ? null : entry.Server.Trim();
             var queries = MapQueries(name, entry.Queries, defaultServer, connections, source, warnings);
 
-            // A subscriber backed by a report (pbix:) can have zero hand-authored queries and still end up
-            // fully linked once its visuals are extracted; that extraction happens later, in the collector,
-            // which has its own specific warnings for a report that turns out unreadable or empty. Warning
-            // here too would be a false alarm on every such subscriber, since at parse time this loader cannot
-            // see what the report will contribute.
-            if (queries.Count == 0 && string.IsNullOrWhiteSpace(entry.Pbix))
+            // An undeclared default is reported once here for the subscriber itself; each query that relied on it
+            // has already said so above, but a report-backed subscriber may have no query to say it.
+            if (defaultServer is not null && !connections.ContainsKey(defaultServer))
             {
                 warnings.Add(
+                    $"{source}: subscriber '{name}' declares server '{defaultServer}', which the document's "
+                    + "'connections:' block does not declare; it is ignored.");
+                defaultServer = null;
+            }
+
+            // A subscriber backed by a report (pbix:) can have zero hand-authored queries and still end up
+            // fully linked once its visuals are extracted; that extraction happens later, in the collector,
+            // which has its own specific warnings for a report that turns out unreadable or empty. A subscriber
+            // without one may still be linked by a report uploaded to the semantic layer, which only the
+            // collector can see, so the warning is handed over rather than raised here.
+            if (queries.Count == 0 && string.IsNullOrWhiteSpace(entry.Pbix))
+            {
+                unlinked[name] =
                     $"{source}: subscriber '{name}' has no usable queries, so nothing links it to the warehouse; it "
-                    + "will show in the catalog as a consumer of nothing.");
+                    + "will show in the catalog as a consumer of nothing.";
             }
 
             subscribers.Add(new DataSubscriber
@@ -170,13 +190,17 @@ public sealed class YamlSubscriberLibraryLoader
                 Description = Trimmed(entry.Description),
                 Notes = Trimmed(entry.Notes),
                 Url = Trimmed(entry.Url),
+                Server = defaultServer,
                 Pbix = Trimmed(entry.Pbix),
                 Queries = queries,
             });
         }
 
-        return new SubscriberLibrary(subscribers, connections, warnings);
+        return new SubscriberLibrary(subscribers, connections, warnings, unlinked);
     }
+
+    private static SubscriberLibrary Empty(Dictionary<string, DataSource> connections, List<string> warnings)
+        => new([], connections, warnings, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
 
     private static List<SubscriberQuery> MapQueries(
         string subscriber,

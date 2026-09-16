@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Text;
 using SqlFlow.Core.Lineage;
 using SqlFlow.Lineage.Collection;
 using SqlFlow.Lineage.Graph;
@@ -15,6 +14,7 @@ namespace SqlFlow.Tests;
 /// queries, because the role is the one thing parsed SQL cannot recover: a column list cannot say which field
 /// was the axis and which was the value.
 /// </summary>
+[Collection(PbixExtractorEnvironment.Name)]
 public sealed class LineagePowerBiSubscriberTests : IDisposable
 {
     private static readonly DateTime Utc = new(2026, 9, 12, 0, 0, 0, DateTimeKind.Utc);
@@ -74,75 +74,10 @@ public sealed class LineagePowerBiSubscriberTests : IDisposable
         "load:",
         "  keyColumns: [id]") + '\n';
 
-    /// <summary>
-    /// One visual: a pivot table over the model entity <c>Sales</c>. A visual names MODEL entities, never
-    /// warehouse objects, which is what the resolution assertions below pin down.
-    /// </summary>
-    private const string VisualConfig = """
-        {
-          "singleVisual": {
-            "visualType": "pivotTable",
-            "projections": {
-              "Rows": [{ "queryRef": "Sales.region" }],
-              "Values": [{ "queryRef": "Sum(Sales.amount)" }]
-            },
-            "prototypeQuery": {
-              "Version": 2,
-              "From": [{ "Name": "s", "Entity": "Sales", "Type": 0 }],
-              "Select": [
-                { "Column": { "Expression": { "SourceRef": { "Source": "s" } }, "Property": "region" }, "Name": "Sales.region" },
-                {
-                  "Aggregation": {
-                    "Expression": { "Column": { "Expression": { "SourceRef": { "Source": "s" } }, "Property": "amount" } },
-                    "Function": 0
-                  },
-                  "Name": "Sum(Sales.amount)"
-                }
-              ]
-            },
-            "vcObjects": {
-              "title": [{ "properties": { "text": { "expr": { "Literal": { "Value": "'Revenue by Region'" } } } } }]
-            }
-          }
-        }
-        """;
-
-    /// <summary>A textbox, which projects nothing: decoration, not a question.</summary>
-    private const string TextboxConfig = """
-        { "singleVisual": { "visualType": "textbox", "projections": {} } }
-        """;
-
-    private static string Json(string document) => System.Text.Json.JsonSerializer.Serialize(document);
-
-    /// <summary>Writes a <c>.pbix</c>: a zip whose <c>Report/Layout</c> is UTF-16LE JSON.</summary>
-    private void WritePbix(string relative)
-    {
-        var layout = $$"""
-            {
-              "id": 0,
-              "sections": [
-                {
-                  "id": 1,
-                  "name": "ReportSection1",
-                  "displayName": "Revenue",
-                  "ordinal": 1,
-                  "filters": "[]",
-                  "visualContainers": [
-                    { "x": 0, "y": 0, "z": 0, "width": 100, "height": 100, "config": {{Json(VisualConfig)}}, "filters": "[]" },
-                    { "x": 0, "y": 0, "z": 1, "width": 100, "height": 100, "config": {{Json(TextboxConfig)}}, "filters": "[]" }
-                  ]
-                }
-              ]
-            }
-            """;
-
-        var path = Path.Combine(_root, relative);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
-        var entry = archive.CreateEntry("Report/Layout");
-        using var stream = entry.Open();
-        stream.Write(Encoding.Unicode.GetBytes(layout));
-    }
+    /// <summary>Writes the shared fixture report (one pivot table over the model entity <c>Sales</c>, plus a textbox).
+    /// A visual names MODEL entities, never warehouse objects, which is what the resolution assertions below pin
+    /// down.</summary>
+    private void WritePbix(string relative) => PbixFixture.Write(Path.Combine(_root, relative));
 
     private static string Subscribers(string pbix) => string.Join('\n',
         "connections:",

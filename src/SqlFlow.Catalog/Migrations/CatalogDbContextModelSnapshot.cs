@@ -1213,6 +1213,10 @@ namespace SqlFlow.Catalog.Migrations
                         .HasMaxLength(1024)
                         .HasColumnType("nvarchar(1024)");
 
+                    b.Property<string>("SubscriberInputHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Name")
@@ -2232,6 +2236,77 @@ namespace SqlFlow.Catalog.Migrations
                     b.HasIndex("ToObjectKey");
 
                     b.ToTable("SemanticRelationship", "catalog");
+                });
+
+            modelBuilder.Entity("SqlFlow.Catalog.CatalogSemanticReportSpec", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<string>("ContentHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("IdentityHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<int>("Measures")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Origin")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<int>("Pages")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("RepoId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ReportFile")
+                        .IsRequired()
+                        .HasMaxLength(260)
+                        .HasColumnType("nvarchar(260)");
+
+                    b.Property<string>("Spec")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("SubscriberKey")
+                        .IsRequired()
+                        .HasMaxLength(900)
+                        .HasColumnType("nvarchar(900)");
+
+                    b.Property<int>("Tables")
+                        .HasColumnType("int");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTime>("UpdatedUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Visuals")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("IdentityHash")
+                        .IsUnique();
+
+                    b.HasIndex("RepoId");
+
+                    b.HasIndex("SubscriberKey");
+
+                    b.ToTable("SemanticReportSpec", "catalog");
                 });
 
             modelBuilder.Entity("SqlFlow.Catalog.CatalogSubscriber", b =>

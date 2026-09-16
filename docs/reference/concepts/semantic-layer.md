@@ -18,6 +18,9 @@ keywords:
   - get_semantic_layer
   - search_semantic_layer
   - describe_semantic_table
+  - power bi upload
+  - report specification
+  - pbix-extractor
 related:
   - concept-data-operations
   - concept-shadow-catalog
@@ -26,6 +29,12 @@ sourceRefs:
   - src/SqlFlow.ControlPlane/Api/SemanticLayerEndpoints.cs
   - src/SqlFlow.ControlPlane/Api/SemanticLayerAdminEndpoints.cs
   - src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/SemanticReportEndpoints.cs
+  - src/SqlFlow.ControlPlane/Api/ReportExtractionClient.cs
+  - src/SqlFlow.PbixExtractor/ExtractionEndpoint.cs
+  - src/SqlFlow.PbixExtractor/ExtractorOptions.cs
+  - gui/src/features/semantic-layer/ReportsPanel.tsx
+  - gui/src/features/semantic-layer/ReportUploadDialog.tsx
   - src/SqlFlow.Lineage/Graph/LineageGraphBuilder.cs
   - src/SqlFlow.Catalog/CatalogSync.cs
   - gui/src/features/semantic-layer/SavedAnswersPanel.tsx
@@ -118,6 +127,12 @@ is refused with 409.
 | `POST /api/v1/powerai/semantic-layer/relationships`; `PUT`, `DELETE .../relationships/{id}` | Create, replace, delete curated relationships (`joinType` `Inner` or `Left`) |
 | `GET /api/v1/powerai/semantic-layer/examples?search=`; `GET`, `PUT`, `DELETE .../examples/{id}` | List (newest first, with state), read, correct, and delete saved answers. An edit takes `question`, `sql`, and `sourceRef` (blank to infer), is validated exactly as a confirmation is, re-resolves the tables it reads when the SQL changes, and answers 409 when it would duplicate another. Confirming a new one stays `POST /api/v1/powerai/questions/confirm` (operate scope) |
 
+| `GET /api/v1/powerai/semantic-layer/reports?repoId=&subscriber=`; `GET`, `DELETE .../reports/{id}` | List, read (with the specification and what it holds), and delete the Power BI report specifications the layer holds. Deleting queues the repo's managed sync |
+| `GET /api/v1/powerai/semantic-layer/reports/subscribers` | The PowerBI subscribers the repositories declare, which are what a report can be attached to |
+| `POST /api/v1/powerai/semantic-layer/reports` | Store a specification for a subscriber: `repoId`, `subscriber` (name), `reportFile` (the report's label), `spec`. It is validated and rewritten into canonical, credential-redacted form first (400 when it is not a readable specification); the subscriber must be declared by that repo and be of type PowerBI. Storing the same `reportFile` again replaces the upload (`replaced`). `syncQueued` says whether the repo's managed sync was queued to apply it |
+| `POST /api/v1/powerai/semantic-layer/reports/extract?reportFile=` | Body: the raw `.pbix` (`application/octet-stream`). Forwarded to the isolated extractor and answered with the validated specification and its counts, without storing it. 501 when `ControlPlane:PowerAI:ReportExtraction` is off; 413 over `MaxUploadMegabytes`; the extractor's own refusal is passed on (422) |
+| `GET /api/v1/powerai/semantic-layer/reports/capabilities` | Whether `.pbix` extraction is enabled, and the size limits |
+
 Column allow state, description, and synonyms are written through `PUT /api/v1/powerai/column-policies` (one
 column) and `PUT /api/v1/powerai/column-policies/objects` (every column of an object).
 
@@ -174,7 +189,8 @@ step), but never their columns.
 
 ## GUI
 
-Admin > **Semantic layer** (`/semantic-layer`; `/column-policies` redirects there) has four tabs:
+Admin > **AI knowledge** (`/semantic-layer`; `/column-policies` redirects there) is the semantic layer's editor, labelled for
+the people who use it. It has five tabs:
 
 - **Tables**: a database > schema > object tree badged with allowed/total columns (optionally only objects in
   the layer), and for the selected object the About (business name, description, synonyms, key), Columns (allow
@@ -186,4 +202,32 @@ Admin > **Semantic layer** (`/semantic-layer`; `/column-policies` redirects ther
 - **Saved answers** (`?tab=examples`; `/saved-answers` redirects here): every saved answer across the layer, with a
   search over question and query text, its datasource, who last stood behind it, its served/withheld state, and
   edit and delete.
+- **Power BI reports** (`?tab=reports`): every report specification the layer holds, uploaded or kept by a sync,
+  with what it contains, who stored it, and whether its subscriber is still declared; view its specification, or
+  remove it. **Upload report** attaches a `.pbix` (read by the isolated extractor and shown for review before it is
+  saved) or a `.pbix.yaml` specification to a PowerBI subscriber.
 - **Blocked columns**: every column outside the layer, denied or never reviewed.
+
+## Power BI reports
+
+A report's measures, relationships, and visuals reach the layer through its specification (see
+[subscribers.yaml](../flow/subscribers.md#where-a-report-comes-from)). The layer holds the specifications a
+repository does not carry in `catalog.SemanticReportSpec`, which a sync reads but never deletes wholesale: an
+`upload` stays until someone removes it, and an `extracted` row is a sync's own copy of a declared `.pbix`.
+
+The control plane never parses a `.pbix`. `POST .../reports/extract` streams the upload to the isolated extractor
+(`SqlFlow.PbixExtractor`, image `Dockerfile.pbix-extractor`), a separate service holding no catalog, warehouse, or
+git credential, reachable only on a private network, and authenticated by a shared key. The extractor writes the
+upload to a private temporary directory, runs `pbix-extract` on it, removes it, and answers with the specification.
+The control plane then validates that answer as it would any upload, refusing anchors and aliases, oversized
+documents, and malformed graphs, before showing or storing it.
+
+| Setting | Meaning |
+| --- | --- |
+| `ControlPlane:PowerAI:ReportExtraction:Enabled` | Turns `.pbix` uploads on (default off). Specification uploads work either way |
+| `ControlPlane:PowerAI:ReportExtraction:Endpoint` | The extractor's base address, e.g. `http://pbix-extractor:8080` |
+| `ControlPlane:PowerAI:ReportExtraction:ApiKey` | The shared key, literal or `${env:...}`/`${keyvault:...}` |
+| `ControlPlane:PowerAI:ReportExtraction:MaxUploadMegabytes` | Largest `.pbix` accepted (default 256) |
+| `ControlPlane:PowerAI:ReportExtraction:TimeoutSeconds` | Budget for one extraction, including waiting for a free slot (default 360) |
+| `PbixExtractor:ApiKey` (extractor) | The same shared key, at least 32 bytes |
+| `PbixExtractor:MaxUploadMegabytes`, `MaxConcurrent`, `QueueLimit` (extractor) | Upload cap (256), reports extracted at once (2), and requests allowed to wait for a slot before new ones get 503 (8) |

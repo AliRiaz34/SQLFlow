@@ -33,6 +33,18 @@ attacker-influenceable input fed to a memory-unsafe decoder, so it is parsed on 
 or a build agent, never inside the long-running server process that holds catalog credentials and
 reaches the warehouse.
 
+## Where it runs
+
+- **Where the reports live** (a developer machine, a build agent): `sqlflow db sync` runs it for every `.pbix` a
+  subscriber declares and keeps what it extracted in the semantic layer, and `sqlflow powerbi extract` writes the
+  specification to a `<report>.pbix.yaml` a subscriber can declare instead of the report.
+- **In its own container** (`Dockerfile.pbix-extractor`, `src/SqlFlow.PbixExtractor`): a small HTTP service the
+  control plane forwards uploaded reports to. The service holds no credentials, and the control plane validates
+  what it answers before storing it. This is how a report uploaded in the GUI, or extracted by the CLI on a machine
+  without this tool, is read.
+
+It never runs inside the control plane itself.
+
 ## Build
 
 Needs a C11 compiler and the development packages for libzip, expat, and SQLite (with

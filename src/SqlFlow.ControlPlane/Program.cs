@@ -228,6 +228,13 @@ if (expandsSynonyms)
     builder.Services.AddSingleton<SqlFlow.Assistant.QuestionExpander>();
 }
 
+// PowerAI report uploads: a .pbix is forwarded to the isolated extractor service and never parsed in this process.
+// Registered unconditionally so the report endpoints can explain a disabled switch instead of failing to bind; the
+// client itself refuses to call out while ControlPlane:PowerAI:ReportExtraction is off. The client applies its own
+// per-extraction budget, so the transport timeout is left unbounded.
+builder.Services.AddHttpClient(ReportExtractionClient.HttpClientName, client => client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddSingleton<ReportExtractionClient>();
+
 // ---- Catalog read model: pooled, read-only, transient-retry --------------------------------------------------
 // The provider setup (migrations history table, transient-error resiliency) comes from CatalogDatabase.Configure,
 // the single definition shared with the CLI, the worker and bootstrap, so no host runs with weaker resiliency than
@@ -443,7 +450,9 @@ v1.MapGroup(string.Empty).RequireAuthorization("admin")
     .MapColumnPolicyEndpoints()
     .MapSemanticLayerAdminEndpoints()
     // Curating the semantic layer's example queries (the saved answers): list, correct, and delete what confirming stored.
-    .MapSemanticExampleAdminEndpoints();
+    .MapSemanticExampleAdminEndpoints()
+    // The Power BI reports the layer holds: upload (extracted in the isolated extractor), list, and remove.
+    .MapSemanticReportEndpoints();
 
 app.Run();
 

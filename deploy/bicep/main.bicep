@@ -155,6 +155,16 @@ param slackBotOpenAIModel string = 'gpt-5-mini'
 @description('The Claude model id. Used when slackBotProvider is Anthropic.')
 param slackBotAnthropicModel string = 'claude-opus-4-8'
 
+@description('Container image for the isolated Power BI extractor, e.g. <registry>/sqlflow-pbix-extractor:latest (built from Dockerfile.pbix-extractor). Empty skips it, and .pbix uploads stay off (specification uploads still work).')
+param pbixExtractorImage string = ''
+
+@secure()
+@description('The key the control plane and the extractor share, at least 32 bytes (e.g. openssl rand -hex 32). Required with pbixExtractorImage.')
+param pbixExtractorKey string = ''
+
+@description('Name of the Container App running the Power BI extractor.')
+param pbixExtractorName string = 'sqlflow-pbix-extractor'
+
 @description('Name of the Container App running the MCP server.')
 param mcpName string = 'sqlflow-mcp'
 
@@ -236,6 +246,8 @@ var slackBotModelApiKeySecretName = 'sqlflow-slack-bot-model-api-key'
 // mode, or the provider API key in the OpenAI/Anthropic modes. Anything missing simply leaves the assistant
 // out of this deployment; the rest of the estate is unaffected.
 var mcpEnabled = !empty(mcpImage)
+var pbixExtractorEnabled = !empty(pbixExtractorImage) && !empty(pbixExtractorKey)
+var pbixExtractorKeySecretName = 'sqlflow-pbix-extractor-key'
 // The GUI chat assistant rides on the same building blocks (a Foundry model + the MCP server) and
 // needs nothing else, so it lights up automatically once both exist. It shares the assistant core
 // with the Slack bot but not its identity: every chat run carries the signed-in user's own bearer.
@@ -432,6 +444,14 @@ resource gitTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!em
   }
 }
 
+resource pbixExtractorKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (pbixExtractorEnabled) {
+  parent: keyVault
+  name: pbixExtractorKeySecretName
+  properties: {
+    value: pbixExtractorKey
+  }
+}
+
 resource slackAppTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (slackBotEnabled) {
   parent: keyVault
   name: slackAppTokenSecretName
@@ -526,6 +546,8 @@ module controlPlane 'control-plane.bicep' = {
     assistantFoundryModelDeploymentName: chatAssistantEnabled ? aiFoundryModelName : ''
     assistantFoundryTranscriptionDeploymentName: chatAssistantEnabled ? aiFoundryTranscriptionModelName : ''
     assistantMcpServerUrl: chatAssistantEnabled ? mcp!.outputs.mcpUrl : ''
+    reportExtractionEndpoint: pbixExtractorEnabled ? pbixExtractor!.outputs.endpoint : ''
+    reportExtractionKeySecretName: pbixExtractorEnabled ? pbixExtractorKeySecretName : ''
     minReplicas: controlPlaneMinReplicas
     maxReplicas: controlPlaneMaxReplicas
   }
@@ -627,6 +649,25 @@ module aiFoundry 'ai-foundry.bicep' = if (!empty(aiFoundryName)) {
         controlPlane.outputs.identityPrincipalId
       ] : [])
   }
+}
+
+// The isolated Power BI extractor: the only place an uploaded .pbix is parsed, on internal ingress with no
+// credential beyond the key it shares with the control plane.
+module pbixExtractor 'pbix-extractor.bicep' = if (pbixExtractorEnabled) {
+  name: 'sqlflow-pbix-extractor-app'
+  params: {
+    location: location
+    name: pbixExtractorName
+    managedEnvironmentId: managedEnvironment.id
+    image: pbixExtractorImage
+    keyVaultName: keyVault.name
+    apiKeySecretName: pbixExtractorKeySecretName
+    acrName: acrName
+    acrLoginServer: acrLoginServer
+  }
+  dependsOn: [
+    pbixExtractorKeySecret
+  ]
 }
 
 // The MCP server over streamable HTTP: the tool source for the Foundry agent, and for any other remote MCP

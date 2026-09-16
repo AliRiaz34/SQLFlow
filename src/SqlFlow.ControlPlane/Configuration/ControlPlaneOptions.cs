@@ -132,6 +132,7 @@ public sealed class ControlPlaneOptions
         DataOps.Validate();
         PowerAI.QuestionGeneration.Validate(Assistant.Anthropic);
         PowerAI.Retrieval.Validate(Assistant.Anthropic);
+        PowerAI.ReportExtraction.Validate();
     }
 }
 
@@ -979,6 +980,78 @@ public sealed class PowerAiOptions
     public QuestionGenerationOptions QuestionGeneration { get; set; } = new();
 
     public RetrievalOptions Retrieval { get; set; } = new();
+
+    public ReportExtractionOptions ReportExtraction { get; set; } = new();
+}
+
+/// <summary>
+/// Extracting an uploaded Power BI report. The control plane never parses a <c>.pbix</c> itself: it forwards the
+/// upload to the isolated extractor service (<c>SqlFlow.PbixExtractor</c>, its own container with no credentials) and
+/// validates the specification that comes back before storing it. Off by default; without it the semantic layer still
+/// accepts a specification made with <c>sqlflow powerbi extract</c>, only not a raw report.
+///
+/// Environment: <c>ControlPlane__PowerAI__ReportExtraction__Enabled=true</c>,
+/// <c>ControlPlane__PowerAI__ReportExtraction__Endpoint=http://pbix-extractor:8080</c>, and
+/// <c>ControlPlane__PowerAI__ReportExtraction__ApiKey=${keyvault:...}</c> (the same value the extractor's
+/// <c>PbixExtractor__ApiKey</c> holds).
+/// </summary>
+public sealed class ReportExtractionOptions
+{
+    /// <summary>Turns report uploads on. Off, the extract endpoint answers 501 and the GUI offers only specification
+    /// uploads.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>The extractor's base address, reachable only on the private network the two share.</summary>
+    public string? Endpoint { get; set; }
+
+    /// <summary>The shared key, as a literal or a <c>${env:...}</c>/<c>${keyvault:...}</c> reference.</summary>
+    public string? ApiKey { get; set; }
+
+    /// <summary>The largest report accepted, matching the extractor's own limit.</summary>
+    public int MaxUploadMegabytes { get; set; } = 256;
+
+    /// <summary>How long one extraction may take end to end, including waiting for a free slot. The extractor stops
+    /// its tool after five minutes, so this leaves room above that.</summary>
+    public int TimeoutSeconds { get; set; } = 360;
+
+    public long MaxUploadBytes => MaxUploadMegabytes * 1024L * 1024L;
+
+    public void Validate()
+    {
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var missing = new List<string>();
+        if (!Uri.TryCreate(Endpoint, UriKind.Absolute, out var endpoint)
+            || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
+        {
+            missing.Add("ControlPlane:PowerAI:ReportExtraction:Endpoint must be an absolute http(s) address");
+        }
+
+        if (string.IsNullOrWhiteSpace(ApiKey))
+        {
+            missing.Add("ControlPlane:PowerAI:ReportExtraction:ApiKey is required");
+        }
+
+        if (MaxUploadMegabytes is < 1 or > 1024)
+        {
+            missing.Add($"ControlPlane:PowerAI:ReportExtraction:MaxUploadMegabytes must be between 1 and 1024 (was {MaxUploadMegabytes})");
+        }
+
+        if (TimeoutSeconds is < 30 or > 3600)
+        {
+            missing.Add($"ControlPlane:PowerAI:ReportExtraction:TimeoutSeconds must be between 30 and 3600 (was {TimeoutSeconds})");
+        }
+
+        if (missing.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "ControlPlane:PowerAI:ReportExtraction:Enabled is true but its configuration is incomplete: "
+                + string.Join(", ", missing));
+        }
+    }
 }
 
 /// <summary>
