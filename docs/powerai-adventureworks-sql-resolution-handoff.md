@@ -1,8 +1,9 @@
 # Handoff: repoint the sample .pbix at SQL Server to prove model-entity resolution
 
-Status: **DONE, for the extractor half.** Carried out on a Windows machine with PowerBI Desktop on
-2026-09-13. The steps below are kept as the record of what was done and why, with the outcome of each
-noted. What the repointing proved, and the one part of the chain it did not reach, is recorded in
+Status: **DONE, end to end.** Carried out on a Windows machine with PowerBI Desktop on 2026-09-13,
+followed the same day by a `sqlflow db sync . --connect` against the repointed report. The steps below
+are kept as the record of what was done and why, with the outcome of each noted. What the repointing
+proved, and what it leaves unproven (breadth: one report, one source shape), is recorded in
 POWERAI.md Section 10 and in
 [docs/wiki/decisions/powerbi-model-entity-resolution.md](wiki/decisions/powerbi-model-entity-resolution.md).
 
@@ -35,13 +36,24 @@ Four things were learned or fixed along the way that the plan below did not anti
   `adventureworks-restore.sh` the moment it was bind-mounted into a Linux container. Fixed repo-wide
   with a `.gitattributes` rule.
 
-## The remaining gap
+## The control-plane half
 
-No `db sync` has been run against the repointed report, so the control-plane half of the chain
-(`FlowSetCollector` turning the source fields into a `SynonymLink`, `LineageGraphBuilder` rewriting
-the model name onto the node an ingestion flow writes) is still exercised only by its own tests. The
-rendered SQL in the spec is therefore still in model terms (`FROM [Sales] AS [Sales]`), which is
-correct at the extractor layer: the rewrite happens downstream. Step 5 below is the step not yet done.
+When the outcome above was first written, no `db sync` had been run against the repointed report, and
+the control-plane half of the chain (`FlowSetCollector` turning the source fields into a `SynonymLink`,
+`LineageGraphBuilder` rewriting the model name onto the node an ingestion flow writes) was exercised only
+by its own tests. Step 5 below has since been run. `sqlflow db sync . --connect` lands the report's read
+edges on `AdventureWorks.dbo.DimDate`, `DimProduct`, `DimReseller` and `FactResellerSales`, each a
+harvested `Kind = Table` row in `catalog.Object` rather than a name-only node.
+
+Running it found two bugs that had kept the chain from ever working, and that the earlier "extractor
+half proven" claim had missed. The extractor wrote each table's `source*` properties onto the last column
+node instead of the table node, and the graph builder registered a model entity's synonym as a one-part
+name that the default-database pass never matched. Both are fixed and covered by tests; see POWERAI.md
+Section 10 and the decision page linked above.
+
+The rendered SQL in the spec is still in model terms (`FROM [Sales] AS [Sales]`), which is correct at
+the extractor layer: the rewrite happens downstream, and a runnable T-SQL form of each visual is now
+produced at sync by `VisualSqlTranslator` (POWERAI.md Section 10, item 10).
 
 ## The original plan, as written before the work
 

@@ -256,3 +256,13 @@ from the choices the human made while closing the gap schema registration left o
 common DAX subset, and the translation served as a dashboard match's runnable SQL. It records the refusal rules for
 Power Query and DAX, the shared expressions and literal rendering added to `pbix-extract`, and the per-subscriber
 query lookup fixed on the way. The surfaces are documented in `flow-subscribers` and `guide-chat-assistant`.
+
+## [2026-09-16] lint | PowerAI design-doc status refresh
+
+At the human's request, refreshed the status notes of the three PowerAI design documents under `docs/` that
+still described landed work as open: the retrieval design (the GUI confirmation row exists, and the example
+table now lives in the semantic layer as `CatalogSemanticExample`), the SQL-resolution handoff (the end-to-end
+`db sync` was run on 2026-09-13 and found the two seam bugs), and the model-entity resolution design (step 5,
+the SQL-backed sample report, is done). Only status lines and step markers changed; the design text stays as
+the record. Updated [the design document drift map](maps/design-doc-drift.md) to say the retrieval document's
+three stale claims are now corrected in place.

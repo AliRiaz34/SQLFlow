@@ -2,8 +2,11 @@
 
 Status: steps 1 and 3 are implemented (the M pattern-matcher in the C tool, and the synonym emission
 that feeds its output into the existing resolution pass). Step 2 (`modelSourceServer`) was NOT built,
-deliberately: see Section 5's note. Step 4's integration test is limited by fixture reality, and
-step 5 still needs a genuinely SQL-backed sample report; both are explained in Section 8.
+deliberately: see Section 5's note. Step 4's integration test is limited by fixture reality, as
+Section 8 explains. Step 5 is done: the sample report was repointed at the restored AdventureWorksDW2022
+database and a `db sync` resolves all seven of its SQL-backed tables end to end
+([the handoff](powerai-adventureworks-sql-resolution-handoff.md)). What remains unproven is breadth:
+one report and one source shape.
 
 This closes the known limitation described in POWERAI.md
 Sections 5, 8, and 10 ("Model-entity resolution"): an extracted PowerBI visual's synthesized SQL, and
@@ -223,7 +226,12 @@ tested pipeline.
    The resolution logic is therefore tested where it can be tested honestly, in the C tool's own suite
    against the M text directly, and the existing C# test now states that its fixture exercises the
    unresolved path only. Closing this properly needs step 5, not more test scaffolding.
-5. **Still open, and the one real gap**: no SQL-backed sample report exists. The current
+5. ~~A SQL-backed sample report.~~ **Done** on 2026-09-13: the sample's model was repointed at the
+   restored AdventureWorksDW2022 database, and `sqlflow db sync . --connect` lands its read edges on the
+   harvested warehouse tables, which is what finally demonstrates the seam described at the end of this
+   item. Doing so found two bugs on either side of that seam; see
+   [the handoff](powerai-adventureworks-sql-resolution-handoff.md) and POWERAI.md Section 10. As
+   originally written, the item read: no SQL-backed sample report exists. The current
    `AdventureWorks_Sales.pbix` is Excel-backed (verified: all 8 of its tables now emit an
    "Excel.Workbook / Json.Document names no warehouse object" warning), so it exercises only the
    refusal path. Proving the resolved path end to end, from `.pbix` through to a unified

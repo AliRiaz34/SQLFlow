@@ -1,8 +1,13 @@
 # PowerAI Question Retrieval: Design
 
-Status: retrieval is built and reachable, and so is the confirmed-example store it searches alongside the
-PowerBI-derived questions (Section 8, all six steps). What is left of the learning loop is the GUI
-affordance that asks a person to confirm an answer, rather than the assistant having to remember to.
+Status: complete (Section 8, all six steps). Retrieval is built and reachable, and so is the
+confirmed-example store it searches alongside the PowerBI-derived questions. The GUI now asks a person to
+confirm every answer that hands back a query (`gui/src/features/chat/AnswerConfirmation.tsx`), so the
+learning loop no longer depends on the assistant remembering to. The confirmed-example table was later
+renamed and moved into the semantic layer: it is now `CatalogSemanticExample` (migration
+`MoveQuestionExamplesIntoSemanticLayer`), and the sections below keep its original name,
+`CatalogQuestionExample`, as the record of what was designed. What is still open is tuning, not building
+(Section 9).
 
 **This document's mechanism changed after it was first written, and the sections below record both.**
 It originally specified embedding similarity, and that was implemented; it was then replaced with
@@ -173,8 +178,9 @@ query string, even though the model could easily produce one.
 No entity changes. One migration, `AddQuestionFullTextSearch`, adding a full-text index on
 `SubscriberReportVisualQuestion(Question)` and reusing the existing `CatalogFullText` catalog; it
 creates nothing on an instance without the full-text feature. The `CatalogQuestionExample` table for
-the `user-confirmed` half (Section 2) is still unbuilt and unchanged by this mechanism switch: a word
-search over it will work the same way, so nothing here blocks or reshapes it.
+the `user-confirmed` half (Section 2) was unbuilt when this was written and was unchanged by this
+mechanism switch: a word search over it works the same way. It has since landed (Section 8, step 6) and
+now lives in the semantic layer as `CatalogSemanticExample`.
 
 ## 8. Sequencing (each step landable and testable independently, no time estimates)
 
@@ -217,7 +223,7 @@ what replaced it, not as outstanding work.
    trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and that
    execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
 6. ~~Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject flow
-   (POWERAI.md Section 6) that writes into it.~~ **Done, except the GUI affordance.** The table landed as
+   (POWERAI.md Section 6) that writes into it.~~ **Done, including the GUI affordance.** The table landed as
    `CatalogQuestionExample` (migrations `AddQuestionExamples` and `AddQuestionExampleFullTextSearch`),
    holding the question, the SQL, the object keys, the provenance, the retrieval score the answer was built
    from, the timestamp and the confirming user. `POST /api/v1/powerai/questions/confirm`
@@ -243,9 +249,11 @@ what replaced it, not as outstanding work.
    rather than per deployment, because the two indexes ship in separate migrations and an estate migrated
    while the Full-Text feature was absent can genuinely carry one and not the other.
 
-   What remains is the GUI's own accept/correct/reject affordance on a generated answer, so confirming is a
-   click rather than something the assistant has to remember to ask for. Until that lands the loop is real
-   but opportunistic.
+   The GUI's own accept/correct/reject affordance has since landed: a Yes / Not quite / No row under every
+   finished answer that hands back a query (`AnswerConfirmation`), posting to the same confirm endpoint, so
+   a click and a `confirm_question` call land the same row and confirming no longer depends on the
+   assistant remembering to ask. POWERAI.md Section 10, item 6, records what that row sends and what it
+   deliberately does not.
 
 ## 9. Open questions
 
