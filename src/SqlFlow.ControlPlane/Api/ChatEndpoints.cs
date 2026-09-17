@@ -9,6 +9,7 @@ using Microsoft.Extensions.Options;
 using SqlFlow.Assistant;
 using SqlFlow.Catalog;
 using SqlFlow.ControlPlane.Configuration;
+using SqlFlow.ControlPlane.Security;
 
 namespace SqlFlow.ControlPlane.Api;
 
@@ -46,6 +47,9 @@ public sealed record ChatMessageDto(
     long Id, int Ordinal, string Role, string Text, IReadOnlyList<string> Images,
     IReadOnlyList<ChatToolCallDto> ToolCalls, DateTime CreatedUtc);
 
+/// <summary>What a purge removed: every conversation of the caller and every message in them.</summary>
+public sealed record ChatConversationsPurgedDto(int Conversations, int Messages);
+
 /// <summary>A rename request for a conversation.</summary>
 public sealed record RenameChatConversationRequest(string Title);
 
@@ -73,9 +77,10 @@ public sealed record ChatTranscriptionDto(string Text);
 /// <summary>
 /// The GUI chat assistant: the same SqlFlow.Assistant core the Slack bot runs, streamed over SSE
 /// with conversations persisted in the catalog (the durable transcript the provider-side state is
-/// only a cache of). Every agent run forwards the calling user's own bearer to the SQLFlow MCP
-/// server, so the assistant's tool access is exactly the caller's access, and conversations are
-/// strictly per-user. The whole surface stays mapped when the feature is disabled: the handlers
+/// only a cache of). Every agent run presents a token delegated from the calling user to the SQLFlow
+/// MCP server (<see cref="AssistantDelegation"/>): the assistant reads only what that user may read,
+/// for one run, and the model host never holds the user's own session. Conversations are strictly
+/// per-user. The whole surface stays mapped when the feature is disabled: the handlers
 /// answer with a clear problem and <c>/chat/capabilities</c> reports the switch, so the GUI can
 /// explain instead of erroring.
 /// </summary>
@@ -102,6 +107,7 @@ public static class ChatEndpoints
         chat.MapGet("/conversations", ListConversationsAsync).WithName("ListChatConversations");
         chat.MapPut("/conversations/{id:guid}", RenameConversationAsync).WithName("RenameChatConversation");
         chat.MapDelete("/conversations/{id:guid}", DeleteConversationAsync).WithName("DeleteChatConversation");
+        chat.MapDelete("/conversations", DeleteAllConversationsAsync).WithName("DeleteAllChatConversations");
         chat.MapGet("/conversations/{id:guid}/messages", ListMessagesAsync).WithName("ListChatMessages");
         chat.MapPost("/ask", AskAsync).WithName("AskChatAssistant");
         chat.MapPost("/transcribe", TranscribeAsync).WithName("TranscribeChatAudio");
@@ -194,6 +200,31 @@ public static class ChatEndpoints
         return TypedResults.NoContent();
     }
 
+    /// <summary>
+    /// Empties the caller's whole chat history in one call: every conversation they own and every
+    /// message in it. Only the caller's own rows are touched, and the count of each comes back so
+    /// the GUI can say what it removed. Deleting one conversation at a time is the common case; this
+    /// is the escape hatch for a rail that has grown to hundreds of entries.
+    /// </summary>
+    private static async Task<Results<Ok<ChatConversationsPurgedDto>, ProblemHttpResult>> DeleteAllConversationsAsync(
+        CatalogDbContext db, HttpContext http, CancellationToken ct)
+    {
+        if (!TryGetUserId(http, out var userId, out var noUser))
+        {
+            return noUser;
+        }
+
+        // Messages first, keyed off the caller's conversations, so a failure between the two
+        // statements can only leave empty conversations behind, never orphaned transcripts.
+        var messages = await db.ChatMessages
+            .Where(m => db.ChatConversations.Any(c => c.Id == m.ConversationId && c.UserId == userId))
+            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        var conversations = await db.ChatConversations
+            .Where(c => c.UserId == userId)
+            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        return TypedResults.Ok(new ChatConversationsPurgedDto(conversations, messages));
+    }
+
     private static async Task<Results<Ok<IReadOnlyList<ChatMessageDto>>, ProblemHttpResult>> ListMessagesAsync(
         Guid id, CatalogDbContext db, HttpContext http, CancellationToken ct)
     {
@@ -227,7 +258,7 @@ public static class ChatEndpoints
     /// answer, exactly as ChatGPT-style UIs keep a stopped reply.
     /// </summary>
     private static async Task<IResult> AskAsync(
-        ChatAskRequest request, CatalogDbContext db, TimeProvider clock, HttpContext http,
+        ChatAskRequest request, CatalogDbContext db, TimeProvider clock, HttpContext http, TokenIssuer issuer,
         IOptions<Microsoft.AspNetCore.Http.Json.JsonOptions> json,
         ILoggerFactory loggerFactory, CancellationToken ct)
     {
@@ -322,6 +353,15 @@ public static class ChatEndpoints
         conversation.UpdatedUtc = nowUtc;
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
+        // The run gets its own delegated token, never the caller's session. The model host presents it to the MCP
+        // server and can therefore read what this user may read for as long as one run can last, and nothing more:
+        // it cannot renew it, mint a credential with it, approve a sign-in, or start work. Issued before streaming
+        // starts, so a failure here is still an ordinary error response rather than a broken stream.
+        var mcpBearer = issuer.IssueAssistantDelegation(
+            http.User,
+            TimeSpan.FromSeconds(options.RunTimeoutSeconds) + AssistantDelegation.LifetimeGrace,
+            clock.GetUtcNow().UtcDateTime).Token;
+
         var response = http.Response;
         response.Headers.ContentType = "text/event-stream";
         response.Headers.CacheControl = "no-cache";
@@ -332,12 +372,6 @@ public static class ChatEndpoints
         await WriteSseAsync(response, "conversation", JsonSerializer.Serialize(new ChatStreamConversationDto(
             conversation.Id, conversation.Title, userMessage.Id, userMessage.Ordinal), serializer), ct)
             .ConfigureAwait(false);
-
-        // The caller's own bearer becomes the MCP Authorization for this run: the assistant can do
-        // exactly what this user can do against the control plane, nothing more.
-        var bearer = http.Request.Headers.Authorization.ToString();
-        const string scheme = "Bearer ";
-        var mcpBearer = bearer.StartsWith(scheme, StringComparison.OrdinalIgnoreCase) ? bearer[scheme.Length..] : bearer;
 
         var logger = loggerFactory.CreateLogger("SqlFlow.ControlPlane.Api.ChatEndpoints");
         var toolCalls = new List<ChatToolCallDto>();

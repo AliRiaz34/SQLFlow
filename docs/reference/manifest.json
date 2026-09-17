@@ -510,18 +510,21 @@
       "path": "cli/worker.md",
       "title": "sqlflow worker: self-hosted compute node",
       "type": "cli-command",
-      "summary": "Runs this host as a compute node that drains the catalog's durable run queue with atomic claims, pool routing, and node-local credential resolution.",
+      "summary": "Runs this host as a compute node that polls the control plane's dispatcher for work over HTTP, executes handed-out runs through the shared engine, streams th...",
       "keywords": [
         "worker",
-        "run queue",
+        "node protocol",
+        "dispatcher",
+        "long poll",
+        "lease",
         "pools",
-        "polling",
         "compute node",
-        "claiming",
-        "crash recovery",
+        "node token",
+        "execution spec",
+        "flow version",
+        "trace batches",
         "attempt budget",
-        "claim fence",
-        "busy heartbeat",
+        "revoked lease",
         "graceful shutdown",
         "drain",
         "SIGTERM",
@@ -538,10 +541,17 @@
       "sourceRefs": [
         "src/SqlFlow.Cli/Program.cs",
         "src/SqlFlow.Node/RunWorker.cs",
+        "src/SqlFlow.Node/NodeTraceFeed.cs",
+        "src/SqlFlow.Node/DispatcherRetry.cs",
+        "src/SqlFlow.Node/HttpNodeTransport.cs",
+        "src/SqlFlow.Node/InProcessNodeTransport.cs",
         "src/SqlFlow.Node/GitMaterializer.cs",
+        "src/SqlFlow.Dispatch/Protocol/NodeProtocol.cs",
+        "src/SqlFlow.Dispatch/Dispatcher.cs",
         "src/SqlFlow.Catalog/RunQueueStore.cs",
-        "src/SqlFlow.Catalog/CatalogEntities.cs",
-        "src/SqlFlow.ControlPlane/Background/RunDispatcher.cs",
+        "src/SqlFlow.Catalog/RunContextStore.cs",
+        "src/SqlFlow.Catalog/RunTraceStore.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/NodeProtocolEndpoints.cs",
         "src/SqlFlow.ControlPlane/Background/RunExecutionWorker.cs",
         "Dockerfile.worker",
         "deploy/docker/worker-entrypoint.sh",
@@ -599,7 +609,11 @@
         "msal",
         "roles",
         "scopes",
-        "throttle"
+        "throttle",
+        "device grant",
+        "session renewal",
+        "assistant token",
+        "delegation"
       ],
       "related": [
         "concept-control-plane",
@@ -610,6 +624,10 @@
         "src/SqlFlow.ControlPlane/Api/UserEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/Contracts.cs",
         "src/SqlFlow.ControlPlane/Security/TokenIssuer.cs",
+        "src/SqlFlow.ControlPlane/Security/AssistantDelegation.cs",
+        "src/SqlFlow.ControlPlane/Security/DeviceCodeStore.cs",
+        "src/SqlFlow.ControlPlane/Api/ChatEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Api/MeEndpoints.cs",
         "src/SqlFlow.ControlPlane/Security/LoginThrottle.cs",
         "src/SqlFlow.ControlPlane/Security/EntraTokenValidator.cs",
         "src/SqlFlow.ControlPlane/Background/BootstrapProvisioningService.cs",
@@ -735,8 +753,17 @@
         "src/SqlFlow.ControlPlane/Api/NodeEndpoints.cs",
         "src/SqlFlow.Catalog/RepoSourceStore.cs",
         "src/SqlFlow.Catalog/RunQueueStore.cs",
+        "src/SqlFlow.Catalog/DispatchLeaseStore.cs",
+        "src/SqlFlow.Catalog/RunContextStore.cs",
+        "src/SqlFlow.Catalog/RunTraceStore.cs",
         "src/SqlFlow.Catalog/CatalogEntities.cs",
-        "src/SqlFlow.Node/GitMaterializer.cs"
+        "src/SqlFlow.Node/GitMaterializer.cs",
+        "src/SqlFlow.Dispatch/Dispatcher.cs",
+        "src/SqlFlow.Dispatch/DispatchState.cs",
+        "src/SqlFlow.Dispatch/DispatchOptions.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/DispatchService.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/NodeProtocolEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/DispatchEndpoints.cs"
       ]
     },
     {
@@ -786,6 +813,48 @@
         "src/SqlFlow.Execution/ComputeTaskExecutor.cs",
         "src/SqlFlow.ControlPlane/Api/DatasourceEndpoints.cs",
         "src/SqlFlow.ControlPlane/Configuration/ControlPlaneOptions.cs"
+      ]
+    },
+    {
+      "id": "concept-data-stream-detection",
+      "corpus": "reference",
+      "path": "concepts/data-stream-detection.md",
+      "title": "Data stream detection: which tables stopped receiving data, and why a verdict says what it says",
+      "type": "concept",
+      "summary": "The estate-wide detector behind the Data streams board and the detect_stream_anomalies tool: what it reads, the six detectors and their size floors, how verd...",
+      "keywords": [
+        "data streams",
+        "stream anomaly",
+        "stalled table",
+        "missing data",
+        "less data than usual",
+        "level shift",
+        "silence detector",
+        "null days",
+        "reprocessing trim",
+        "reference table",
+        "change-driven",
+        "delivery cadence",
+        "delivery cycle",
+        "detect_stream_anomalies",
+        "false positive"
+      ],
+      "related": [
+        "concept-healthcheck-engine",
+        "concept-control-plane",
+        "flow-hc"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.HealthCheck/StreamAnomaly.cs",
+        "src/SqlFlow.HealthCheck/StreamAnomalyDetector.cs",
+        "src/SqlFlow.HealthCheck/CycleEstimator.cs",
+        "src/SqlFlow.HealthCheck/PeltDetector.cs",
+        "src/SqlFlow.HealthCheck/EsdDetector.cs",
+        "src/SqlFlow.HealthCheck/HealthCheckEngine.cs",
+        "src/SqlFlow.ControlPlane/Api/DataStreamEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Configuration/ControlPlaneOptions.cs",
+        "tools/sqlflow-mcp/src/server.rs",
+        "gui/src/features/datastreams/DataStreamsPage.tsx"
       ]
     },
     {
@@ -952,7 +1021,8 @@
       "related": [
         "flow-hc",
         "cli-healthcheck",
-        "concept-run-artifacts"
+        "concept-run-artifacts",
+        "concept-data-stream-detection"
       ],
       "sourceRefs": [
         "src/SqlFlow.HealthCheck/HealthCheckFlowRunner.cs",
@@ -999,6 +1069,7 @@
         "src/SqlFlow.SqlServer/Ingestion/InitLoadPlanner.cs",
         "src/SqlFlow.SqlServer/Ingestion/ChunkRanges.cs",
         "src/SqlFlow.SqlServer/Schema/IngestionSchemaBuilder.cs",
+        "src/SqlFlow.SqlServer/Schema/SourceProjection.cs",
         "src/SqlFlow.SqlServer/Schema/UnicodeConverter.cs",
         "src/SqlFlow.Core/Ingestion/DefaultColumnNameCleaner.cs",
         "src/SqlFlow.Core/Ingestion/IngestionPolicies.cs",
@@ -1692,7 +1763,7 @@
         "src/SqlFlow.Copy/LocalCopyEndpoint.cs",
         "src/SqlFlow.Copy/AzureBlobCopyEndpoint.cs",
         "src/SqlFlow.Yaml/YamlCopyFlowLoader.cs",
-        "samples/copy/baatbooking-storage-to-lake.flow.yaml"
+        "samples/copy/boatbooking-storage-to-lake.flow.yaml"
       ]
     },
     {
@@ -1950,6 +2021,7 @@
         "src/SqlFlow.SqlServer/Ingestion/SurrogateKeyExecutor.cs",
         "src/SqlFlow.SqlServer/Ingestion/IngestionFlowRunner.cs",
         "src/SqlFlow.SqlServer/Schema/IngestionSchemaBuilder.cs",
+        "src/SqlFlow.SqlServer/Schema/SourceProjection.cs",
         "src/SqlFlow.Catalog/CatalogProjection.cs"
       ]
     },
@@ -2367,7 +2439,7 @@
         "src/SqlFlow.Core/Sftp/SftpFlow.cs",
         "src/SqlFlow.Sftp/SftpEngine.cs",
         "src/SqlFlow.Yaml/YamlSftpFlowLoader.cs",
-        "samples/sftp/citybike-nets-download.flow.yaml"
+        "samples/sftp/cyclehire-settlement-download.flow.yaml"
       ]
     },
     {
@@ -2662,7 +2734,7 @@
       "path": "guides/chat-assistant.md",
       "title": "The GUI chat assistant: the SQLFlow agent in the workbench, with per-user authority and voice input",
       "type": "guide",
-      "summary": "The GUI's Assistant page, the same assistant core as the Slack bot, streamed from the control plane with tool calls under the signed-in user's own token.",
+      "summary": "How the GUI's Assistant page answers questions - the same assistant core as the Slack bot, streamed over SSE from the control plane, with tool calls made und...",
       "keywords": [
         "chat",
         "assistant",
@@ -2699,6 +2771,7 @@
         "src/SqlFlow.Assistant/AnthropicGateway.cs",
         "src/SqlFlow.Assistant/TranscriptionGateway.cs",
         "src/SqlFlow.ControlPlane/Api/ChatEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Security/AssistantDelegation.cs",
         "src/SqlFlow.ControlPlane/Configuration/ControlPlaneOptions.cs",
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "gui/src/features/chat/ChatPage.tsx",
@@ -3550,13 +3623,52 @@
       "related": [
         "wiki-string-first-landing",
         "wiki-census-drift",
-        "wiki-semantic-layer-is-the-allow-list"
+        "wiki-semantic-layer-is-the-allow-list",
+        "wiki-dispatch-in-control-plane"
       ],
       "sourceRefs": [
         "src/SqlFlow.Catalog/CatalogEntities.cs",
         "src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs",
         "src/SqlFlow.ControlPlane/Api/SemanticExampleAdminEndpoints.cs",
         "gui/src/features/chat/AnswerConfirmation.tsx"
+      ]
+    },
+    {
+      "id": "wiki-dispatch-in-control-plane",
+      "corpus": "wiki",
+      "path": "decisions/dispatch-in-control-plane.md",
+      "title": "The run queue lives in the control plane, and a node speaks only to it",
+      "type": "decision",
+      "summary": "Why the run queue moved out of SQL Server into an in-memory dispatcher inside the control plane, what was rejected (portable SQL, a broker, per-replica queue...",
+      "keywords": [
+        "dispatcher",
+        "run queue",
+        "node protocol",
+        "lease",
+        "fence",
+        "journal",
+        "ownership lease",
+        "scale target",
+        "KEDA",
+        "portability"
+      ],
+      "related": [
+        "wiki-design-doc-drift"
+      ],
+      "sourceRefs": [
+        "src/SqlFlow.Dispatch/Dispatcher.cs",
+        "src/SqlFlow.Dispatch/DispatchState.cs",
+        "src/SqlFlow.Dispatch/IDispatchLedger.cs",
+        "src/SqlFlow.Dispatch/Protocol/NodeProtocol.cs",
+        "src/SqlFlow.Catalog/RunQueueStore.cs",
+        "src/SqlFlow.Catalog/DispatchLeaseStore.cs",
+        "src/SqlFlow.Catalog/RunContextStore.cs",
+        "src/SqlFlow.Catalog/RunTraceStore.cs",
+        "src/SqlFlow.Catalog/ScaleTargetStore.cs",
+        "src/SqlFlow.Node/RunWorker.cs",
+        "src/SqlFlow.Node/NodeTraceFeed.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/NodeProtocolEndpoints.cs",
+        "src/SqlFlow.ControlPlane/Dispatch/DispatchService.cs"
       ]
     },
     {

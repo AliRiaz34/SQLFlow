@@ -101,7 +101,7 @@ public sealed class CatalogSync
     // A flow document is kilobytes; a run.json is small. These caps stop a hostile or corrupt file from
     // exhausting memory or bloating the nvarchar(max) columns. Over-limit files are skipped with a warning.
     private const long MaxYamlBytes = 16L * 1024 * 1024;
-    internal const long MaxRunJsonBytes = Core.Runs.RunArtifactLimits.MaxRunJsonBytes;
+    internal const long MaxRunJsonBytes = RunQueueStore.MaxArtifactBytes;
 
     /// <summary>The stored length of a subscriber query's translation problem (its column's length).</summary>
     internal const int TranslationProblemMaxLength = 1000;

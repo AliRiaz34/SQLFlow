@@ -24,6 +24,7 @@ rawRefs:
   - docs/schema-sync-and-discovery-design.md
   - docs/flattener-memory-postmortem.md
   - docs/powerai-question-retrieval-design.md
+  - docs/dispatch-design.md
 sourceRefs:
   - src/SqlFlow.Catalog/CatalogEntities.cs
   - src/SqlFlow.ControlPlane/Api/QuestionExampleEndpoints.cs
@@ -31,6 +32,8 @@ sourceRefs:
   - gui/src/features/chat/AnswerConfirmation.tsx
 referenceRefs:
   - concept-architecture-and-execution
+  - concept-control-plane
+  - cli-worker
   - concept-connections-and-secrets
   - concept-environment-variables
   - concept-ingestion-run-pipeline
@@ -39,15 +42,16 @@ related:
   - wiki-string-first-landing
   - wiki-census-drift
   - wiki-semantic-layer-is-the-allow-list
+  - wiki-dispatch-in-control-plane
 updated: 2026-09-16
 ---
 
 # Design document drift map: which docs under docs/ can still be trusted
 
-Eleven markdown documents sit directly under `docs/`, above the verified `docs/reference/` corpus.
+Twelve markdown documents sit directly under `docs/`, above the verified `docs/reference/` corpus.
 They are not equivalent to each other. Eight are pre-implementation design intent that the shipped
 code has moved away from, and each declares its own drift in a banner. Two are current prose. One is
-an incident record.
+an incident record. One is a phased design whose status line tracks which phases have shipped.
 
 The practical rule: **for behavior, go to `docs/reference/`. Come here only for intent and
 history.** A design document tells you what someone meant to build, which is genuinely useful when
@@ -110,6 +114,21 @@ throughout, so the table above remains the translation. For what the learning lo
 confidence is retrieval similarity rather than a model's self-rating, and what dropping embeddings
 traded away) is still the right place to learn why it is shaped this way. How the saved answers relate
 to the column allow-list is in [the semantic layer decision](../decisions/semantic-layer-is-the-allow-list.md).
+## A phased design, tracked by its own status line
+
+[dispatch-design.md](../../dispatch-design.md) is the design for moving the run queue out of SQL
+Server into an in-memory dispatcher inside the control plane, with compute nodes pulling work over an
+HTTP node protocol. Unlike the historical documents above it was written on 2026-09-11 and
+implemented the same day: its status line records that all three phases shipped (the queue, the node
+protocol, the ownership lease, the tests; the execution spec in every hand-out and the flow-version,
+context and trace calls that let a node run with no catalog connection; the scale-target endpoint
+and the KEDA metrics scaler that took the last catalog credential off the compute tier) and names
+the four decisions that changed during implementation. Its sections 2 and 3 deliberately describe
+the state it replaced, so "today" there means the SQL-claim design, not what runs now; for the
+shipped behaviour go to
+[reference/concepts/control-plane.md](../../reference/concepts/control-plane.md) ("The dispatcher")
+and [reference/cli/worker.md](../../reference/cli/worker.md), and for the rationale and the
+rejected alternatives to [the decision page](../decisions/dispatch-in-control-plane.md).
 
 ## Incident record
 

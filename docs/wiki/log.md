@@ -113,6 +113,59 @@ counts reveal it.
 
 The lint's `sourceRefs` tripwire caught two invented paths in this pass before they shipped.
 
+## [2026-09-11] ingest | Dispatch design document
+
+Ingested `docs/dispatch-design.md`, written and implemented the same day: the run queue leaves SQL
+Server for an in-memory dispatcher inside the control plane, journaled to the catalog with plain
+conditional updates, with compute nodes pulling work over an HTTP node protocol under a `node` scope
+and holding leases instead of claiming rows. Updated the design-doc drift map with a section for a
+phased design whose status line tracks what has shipped (phase 1 as of this entry), so a reader does
+not mistake its "what exists today" sections for the current code. The reference pages that carry the
+shipped behaviour (`concepts/control-plane.md`, `cli/worker.md`, `concepts/architecture-and-execution.md`,
+`concepts/environment-variables.md`, `guides/deployment.md`) were rewritten in the same change and the
+manifest rebuilt; no new wiki page was written for the decision itself yet (that is the design's
+phase 3), so the map is the only wiki pointer to it for now.
+
+## [2026-09-11] ingest | Dispatch design phase 2: the node needs only the control plane
+
+Re-ingested `docs/dispatch-design.md` after its phase 2 shipped: every hand-out now carries the run's
+execution spec (read from the catalog before the hand-out is journaled, so a failed read consumes no
+attempt), the snapshotted YAML is fetched by hash, the watermark table and landing-reset verdict are
+resolved by a context call the node makes after parsing the document, and the live trace streams in
+batches, all over the node protocol, so `SqlFlow.Node` no longer references the catalog and
+`sqlflow worker` no longer takes `--db`. Updated the drift map's phased-design section (phases 1 and
+2 shipped, phase 3 owed, three decisions changed during implementation, the third being that the
+lineage facts are resolved on a separate call rather than at hand-out time, because only the parsed
+document says whether the flow participates). The reference pages that carry the shipped behaviour
+(`cli/worker.md` rewritten, `concepts/control-plane.md`, `concepts/architecture-and-execution.md`,
+`concepts/environment-variables.md`, `concepts/shadow-catalog.md`, `guides/deployment.md`) were
+updated in the same change and the manifest rebuilt. The wiki decision page still waits for phase 3.
+
+## [2026-09-11] ingest | Dispatch design phase 3 and the decision page
+
+Ingested the completed `docs/dispatch-design.md` after phase 3 shipped: the KEDA scaler reads a
+pool's replica target from the control plane's own `GET /api/v1/node/scale-target` endpoint with the
+node token, computed from the journal on every replica by loading the queued and running rows into
+the dispatcher's own in-memory state (so the gates are evaluated by one code path) and dividing the
+eligible backlog by the slot count the nodes report, which removed the mssql scaler, its Go-driver
+catalog secret and the `maxConcurrentRunsPerReplica` parameter; the Nodes page gained the
+dispatcher's panel. Wrote the decision page
+[decisions/dispatch-in-control-plane.md](decisions/dispatch-in-control-plane.md) (the why, the four
+rejected alternatives, the four decisions that changed while it shipped, what generalizes), indexed
+it, and updated the drift map's phased-design section to point at it. Reference pages
+(`concepts/control-plane.md`, `guides/deployment.md`, `cli/worker.md`) updated in the same change;
+manifest rebuilt.
+
+## [2026-09-11] lint | An unquoted null keyword crash-looped the MCP server
+
+The `40312a0` MCP image built cleanly and then exited at startup: `decisions/string-first-landing.md`
+listed the keyword `null` unquoted, YAML read it as a null, `build_manifest.py` wrote it into the
+manifest, and `DocMeta` in `tools/sqlflow-mcp/src/docs.rs` refuses a non-string keyword. Quoted it and
+rebuilt the manifest. So the next one fails before a deploy rather than in a container: the manifest
+builder now refuses to write an entry carrying a non-string value, `lint_wiki.py` reports non-string
+frontmatter scalars and list entries, and `tools/sqlflow-mcp/build.rs` validates every entry's
+field types so a bad manifest fails `cargo build` and therefore the image build.
+
 ## [2026-09-13] ingest | PowerBI model-entity resolution
 
 Ingested the model-entity resolution work landed in `tools/pbix-extract` and `SqlFlow.Lineage`,

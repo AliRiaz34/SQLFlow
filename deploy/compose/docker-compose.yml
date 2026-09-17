@@ -125,8 +125,15 @@ services:
     depends_on:
       mssql:
         condition: service_healthy
+      controlplane:
+        condition: service_healthy
     environment:
-      SQLFLOW_CATALOG_DB: "Server=mssql;Database=SqlFlowCatalog;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
+      # The node polls the control plane's dispatcher for work over the node protocol, authenticated with a
+      # personal access token minted with the 'node' scope (an admin: POST /api/v1/me/tokens with scopes ["node"]).
+      SQLFLOW_URL: http://controlplane:8080
+      SQLFLOW_TOKEN: ${SQLFLOW_NODE_TOKEN:?mint a node-scoped token from the control plane and set SQLFLOW_NODE_TOKEN in .env}
+      # No catalog connection: the run's definition, its YAML, its lineage context and its trace all travel over
+      # the node protocol. The node reaches only the control plane and the data its flows touch.
       SQLFlowSinkConStr: "Server=mssql;Database=SqlFlowDemo;User ID=sa;Password=${MSSQL_SA_PASSWORD};TrustServerCertificate=True"
       # Resolves ${env:SQLFLOW_DEMO_DB}, the reference samples/lineage-demo's flows declare, so a compute
       # task (prepare_query/run_query, PowerAI auto-run) can actually reach the estate synced from it.

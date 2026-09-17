@@ -57,7 +57,7 @@ public sealed class ScheduleFireTests
         try
         {
             await using var db = CatalogDatabase.Create(cs);
-            // The Baatbooking shape: copy (wave 1) -> pre load (wave 2) -> ods merge (wave 3).
+            // The Boatbooking shape: copy (wave 1) -> pre load (wave 2) -> ods merge (wave 3).
             await SeedPipelineAsync(db, repoId, copy, wave: 0, batch: "BB");
             await SeedPipelineAsync(db, repoId, pre, wave: 1, batch: "BB");
             await SeedPipelineAsync(db, repoId, ods, wave: 2, batch: "BB");
@@ -155,7 +155,7 @@ public sealed class ScheduleFireTests
         var cs = CatalogTestDb.Require();
         await CatalogDatabase.MigrateAsync(cs);
         var (repoId, suffix) = NewRepo();
-        // The Baatbooking shape by kind: an integration copy root, a file ingestion, and a silver (relational) load.
+        // The Boatbooking shape by kind: an integration copy root, a file ingestion, and a silver (relational) load.
         string copy = $"cpy_{suffix}", file = $"file_{suffix}", silver = $"ing_{suffix}";
 
         try
@@ -225,8 +225,8 @@ public sealed class ScheduleFireTests
     /// the control plane's in-process signalling, which needs a hosted worker.</summary>
     private sealed class RecordingDispatcher : IRunDispatcher
     {
-        public Task<Guid> EnqueueAsync(CatalogDbContext catalog, RunEnqueueRequest request, CancellationToken ct = default)
-            => RunQueueStore.EnqueueAsync(catalog, request, DateTime.UtcNow, ct);
+        public async Task<Guid> EnqueueAsync(CatalogDbContext catalog, RunEnqueueRequest request, CancellationToken ct = default)
+            => (await RunQueueStore.EnqueueAsync(catalog, request, DateTime.UtcNow, ct)).RunId;
 
         public Task<RunGroupEnqueueResult> EnqueueGroupAsync(
             CatalogDbContext catalog, RunGroupEnqueueRequest request, CancellationToken ct = default)

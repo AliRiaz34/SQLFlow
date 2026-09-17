@@ -72,6 +72,10 @@ param adminPassword string
 @description('Token for private git remotes: managed sync on the control plane fetches with it, workers materialize with it. Leave empty when every registered repo is public.')
 param gitToken string = ''
 
+@description('A personal access token minted with the node scope, which the worker pool presents to the control plane\'s dispatcher. The control plane must be running to mint one (an admin: POST /api/v1/me/tokens with scopes ["node"]), so a first deployment leaves this empty and re-runs with it once the control plane is up; until then the worker deploys without a credential and takes no work.')
+@secure()
+param nodeToken string = ''
+
 @description('Username paired with gitToken when the host requires one: a Bitbucket app password takes the account username, a Bitbucket repository access token takes x-token-auth; GitHub ignores it. Empty sends the token alone.')
 param gitUsername string = ''
 
@@ -87,7 +91,7 @@ param entraAppDisplayName string = 'SQLFlow'
 @description('Stable unique name (Graph identity key) for that registration, so redeploys update the same app. Lowercase, no spaces.')
 param entraAppUniqueName string = 'sqlflow'
 
-@description('PROVISIONED app mode only (provisionEntraApp on): further Entra tenant (directory) ids, beyond this deployment\'s own home tenant (always trusted), whose users may also sign in. A non-empty list makes the app registration multi-tenant automatically; each named tenant\'s own admin must still consent to the app once and then assign the SqlFlow.User role to their own users/groups (this template has no directory access into a tenant it does not own) — see the entraForeignTenantReminder output for that step. Empty keeps the app single-tenant.')
+@description('PROVISIONED app mode only (provisionEntraApp on): further Entra tenant (directory) ids, beyond this deployment\'s own home tenant (always trusted), whose users may also sign in. A non-empty list makes the app registration multi-tenant automatically; each named tenant\'s own admin must still consent to the app once and then assign the SqlFlow.User role to their own users/groups (this template has no directory access into a tenant it does not own); see the entraForeignTenantReminder output for that step. Empty keeps the app single-tenant.')
 param azureAdAdditionalAllowedTenantIds array = []
 
 @description('EXTERNAL app mode only (provisionEntraApp off): Microsoft Entra tenant (directory) ids allowed for GUI single sign-on, against an app registration you manage yourself. Set together with azureAdClientId to offer "Sign in with Microsoft"; leave empty for local sign-in only. Register the GUI origin (the guiUrl output) as a redirect URI on that SPA registration, and make it multi-tenant yourself if this list has more than one entry.')
@@ -182,8 +186,9 @@ param workerMaxReplicas int = 10
 @minValue(1)
 param controlPlaneMinReplicas int = 1
 
-@description('Maximum control plane replicas for ingress autoscale.')
-param controlPlaneMaxReplicas int = 3
+@description('Maximum control plane replicas. Keep at 1: the run queue is owned by exactly one replica (the dispatch lease), so an extra replica adds no dispatch capacity and refuses every node call that lands on it (503, retried by the node), which only slows hand-outs. Raise it only once passive replicas forward node calls to the owner.')
+@minValue(1)
+param controlPlaneMaxReplicas int = 1
 
 @description('Name of the Container App running the control plane.')
 param controlPlaneName string = 'sqlflow-control-plane'
@@ -236,6 +241,7 @@ var dwhConnectionSecretName = 'sqlflow-dwh-db'
 var jwtSigningKeySecretName = 'sqlflow-jwt-signing-key'
 var adminPasswordSecretName = 'sqlflow-admin-password'
 var gitTokenSecretName = 'sqlflow-git-token'
+var nodeTokenSecretName = 'sqlflow-node-token'
 var slackAppTokenSecretName = 'sqlflow-slack-app-token'
 var slackBotTokenSecretName = 'sqlflow-slack-bot-token'
 var slackBotSqlflowTokenSecretName = 'sqlflow-slack-bot-access-token'
@@ -250,7 +256,7 @@ var pbixExtractorEnabled = !empty(pbixExtractorImage) && !empty(pbixExtractorKey
 var pbixExtractorKeySecretName = 'sqlflow-pbix-extractor-key'
 // The GUI chat assistant rides on the same building blocks (a Foundry model + the MCP server) and
 // needs nothing else, so it lights up automatically once both exist. It shares the assistant core
-// with the Slack bot but not its identity: every chat run carries the signed-in user's own bearer.
+// with the Slack bot but not its identity: every chat run carries a short-lived token delegated from the signed-in user.
 var chatAssistantEnabled = mcpEnabled && !empty(aiFoundryName) && !empty(aiFoundryModelName)
 var slackBotUsesApiKey = slackBotProvider != 'AzureFoundry'
 var slackBotProviderReady = slackBotUsesApiKey
@@ -375,19 +381,6 @@ var catalogConnectionString = 'Server=tcp:${catalogServerAddress};Initial Catalo
 var preConnectionString = 'Server=tcp:${catalogServerAddress};Initial Catalog=${preDatabaseName};User ID=${sqlAdminLogin};Password=${quotedSqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30'
 var dwhConnectionString = 'Server=tcp:${catalogServerAddress};Initial Catalog=${dwhDatabaseName};User ID=${sqlAdminLogin};Password=${quotedSqlAdminPassword};Encrypt=True;TrustServerCertificate=False;Connection Timeout=30'
 
-// A SECOND connection string, for the KEDA scale rule only. The scaler is go-mssqldb, not .NET SqlClient: it
-// does not strip the single quotes ADO.NET puts around the password, so reusing catalogConnectionString makes
-// the scaler authenticate with a quoted password and fail (KEDAScalerFailed: Login failed). This is the
-// go-mssqldb URL form with the password percent-encoded, so the worker scales on queue depth. The host:port
-// is the catalog address with its comma turned into a colon.
-var catalogHostPort = replace(catalogServerAddress, ',', ':')
-// Percent-encode the password for the URL userinfo. '%' is escaped first so the later escapes are not
-// re-encoded; the set covers base64 output (+ / =) and the URL sub-delimiters a password can realistically
-// carry. A password using characters outside this set needs a pre-encoded scalerConnectionSecret instead.
-var scalerPasswordEncoded = replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(sqlAdminPassword, '%', '%25'), '+', '%2B'), '/', '%2F'), '=', '%3D'), ' ', '%20'), '@', '%40'), ':', '%3A'), '?', '%3F'), '#', '%23'), '&', '%26'), ';', '%3B')
-var catalogScalerUrl = 'sqlserver://${sqlAdminLogin}:${scalerPasswordEncoded}@${catalogHostPort}?database=${catalogDatabaseName}&encrypt=true&TrustServerCertificate=false'
-var scalerConnectionSecretName = 'sqlflow-catalog-db-scaler'
-
 resource catalogDbSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: catalogConnectionSecretName
@@ -409,14 +402,6 @@ resource dwhDbSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   name: dwhConnectionSecretName
   properties: {
     value: dwhConnectionString
-  }
-}
-
-resource catalogScalerSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
-  parent: keyVault
-  name: scalerConnectionSecretName
-  properties: {
-    value: catalogScalerUrl
   }
 }
 
@@ -449,6 +434,14 @@ resource pbixExtractorKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' =
   name: pbixExtractorKeySecretName
   properties: {
     value: pbixExtractorKey
+  }
+}
+
+resource nodeTokenSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!empty(nodeToken)) {
+  parent: keyVault
+  name: nodeTokenSecretName
+  properties: {
+    value: nodeToken
   }
 }
 
@@ -584,22 +577,22 @@ module worker 'worker.bicep' = {
     managedEnvironmentId: managedEnvironment.id
     image: workerImage
     keyVaultName: keyVault.name
-    catalogConnectionSecretName: catalogConnectionSecretName
     pool: workerPool
+    controlPlaneUrl: 'https://${controlPlaneFqdn}'
+    nodeTokenSecretName: empty(nodeToken) ? '' : nodeTokenSecretName
     gitTokenSecretName: empty(gitToken) ? '' : gitTokenSecretName
     gitUsername: gitUsername
     flowEnv: concat(builtInFlowEnv, workerFlowEnv)
-    scalerConnectionSecretName: scalerConnectionSecretName
     acrName: acrName
     acrLoginServer: acrLoginServer
     maxReplicas: workerMaxReplicas
   }
   dependsOn: [
     catalogDbSecret
-    catalogScalerSecret
     preDbSecret
     dwhDbSecret
     gitTokenSecret
+    nodeTokenSecret
     catalogDatabase
     preDatabase
     dwhDatabase

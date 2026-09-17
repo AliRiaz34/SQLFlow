@@ -10,7 +10,7 @@ import {
   type ThreadMessageLike,
 } from "@assistant-ui/react";
 import { formatDistanceToNow } from "date-fns";
-import { Bot, Check, MessageSquarePlus, Pencil, Trash2, X } from "lucide-react";
+import { Bot, Check, Eraser, MessageSquarePlus, Pencil, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { Thread } from "@/components/assistant-ui/thread";
 import { Button } from "@/components/ui/button";
@@ -36,8 +36,9 @@ import {
 /**
  * The SQLFlow assistant chat (DESIGN.md 6: a full-bleed editor surface like the lineage graph):
  * a conversation rail on the left and a ChatGPT-style thread on the right. Answers stream over
- * the authenticated SSE channel; every agent run carries the signed-in user's own bearer to the
- * SQLFlow MCP server, so the assistant sees exactly what this user may see. Conversations persist
+ * the authenticated SSE channel; every agent run carries a short-lived token the control plane
+ * delegates from the signed-in user, so the assistant sees at most what this user may see and the
+ * model host never holds the user's own session. Conversations persist
  * in the catalog and re-open with their full transcript, including tool activity.
  */
 export default function ChatPage() {
@@ -229,6 +230,7 @@ function ConversationRail({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleting, setDeleting] = useState<ChatConversation | null>(null);
+  const [purging, setPurging] = useState(false);
 
   const rename = useMutation({
     mutationFn: ({ id, title }: { id: string; title: string }) => chatApi.renameConversation(id, title),
@@ -256,18 +258,60 @@ function ConversationRail({
     }),
   });
 
+  // The escape hatch for a rail grown to hundreds of entries: one call empties the whole history
+  // instead of a confirm dialog per conversation. The thread resets to a fresh chat, because
+  // whatever it had open no longer exists.
+  const purge = useMutation({
+    mutationFn: () => chatApi.deleteAllConversations(),
+    onSuccess: (result) => {
+      setPurging(false);
+      onNew();
+      void queryClient.invalidateQueries({ queryKey: ["chat", "conversations"] });
+      void queryClient.invalidateQueries({ queryKey: ["chat", "messages"] });
+      toast.success(
+        result.conversations === 1
+          ? "Deleted 1 conversation"
+          : `Deleted ${result.conversations} conversations`,
+        { description: `${result.messages} message${result.messages === 1 ? "" : "s"} removed.` },
+      );
+    },
+    onError: (error) => toast.error("Could not delete the conversations", {
+      description: isApiError(error) ? error.message : undefined,
+    }),
+  });
+
+  const count = conversations.data?.length ?? 0;
+
   return (
     <div className="flex w-60 shrink-0 flex-col border-r border-border bg-side-bar/50">
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-border pr-1 pl-3">
         <span className="text-[11px] font-medium tracking-wider text-muted-foreground uppercase">Conversations</span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="xs" aria-label="New chat" onClick={onNew} data-testid="chat-new">
-              <MessageSquarePlus />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>New chat</TooltipContent>
-        </Tooltip>
+        <div className="flex items-center">
+          {count > 0 && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  aria-label="Delete all conversations"
+                  onClick={() => setPurging(true)}
+                  data-testid="chat-delete-all"
+                >
+                  <Eraser />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Delete all conversations</TooltipContent>
+            </Tooltip>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="xs" aria-label="New chat" onClick={onNew} data-testid="chat-new">
+                <MessageSquarePlus />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>New chat</TooltipContent>
+          </Tooltip>
+        </div>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto py-1">
         {conversations.isLoading && (
@@ -398,6 +442,19 @@ function ConversationRail({
           }
         }}
         onClose={() => setDeleting(null)}
+      />
+      <ConfirmDialog
+        open={purging}
+        title="Delete all conversations"
+        message={
+          `Delete ${count === 1 ? "your 1 conversation" : `all ${count} of your conversations`} `
+          + "and every transcript in them? This cannot be undone."
+        }
+        confirmLabel="Delete all"
+        danger
+        busy={purge.isPending}
+        onConfirm={() => purge.mutate()}
+        onClose={() => setPurging(false)}
       />
     </div>
   );

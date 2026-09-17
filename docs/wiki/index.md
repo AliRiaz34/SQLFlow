@@ -96,6 +96,9 @@ to narrow a search to one kind of page.
 - [A report visual's query is translated into T-SQL at sync, or refused with a reason](decisions/visual-sql-translation.md) -
   why the output is T-SQL only, why a stated Power Query and DAX subset refuses rather than approximates, why it
   runs in the graph builder, and why the translation is served as a dashboard match's SQL.
+- [The run queue lives in the control plane](decisions/dispatch-in-control-plane.md) - why the
+  queue left SQL Server for an in-memory dispatcher journaled to the catalog, why a node speaks only
+  to the control plane, what was rejected, and the decisions that changed while it shipped.
 
 ### Incidents
 

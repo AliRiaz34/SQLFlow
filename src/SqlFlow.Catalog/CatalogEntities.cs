@@ -408,7 +408,7 @@ public class CatalogRunGroup
     public string Mode { get; set; } = string.Empty;
 
     /// <summary>What the set was expanded from: the anchor flow name for a Node run, the batch label for a Batch
-    /// run. Kept for display and audit ("Node run of Orders", "Batch run of Baatbooking").</summary>
+    /// run. Kept for display and audit ("Node run of Orders", "Batch run of Boatbooking").</summary>
     public string Anchor { get; set; } = string.Empty;
 
     /// <summary>How many flow members were enqueued in this group.</summary>
@@ -1900,9 +1900,15 @@ public class CatalogNode
     /// <summary>How many runs this node was executing at its last heartbeat. The autoscaler's scale-in signal: the
     /// replica target counts nodes that are busy (this &gt; 0 and recently heartbeated) alongside the queued
     /// backlog, so occupied workers hold their replicas while idle ones remain the reclaimable surplus. Refreshed
-    /// on every heartbeat; a stale row is excluded by the same liveness window the orphan reaper uses, so a dead
-    /// node's last busy count can never pin a replica.</summary>
+    /// on every heartbeat; a stale row is excluded by the liveness window, so a dead node's last busy count can
+    /// never pin a replica.</summary>
     public int BusyRuns { get; set; }
+
+    /// <summary>How many runs this node executes at once, as it reported on its last heartbeat. The replica target
+    /// divides a pool's eligible backlog by this, so the fleet is sized by what its nodes actually offer rather
+    /// than by a deployment parameter that had to be kept in step with the node's constant by hand. Zero on a row
+    /// written before nodes reported it; the resolver then falls back to the node runtime's default.</summary>
+    public int RunSlots { get; set; }
 
     /// <summary>When set, an operator has asked this node to restart. The worker observes it on its heartbeat cadence,
     /// stops claiming, drains its in-flight work, and exits, after which the orchestrator (Container Apps / K8s)
@@ -1911,6 +1917,31 @@ public class CatalogNode
     /// cleared because the recreated replica comes up either under a new node identity, whose row is fresh, or under
     /// the same identity but with a later start time that makes the old request inert.</summary>
     public DateTime? RestartRequestedUtc { get; set; }
+}
+
+/// <summary>
+/// The single dispatch ownership lease: which control-plane replica runs the in-memory dispatcher right now. One
+/// row per lease name (only <c>dispatch</c> exists today). <see cref="Owner"/> identifies the process holding it,
+/// <see cref="ExpiresUtc"/> is when the hold lapses unless renewed, and <see cref="Epoch"/> advances on every
+/// takeover so a log line can tell one ownership period from the next. Acquired and renewed by one conditional
+/// update (see <c>DispatchLeaseStore</c>), never by a locking hint.
+/// </summary>
+public class CatalogDispatchLease
+{
+    /// <summary>The lease name; <c>dispatch</c> is the dispatcher's.</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>The process holding the lease (host name, process id and a random suffix).</summary>
+    public string Owner { get; set; } = string.Empty;
+
+    /// <summary>Advances on every change of owner; a renewal by the same owner keeps it.</summary>
+    public long Epoch { get; set; }
+
+    /// <summary>When the current owner first took the lease.</summary>
+    public DateTime AcquiredUtc { get; set; }
+
+    /// <summary>When the hold lapses unless renewed; a successor acquires at or after this moment.</summary>
+    public DateTime ExpiresUtc { get; set; }
 }
 
 /// <summary>

@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+﻿import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   Bar,
@@ -12,7 +12,7 @@ import {
   YAxis,
   type TooltipProps,
 } from "recharts";
-import { CircleCheck, CircleSlash } from "lucide-react";
+import { CircleCheck, CircleSlash, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -21,7 +21,9 @@ import { dataStreamApi } from "../../api/endpoints";
 import type { StreamPoint, StreamSignal } from "../../api/types";
 import { CorrelationError } from "../../components/CorrelationError";
 import { EmptyState } from "../../components/EmptyState";
-import { useChartInk, detectorLabels, detectorMethods, formatRows, formatDays, whatIsWrong } from "./streamPresentation";
+import { LineageJumpButton } from "../../components/LineageJumpButton";
+import { RelativeTime } from "../../components/RelativeTime";
+import { useChartInk, detectorLabels, detectorMethods, evidence, finding, formatRows, formatDays } from "./streamPresentation";
 import { StreamStatusBadge } from "./StreamStatusBadge";
 
 /** The chart's hover readout: what arrived, what was expected, and (when flagged) why. */
@@ -157,12 +159,28 @@ export function StreamDetailSheet({
               <div className="flex flex-wrap items-center gap-2">
                 <StreamStatusBadge status={stream.status} severity={stream.severity} />
                 <span className="text-[11px] text-muted-foreground">
-                  {whatIsWrong(stream)}
+                  {finding(stream)}
                   {" - "}
-                  {stream.agreeingDetectors} of {stream.signals.length} detectors agree
-                  {stream.agreeingDetectors > 0 && `, confidence ${(stream.confidence * 100).toFixed(0)}%`}
+                  {evidence(stream)}
                 </span>
+                {/* The verdict is recomputed from run history on every request, so after landing data by hand
+                    this is the one control that answers "did that fix it" without waiting for the poll. */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-auto"
+                  onClick={() => void query.refetch()}
+                  disabled={query.isFetching}
+                  aria-label="Recheck this stream"
+                  data-testid="datastream-detail-recheck"
+                >
+                  <RefreshCw className={query.isFetching ? "animate-spin" : undefined} />
+                  Recheck
+                </Button>
               </div>
+              <p className="text-[11px] text-muted-foreground">
+                Checked <RelativeTime value={new Date(query.dataUpdatedAt).toISOString()} absolute={false} />
+              </p>
               <p className="text-[13px] leading-5">{stream.summary}</p>
 
               {/* The learned pattern: the reference the verdict above is stated against. Without it,
@@ -172,6 +190,32 @@ export function StreamDetailSheet({
                   Learned pattern
                 </div>
                 <p className="mt-1 text-[13px] leading-5">{stream.profile.pattern.description}</p>
+                {/* The recurring delivery, called out rather than left inside the sentence, because the date
+                    the next one is due is the one thing on this panel an operator can act on: it is when to
+                    come back and check that the big one arrived. */}
+                {stream.profile.pattern.cycle !== null && (
+                  <div className="mt-2 grid grid-cols-2 gap-2 border-t border-border pt-2 sm:grid-cols-4">
+                    <Stat
+                      label="Cycle"
+                      value={stream.profile.pattern.cycle.monthly
+                        ? "monthly"
+                        : `every ${stream.profile.pattern.cycle.periodDays}d`}
+                    />
+                    <Stat
+                      label={stream.profile.pattern.cycle.heavier ? "Cycle day" : "Light day"}
+                      value={`${formatRows(stream.profile.pattern.cycle.cycleRows)} vs ${
+                        formatRows(stream.profile.pattern.cycle.ordinaryRows)}`}
+                    />
+                    <Stat
+                      label="Last one"
+                      value={stream.profile.pattern.cycle.lastOccurrenceUtc?.slice(0, 10) ?? "-"}
+                    />
+                    <Stat
+                      label="Next due"
+                      value={stream.profile.pattern.cycle.nextExpectedUtc?.slice(0, 10) ?? "-"}
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3 rounded-lg border border-border p-3 sm:grid-cols-3">
@@ -280,13 +324,29 @@ export function StreamDetailSheet({
                 {stream.signals.map((signal) => <SignalRow key={signal.detector} signal={signal} />)}
               </div>
 
-              <div className="flex gap-2">
+              {/* A stopped stream is rarely about this flow: the upstream stopped producing, or something
+                  downstream is already reading a stale table. So the graph of the object it writes is the
+                  next step before acting, and it is offered here rather than left to be found by name. */}
+              <div className="flex flex-wrap gap-2">
                 <Button variant="outline" size="sm" onClick={() => navigate(`/pipelines/${stream.pipelineId}`)}>
                   Open flow
                 </Button>
                 <Button variant="outline" size="sm" onClick={() => navigate(`/runs?pipelineId=${stream.pipelineId}`)}>
                   Runs
                 </Button>
+                {stream.targetObjectKey !== null && (
+                  <LineageJumpButton
+                    variant="outlined"
+                    fullLabel
+                    target={{
+                      kind: "object",
+                      objectKey: stream.targetObjectKey,
+                      objectKind: stream.targetObjectKind ?? "",
+                      label: stream.targetObject ?? stream.flowName,
+                      sublabel: "What feeds this table, and what reads it",
+                    }}
+                  />
+                )}
               </div>
             </>
           )}

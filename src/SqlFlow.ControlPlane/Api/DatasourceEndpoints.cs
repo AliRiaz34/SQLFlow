@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using SqlFlow.Catalog;
 using SqlFlow.ControlPlane.Background;
 using SqlFlow.ControlPlane.Configuration;
+using SqlFlow.ControlPlane.Security;
 using SqlFlow.Core;
 using SqlFlow.Core.Comparison;
 using SqlFlow.Core.Compute;
@@ -113,8 +114,10 @@ public static class DatasourceEndpoints
     {
         ArgumentNullException.ThrowIfNull(group);
 
+        // Open to an assistant run: every compute operation only reads (introspection, DMV probes, the data-ops
+        // checks), and runQuery cannot be queued here at all, only through a redeemed plan.
         group.MapPost("/datasources/tasks", TriggerTaskAsync)
-            .WithTags("Datasources").WithName("TriggerComputeTask");
+            .WithTags("Datasources").WithName("TriggerComputeTask").AllowAssistantWrite();
         group.MapPost("/datasources/tasks/{taskId:guid}/cancel", CancelTaskAsync)
             .WithTags("Datasources").WithName("CancelComputeTask");
 
@@ -462,13 +465,6 @@ public static class DatasourceEndpoints
                 return Problem($"No compute task '{taskId}'.", StatusCodes.Status404NotFound, "Not found");
             }
 
-            var now = clock.GetUtcNow().UtcDateTime;
-            if (IsStale(task, now))
-            {
-                await ComputeTaskStore.ExpireAsync(db, now, ct).ConfigureAwait(false);
-                continue; // reload the (now terminal) row
-            }
-
             if (RunStatuses.IsTerminal(task.Status) || clock.GetUtcNow() >= deadline)
             {
                 return TypedResults.Ok(ToDetailDto(task));
@@ -482,9 +478,6 @@ public static class DatasourceEndpoints
         CatalogDbContext db, TimeProvider clock, int? page, int? pageSize, string? status, string? reference,
         string? operation, CancellationToken ct)
     {
-        // The list is the operator's task history; sweep stale tasks first so it never shows a zombie.
-        await ComputeTaskStore.ExpireAsync(db, clock.GetUtcNow().UtcDateTime, ct).ConfigureAwait(false);
-
         var (p, size) = PageRequest.Normalize(page, pageSize);
         var query = db.ComputeTasks.AsNoTracking();
         if (!string.IsNullOrWhiteSpace(status))
@@ -543,11 +536,6 @@ public static class DatasourceEndpoints
                 StatusCodes.Status409Conflict, "Conflict"),
         };
     }
-
-    private static bool IsStale(CatalogComputeTask task, DateTime nowUtc)
-        => (task.Status == RunStatuses.Queued && task.EnqueuedUtc < nowUtc - ComputeTaskStore.QueuedExpiry)
-           || (task.Status == RunStatuses.Running && task.StartUtc is { } start
-               && start < nowUtc - ComputeTaskStore.RunningExpiry);
 
     private static ComputeTaskDto ToDetailDto(CatalogComputeTask task)
     {

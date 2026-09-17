@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.44.1.10279",
-      "templateHash": "10734625238410390262"
+      "version": "0.47.16.16243",
+      "templateHash": "3671457662106783042"
     }
   },
   "parameters": {
@@ -103,6 +103,13 @@
         "description": "Token for private git remotes: managed sync on the control plane fetches with it, workers materialize with it. Leave empty when every registered repo is public."
       }
     },
+    "nodeToken": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "A personal access token minted with the node scope, which the worker pool presents to the control plane's dispatcher. The control plane must be running to mint one (an admin: POST /api/v1/me/tokens with scopes [\"node\"]), so a first deployment leaves this empty and re-runs with it once the control plane is up; until then the worker deploys without a credential and takes no work."
+      }
+    },
     "gitUsername": {
       "type": "string",
       "defaultValue": "",
@@ -142,7 +149,7 @@
       "type": "array",
       "defaultValue": [],
       "metadata": {
-        "description": "PROVISIONED app mode only (provisionEntraApp on): further Entra tenant (directory) ids, beyond this deployment's own home tenant (always trusted), whose users may also sign in. A non-empty list makes the app registration multi-tenant automatically; each named tenant's own admin must still consent to the app once and then assign the SqlFlow.User role to their own users/groups (this template has no directory access into a tenant it does not own) — see the entraForeignTenantReminder output for that step. Empty keeps the app single-tenant."
+        "description": "PROVISIONED app mode only (provisionEntraApp on): further Entra tenant (directory) ids, beyond this deployment's own home tenant (always trusted), whose users may also sign in. A non-empty list makes the app registration multi-tenant automatically; each named tenant's own admin must still consent to the app once and then assign the SqlFlow.User role to their own users/groups (this template has no directory access into a tenant it does not own); see the entraForeignTenantReminder output for that step. Empty keeps the app single-tenant."
       }
     },
     "azureAdAllowedTenantIds": {
@@ -350,9 +357,10 @@
     },
     "controlPlaneMaxReplicas": {
       "type": "int",
-      "defaultValue": 3,
+      "defaultValue": 1,
+      "minValue": 1,
       "metadata": {
-        "description": "Maximum control plane replicas for ingress autoscale."
+        "description": "Maximum control plane replicas. Keep at 1: the run queue is owned by exactly one replica (the dispatch lease), so an extra replica adds no dispatch capacity and refuses every node call that lands on it (503, retried by the node), which only slows hand-outs. Raise it only once passive replicas forward node calls to the owner."
       }
     },
     "controlPlaneName": {
@@ -455,6 +463,7 @@
     "jwtSigningKeySecretName": "sqlflow-jwt-signing-key",
     "adminPasswordSecretName": "sqlflow-admin-password",
     "gitTokenSecretName": "sqlflow-git-token",
+    "nodeTokenSecretName": "sqlflow-node-token",
     "slackAppTokenSecretName": "sqlflow-slack-app-token",
     "slackBotTokenSecretName": "sqlflow-slack-bot-token",
     "slackBotSqlflowTokenSecretName": "sqlflow-slack-bot-access-token",
@@ -467,8 +476,6 @@
     "slackBotProviderReady": "[if(variables('slackBotUsesApiKey'), not(empty(parameters('slackBotModelApiKey'))), and(not(empty(parameters('aiFoundryName'))), not(empty(parameters('aiFoundryModelName')))))]",
     "slackBotEnabled": "[and(and(and(and(and(variables('mcpEnabled'), not(empty(parameters('slackBotImage')))), not(empty(parameters('slackAppToken')))), not(empty(parameters('slackBotToken')))), not(empty(parameters('slackBotSqlflowToken')))), variables('slackBotProviderReady'))]",
     "quotedSqlAdminPassword": "[format('''{0}''', replace(parameters('sqlAdminPassword'), '''', ''''''))]",
-    "scalerPasswordEncoded": "[replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(parameters('sqlAdminPassword'), '%', '%25'), '+', '%2B'), '/', '%2F'), '=', '%3D'), ' ', '%20'), '@', '%40'), ':', '%3A'), '?', '%3F'), '#', '%23'), '&', '%26'), ';', '%3B')]",
-    "scalerConnectionSecretName": "sqlflow-catalog-db-scaler",
     "entraSignInAudience": "[if(empty(parameters('azureAdAdditionalAllowedTenantIds')), 'AzureADMyOrg', 'AzureADMultipleOrgs')]",
     "effectiveAzureAdAllowedTenantIds": "[if(parameters('provisionEntraApp'), concat(createArray(subscription().tenantId), parameters('azureAdAdditionalAllowedTenantIds')), parameters('azureAdAllowedTenantIds'))]",
     "builtInFlowEnv": [
@@ -637,18 +644,6 @@
     {
       "type": "Microsoft.KeyVault/vaults/secrets",
       "apiVersion": "2023-07-01",
-      "name": "[format('{0}/{1}', parameters('keyVaultName'), variables('scalerConnectionSecretName'))]",
-      "properties": {
-        "value": "[format('sqlserver://{0}:{1}@{2}?database={3}&encrypt=true&TrustServerCertificate=false', parameters('sqlAdminLogin'), variables('scalerPasswordEncoded'), replace(if(empty(parameters('existingSqlServer')), format('{0},1433', reference(resourceId('Microsoft.Sql/servers', parameters('sqlServerName')), '2023-08-01-preview').fullyQualifiedDomainName), if(contains(parameters('existingSqlServer'), ','), parameters('existingSqlServer'), format('{0},1433', parameters('existingSqlServer')))), ',', ':'), parameters('catalogDatabaseName'))]"
-      },
-      "dependsOn": [
-        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
-        "[resourceId('Microsoft.Sql/servers', parameters('sqlServerName'))]"
-      ]
-    },
-    {
-      "type": "Microsoft.KeyVault/vaults/secrets",
-      "apiVersion": "2023-07-01",
       "name": "[format('{0}/{1}', parameters('keyVaultName'), variables('jwtSigningKeySecretName'))]",
       "properties": {
         "value": "[parameters('jwtSigningKey')]"
@@ -687,6 +682,18 @@
       "name": "[format('{0}/{1}', parameters('keyVaultName'), variables('pbixExtractorKeySecretName'))]",
       "properties": {
         "value": "[parameters('pbixExtractorKey')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
+    },
+    {
+      "condition": "[not(empty(parameters('nodeToken')))]",
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2023-07-01",
+      "name": "[format('{0}/{1}', parameters('keyVaultName'), variables('nodeTokenSecretName'))]",
+      "properties": {
+        "value": "[parameters('nodeToken')]"
       },
       "dependsOn": [
         "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
@@ -774,8 +781,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "3564996844865373802"
+              "version": "0.47.16.16243",
+              "templateHash": "5973354447181753347"
             }
           },
           "parameters": {
@@ -1005,8 +1012,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "11911057375980182389"
+              "version": "0.47.16.16243",
+              "templateHash": "5418774345450537095"
             }
           },
           "parameters": {
@@ -1158,7 +1165,7 @@
               "type": "bool",
               "defaultValue": false,
               "metadata": {
-                "description": "Enable the GUI chat assistant (/api/v1/chat): the same assistant core as the Slack bot, streamed to the GUI, with every agent run forwarding the calling user's own bearer to the MCP server. Requires the Foundry and MCP parameters below; the key-based providers are configured out of band via ControlPlane__Assistant__* env vars instead."
+                "description": "Enable the GUI chat assistant (/api/v1/chat): the same assistant core as the Slack bot, streamed to the GUI, with every agent run presenting a short-lived token delegated from the calling user to the MCP server. Requires the Foundry and MCP parameters below; the key-based providers are configured out of band via ControlPlane__Assistant__* env vars instead."
               }
             },
             "assistantFoundryProjectEndpoint": {
@@ -1213,9 +1220,10 @@
             },
             "maxReplicas": {
               "type": "int",
-              "defaultValue": 3,
+              "defaultValue": 1,
+              "minValue": 1,
               "metadata": {
-                "description": "Maximum replicas for ingress autoscale."
+                "description": "Maximum replicas. Keep at 1: the run queue is owned by exactly one replica (the dispatch lease), so an extra replica adds no dispatch capacity and refuses every node call that lands on it (503, retried by the node), which only slows hand-outs. Raise it only once passive replicas forward node calls to the owner."
               }
             }
           },
@@ -1439,21 +1447,19 @@
           "keyVaultName": {
             "value": "[parameters('keyVaultName')]"
           },
-          "catalogConnectionSecretName": {
-            "value": "[variables('catalogConnectionSecretName')]"
-          },
           "pool": {
             "value": "[parameters('workerPool')]"
           },
+          "controlPlaneUrl": {
+            "value": "[format('https://{0}', format('{0}.{1}', parameters('controlPlaneName'), reference(resourceId('Microsoft.App/managedEnvironments', parameters('environmentName')), '2024-03-01').defaultDomain))]"
+          },
+          "nodeTokenSecretName": "[if(empty(parameters('nodeToken')), createObject('value', ''), createObject('value', variables('nodeTokenSecretName')))]",
           "gitTokenSecretName": "[if(empty(parameters('gitToken')), createObject('value', ''), createObject('value', variables('gitTokenSecretName')))]",
           "gitUsername": {
             "value": "[parameters('gitUsername')]"
           },
           "flowEnv": {
             "value": "[concat(variables('builtInFlowEnv'), parameters('workerFlowEnv'))]"
-          },
-          "scalerConnectionSecretName": {
-            "value": "[variables('scalerConnectionSecretName')]"
           },
           "acrName": {
             "value": "[parameters('acrName')]"
@@ -1471,8 +1477,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "3107366611164256148"
+              "version": "0.47.16.16243",
+              "templateHash": "3294140261266557084"
             }
           },
           "parameters": {
@@ -1505,21 +1511,27 @@
             "keyVaultName": {
               "type": "string",
               "metadata": {
-                "description": "Name of an existing Key Vault holding the catalog connection (and any flow) secrets."
+                "description": "Name of an existing Key Vault holding the node token (and any flow) secrets."
               }
             },
-            "catalogConnectionSecretName": {
+            "controlPlaneUrl": {
               "type": "string",
-              "defaultValue": "sqlflow-catalog-db",
               "metadata": {
-                "description": "Key Vault secret name for the catalog ADO.NET connection string."
+                "description": "The control plane base URL the node polls for work over the node protocol (https://<control-plane-fqdn>). Every call is outbound from the node, and the scale rule reads the pool's replica target from the same host."
+              }
+            },
+            "nodeTokenSecretName": {
+              "type": "string",
+              "defaultValue": "",
+              "metadata": {
+                "description": "Key Vault secret name holding a personal access token minted with the node scope, which the node presents to the control plane and the scale rule presents to the scale-target endpoint. Mint it after the control plane is up (an admin: POST /api/v1/me/tokens with scopes [\"node\"]) and store it under this name before deploying the worker; leave empty to deploy the worker without a credential (it then cannot take work, and it is not scaled, until one is added)."
               }
             },
             "pool": {
               "type": "string",
               "defaultValue": "",
               "metadata": {
-                "description": "The pool this deployment serves (single pool name, used for both SQLFLOW_WORKER_POOL and the scale query). Empty drains untargeted runs only."
+                "description": "The pool this deployment serves (single pool name, used for both SQLFLOW_WORKER_POOL and the scale-target query). Empty drains untargeted runs only."
               }
             },
             "gitTokenSecretName": {
@@ -1557,27 +1569,12 @@
                 "description": "Login server of a registry outside this resource group (grant AcrPull to the app identity yourself). Ignored when acrName is set."
               }
             },
-            "scalerConnectionSecretName": {
-              "type": "string",
-              "defaultValue": "",
-              "metadata": {
-                "description": "Key Vault secret name for a Go-driver-compatible catalog connection string used ONLY by the KEDA scale rule (a go-mssqldb URL, sqlserver://user:urlencoded-pw@host:port?database=...). The KEDA mssql scaler is not .NET SqlClient: it does not strip the single quotes an ADO.NET connection string puts around a password, so the .NET catalog connection cannot be reused for the scaler. Leave empty to reuse catalogConnectionSecretName for the scaler (correct only when that password needs no quoting)."
-              }
-            },
             "maxReplicas": {
               "type": "int",
               "defaultValue": 10,
               "minValue": 1,
               "metadata": {
-                "description": "Upper bound for queue-depth scale out."
-              }
-            },
-            "maxConcurrentRunsPerReplica": {
-              "type": "int",
-              "defaultValue": 4,
-              "minValue": 1,
-              "metadata": {
-                "description": "How many runs one replica executes at once. MUST match the node's own concurrency (SqlFlow.Node RunWorker.DefaultMaxConcurrentRuns, 4), because the scale rule divides queued work by it to size the fleet. Setting it higher than the node's value starves the queue; lower spawns replicas that find nothing left to claim."
+                "description": "Upper bound for scale out."
               }
             },
             "cpu": {
@@ -1618,19 +1615,12 @@
             "keyVaultSecretsUserRoleId": "4633458b-17de-408a-b874-0445c86b69e6",
             "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d",
             "vaultUri": "[format('https://{0}{1}/', parameters('keyVaultName'), environment().suffixes.keyvaultDns)]",
-            "baseSecrets": [
-              {
-                "name": "catalog-db",
-                "keyVaultUrl": "[format('{0}secrets/{1}', variables('vaultUri'), parameters('catalogConnectionSecretName'))]",
-                "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name')))]"
-              }
-            ],
+            "nodeTokenSecrets": "[if(empty(parameters('nodeTokenSecretName')), createArray(), createArray(createObject('name', 'node-token', 'keyVaultUrl', format('{0}secrets/{1}', variables('vaultUri'), parameters('nodeTokenSecretName')), 'identity', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))))))]",
             "gitTokenSecrets": "[if(empty(parameters('gitTokenSecretName')), createArray(), createArray(createObject('name', 'git-token', 'keyVaultUrl', format('{0}secrets/{1}', variables('vaultUri'), parameters('gitTokenSecretName')), 'identity', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))))))]",
-            "scalerSecrets": "[if(empty(parameters('scalerConnectionSecretName')), createArray(), createArray(createObject('name', 'catalog-scaler', 'keyVaultUrl', format('{0}secrets/{1}', variables('vaultUri'), parameters('scalerConnectionSecretName')), 'identity', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))))))]",
-            "scalerSecretRef": "[if(empty(parameters('scalerConnectionSecretName')), 'catalog-db', 'catalog-scaler')]",
+            "nodeTokenEnv": "[if(empty(parameters('nodeTokenSecretName')), createArray(), createArray(createObject('name', 'SQLFLOW_TOKEN', 'secretRef', 'node-token')))]",
             "gitTokenEnv": "[if(empty(parameters('gitTokenSecretName')), createArray(), createArray(createObject('name', 'SQLFLOW_GIT_TOKEN', 'secretRef', 'git-token')))]",
             "gitUsernameEnv": "[if(empty(parameters('gitUsername')), createArray(), createArray(createObject('name', 'SQLFLOW_GIT_USERNAME', 'value', parameters('gitUsername'))))]",
-            "queueDepthQuery": "[if(empty(parameters('pool')), format('SELECT (SELECT MAX(v) FROM (VALUES ((CAST(CEILING((SELECT COUNT(*) FROM [catalog].[Run] AS r WHERE r.[Status] = ''queued'' AND r.[TargetPool] IS NULL AND (r.[GroupId] IS NULL OR NOT EXISTS (SELECT 1 FROM [catalog].[Run] AS s WHERE s.[GroupId] = r.[GroupId] AND s.[GroupWave] < r.[GroupWave] AND s.[Status] IN (''queued'', ''running''))) AND (r.[GroupMaxConcurrency] IS NULL OR (SELECT COUNT(*) FROM [catalog].[Run] AS w WHERE w.[GroupId] = r.[GroupId] AND w.[Status] = ''running'') < r.[GroupMaxConcurrency]) AND NOT EXISTS (SELECT 1 FROM [catalog].[Run] AS p WHERE p.[PipelineId] = r.[PipelineId] AND p.[Status] = ''running'')) / {0}.0) AS int) + (SELECT COUNT(*) FROM [catalog].[Node] WHERE [BusyRuns] > 0 AND [LastSeenUtc] >= DATEADD(second, -60, SYSUTCDATETIME()) AND ([Pool] = N'''' OR [Pool] IS NULL)))), (ISNULL((SELECT [MinReplicas] FROM [catalog].[WorkerPool] WHERE [Pool] = N''''), 0)), (ISNULL((SELECT CASE WHEN [ManualUntilUtc] > SYSUTCDATETIME() THEN [ManualReplicas] ELSE 0 END FROM [catalog].[WorkerPool] WHERE [Pool] = N''''), 0))) AS t(v))', parameters('maxConcurrentRunsPerReplica')), format('SELECT (SELECT MAX(v) FROM (VALUES ((CAST(CEILING((SELECT COUNT(*) FROM [catalog].[Run] AS r WHERE r.[Status] = ''queued'' AND r.[TargetPool] = ''{0}'' AND (r.[GroupId] IS NULL OR NOT EXISTS (SELECT 1 FROM [catalog].[Run] AS s WHERE s.[GroupId] = r.[GroupId] AND s.[GroupWave] < r.[GroupWave] AND s.[Status] IN (''queued'', ''running''))) AND (r.[GroupMaxConcurrency] IS NULL OR (SELECT COUNT(*) FROM [catalog].[Run] AS w WHERE w.[GroupId] = r.[GroupId] AND w.[Status] = ''running'') < r.[GroupMaxConcurrency]) AND NOT EXISTS (SELECT 1 FROM [catalog].[Run] AS p WHERE p.[PipelineId] = r.[PipelineId] AND p.[Status] = ''running'')) / {1}.0) AS int) + (SELECT COUNT(*) FROM [catalog].[Node] WHERE [BusyRuns] > 0 AND [LastSeenUtc] >= DATEADD(second, -60, SYSUTCDATETIME()) AND [Pool] = N''{2}''))), (ISNULL((SELECT [MinReplicas] FROM [catalog].[WorkerPool] WHERE [Pool] = N''{3}''), 0)), (ISNULL((SELECT CASE WHEN [ManualUntilUtc] > SYSUTCDATETIME() THEN [ManualReplicas] ELSE 0 END FROM [catalog].[WorkerPool] WHERE [Pool] = N''{4}''), 0))) AS t(v))', parameters('pool'), parameters('maxConcurrentRunsPerReplica'), parameters('pool'), parameters('pool'), parameters('pool')))]"
+            "scaleRules": "[if(empty(parameters('nodeTokenSecretName')), createArray(), createArray(createObject('name', 'replica-target', 'custom', createObject('type', 'metrics-api', 'metadata', createObject('url', format('{0}/api/v1/node/scale-target?pool={1}', parameters('controlPlaneUrl'), uriComponent(parameters('pool'))), 'valueLocation', 'replicas', 'targetValue', '1', 'authMode', 'bearer'), 'auth', createArray(createObject('secretRef', 'node-token', 'triggerParameter', 'token'))))))]"
           },
           "resources": [
             {
@@ -1684,7 +1674,7 @@
                 "configuration": {
                   "activeRevisionsMode": "Single",
                   "registries": "[if(empty(if(not(empty(parameters('acrName'))), reference(resourceId('Microsoft.ContainerRegistry/registries', if(empty(parameters('acrName')), 'unused', parameters('acrName'))), '2023-07-01').loginServer, parameters('acrLoginServer'))), createArray(), createArray(createObject('server', if(not(empty(parameters('acrName'))), reference(resourceId('Microsoft.ContainerRegistry/registries', if(empty(parameters('acrName')), 'unused', parameters('acrName'))), '2023-07-01').loginServer, parameters('acrLoginServer')), 'identity', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))))))]",
-                  "secrets": "[concat(variables('baseSecrets'), variables('gitTokenSecrets'), variables('flowEnvSecrets'), variables('scalerSecrets'))]"
+                  "secrets": "[concat(variables('nodeTokenSecrets'), variables('gitTokenSecrets'), variables('flowEnvSecrets'))]"
                 },
                 "template": {
                   "terminationGracePeriodSeconds": 600,
@@ -1696,30 +1686,13 @@
                         "cpu": "[json(parameters('cpu'))]",
                         "memory": "[parameters('memory')]"
                       },
-                      "env": "[concat(createArray(createObject('name', 'SQLFLOW_CATALOG_DB', 'secretRef', 'catalog-db'), createObject('name', 'SQLFLOW_WORKER_POOL', 'value', parameters('pool')), createObject('name', 'SQLFLOW_AZURE_AUTH', 'value', 'mi'), createObject('name', 'AZURE_CLIENT_ID', 'value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))), '2023-01-31').clientId)), variables('gitTokenEnv'), variables('gitUsernameEnv'), variables('flowEnvVars'))]"
+                      "env": "[concat(createArray(createObject('name', 'SQLFLOW_URL', 'value', parameters('controlPlaneUrl')), createObject('name', 'SQLFLOW_WORKER_POOL', 'value', parameters('pool')), createObject('name', 'SQLFLOW_AZURE_AUTH', 'value', 'mi'), createObject('name', 'AZURE_CLIENT_ID', 'value', reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-id', parameters('name'))), '2023-01-31').clientId)), variables('nodeTokenEnv'), variables('gitTokenEnv'), variables('gitUsernameEnv'), variables('flowEnvVars'))]"
                     }
                   ],
                   "scale": {
                     "minReplicas": 0,
                     "maxReplicas": "[parameters('maxReplicas')]",
-                    "rules": [
-                      {
-                        "name": "queue-depth",
-                        "custom": {
-                          "type": "mssql",
-                          "metadata": {
-                            "query": "[variables('queueDepthQuery')]",
-                            "targetValue": "1"
-                          },
-                          "auth": [
-                            {
-                              "secretRef": "[variables('scalerSecretRef')]",
-                              "triggerParameter": "connectionString"
-                            }
-                          ]
-                        }
-                      }
-                    ]
+                    "rules": "[variables('scaleRules')]"
                   }
                 }
               },
@@ -1751,12 +1724,12 @@
       "dependsOn": [
         "[resourceId('Microsoft.Sql/servers/databases', parameters('sqlServerName'), parameters('catalogDatabaseName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('catalogConnectionSecretName'))]",
-        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('scalerConnectionSecretName'))]",
         "[resourceId('Microsoft.Sql/servers/databases', parameters('sqlServerName'), parameters('dwhDatabaseName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('dwhConnectionSecretName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('gitTokenSecretName'))]",
         "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
         "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('nodeTokenSecretName'))]",
         "[resourceId('Microsoft.Sql/servers/databases', parameters('sqlServerName'), parameters('preDatabaseName'))]",
         "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), variables('preConnectionSecretName'))]",
         "[resourceId('Microsoft.Sql/servers/firewallRules', parameters('sqlServerName'), 'AllowAllWindowsAzureIps')]"
@@ -1800,8 +1773,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "14978286038425780424"
+              "version": "0.47.16.16243",
+              "templateHash": "4919584416634075382"
             }
           },
           "parameters": {
@@ -2037,8 +2010,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "14368204849936570258"
+              "version": "0.47.16.16243",
+              "templateHash": "6345580286899098458"
             }
           },
           "parameters": {
@@ -2362,8 +2335,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "18130260471843531184"
+              "version": "0.47.16.16243",
+              "templateHash": "8091832796151768368"
             }
           },
           "parameters": {
@@ -2653,8 +2626,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "4961288835625252752"
+              "version": "0.47.16.16243",
+              "templateHash": "7095239741976773014"
             }
           },
           "parameters": {
@@ -2935,8 +2908,8 @@
           "metadata": {
             "_generator": {
               "name": "bicep",
-              "version": "0.44.1.10279",
-              "templateHash": "51288977925729848"
+              "version": "0.47.16.16243",
+              "templateHash": "6770666520326113300"
             }
           },
           "parameters": {

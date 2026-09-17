@@ -131,6 +131,61 @@ public sealed record StreamAnomalyOptions
     /// and on a monthly stream two months, so one constant fits every cadence.</summary>
     public double SilenceTolerance { get; init; } = 2.0;
 
+    /// <summary>
+    /// The share of its successful run days a stream must actually deliver rows on before its DECLARED
+    /// schedule is read as a delivery promise rather than merely an execution one.
+    /// <para>
+    /// A cron says how often we ASK the source, not how often the answer differs. Most feeds make the two the
+    /// same, which is why the schedule is such good evidence for them. A reference table does not: a
+    /// twenty-five row account list is read every morning at 07:03 and changes twice a year, so measuring it
+    /// against "fires every 1 day" reports a perfectly healthy table as a critical outage every day between
+    /// changes. Half is the line because it is the plain meaning of the claim: below it, running this flow
+    /// more often than not produces nothing, so the schedule is not predicting delivery.
+    /// </para>
+    /// </summary>
+    public double DeliveryPerRunThreshold { get; init; } = 0.5;
+
+    /// <summary>Days on which the flow ran and at least one run succeeded, below which the delivery share
+    /// above is too small a sample to reclassify anything on and the declared schedule keeps the benefit of
+    /// the doubt.</summary>
+    public int MinRunDaysForDeliveryShare { get; init; } = 10;
+
+    /// <summary>Changes a change-driven stream must have made before its own gaps may set a silence bar. Below
+    /// this there is no gap distribution: one change says nothing about when the next is due, and the honest
+    /// verdict is that nothing is overdue because nothing is due.</summary>
+    public int MinLoadsForDeliveryCadence { get; init; } = 3;
+
+    /// <summary>
+    /// Days of learning era needed before a stream's OVERALL load rate may declare every weekday one it loads
+    /// on. The fallback exists so a young dense stream is not called shapeless, but the era runs only through
+    /// the last load, so a stream that has loaded once has an era of one day and that day loaded: without a
+    /// floor it concludes a daily rhythm from a single observation and then reports every day since as
+    /// missing data.
+    /// </summary>
+    public int MinEraDaysForRhythm { get; init; } = 7;
+
+    /// <summary>
+    /// DAYS on which the stream ran successfully BEFORE the analysed window, and how many of those days wrote
+    /// rows. Supplied by the caller for the streams that loaded nothing inside the window, where the window
+    /// alone cannot tell a table that died from a table that simply does not change: both run, succeed, and
+    /// write nothing for as long as you look. A stream that used to deliver on nearly every day it ran is the
+    /// outage this surface exists to catch; one that delivered on two days in three hundred is a reference
+    /// table behaving exactly as it always has. Zero means the caller supplied no prior history, and the
+    /// analysis keeps its worst-case reading rather than inventing a reassurance.
+    /// <para>
+    /// Days rather than runs, and the distinction is not pedantry. A flow run several times a day delivers on
+    /// the first run and reports nothing on the rest, which is the whole point of an incremental load; counted
+    /// per run that healthy feed looks like it delivers a fifth of the time, and a dead one would then be
+    /// excused as a table that never changes. On this estate 49 of 382 scheduled streams deliver on most of
+    /// their run DAYS and on under half of their runs, so counting the wrong unit would have put the blind
+    /// spot back exactly where this evidence exists to close it.
+    /// </para>
+    /// </summary>
+    public int PriorRunDays { get; init; }
+
+    /// <summary>See <see cref="PriorRunDays"/>: how many of those days actually wrote rows.</summary>
+    public int PriorLoadingDays { get; init; }
+
     /// <summary>The trailing slice the rate test compares against the rest of the window.</summary>
     public int RecentWindowDays { get; init; } = 7;
 
@@ -151,8 +206,53 @@ public sealed record StreamAnomalyOptions
     /// <summary>The robust-sigma magnitude a PELT level shift must reach to count as a regime change.</summary>
     public double LevelShiftSigma { get; init; } = 3.0;
 
+    /// <summary>
+    /// The share of the stream's level a shift must also amount to, in percent, before it is a finding.
+    /// <para>
+    /// Sigma alone cannot carry this test, because sigma is the stream's OWN noise and a steady stream has
+    /// almost none. A feed that writes 107,300 rows every weekday give or take thirty moved to 107,220 one
+    /// Tuesday and stayed there: eighty rows, a twelfth of a percent, and 4.2 sigma. That is a fact about how
+    /// regular the vendor is, not a fault, and reporting it teaches the operator that this surface cries
+    /// wolf. Ten percent is far below anything that reads as "less data than usual" on a chart and far above
+    /// the drift a steady feed shows between its regimes, which is the same floor the point test uses.
+    /// </para>
+    /// </summary>
+    public double LevelShiftMinPercent { get; init; } = 10.0;
+
+    /// <summary>
+    /// The share of the expected volume a single day must deviate by, in percent, before it can be flagged
+    /// as an outlying day, whatever its sigma.
+    /// <para>
+    /// The shared tagging already carries a relative floor, but waives it once a point is overwhelmingly
+    /// significant, and on a steady stream everything is: with thirty rows of noise a day that is 800 rows
+    /// (0.75%) short of its 107,000 scores 12.7 sigma, passes the waiver, and is painted red. For a
+    /// monitoring board the floor is absolute. A sub-ten-percent day is never the reason anyone opens a
+    /// stream, and the sustained version of the same drift is the level-shift test's job, with its own
+    /// floor above.
+    /// </para>
+    /// </summary>
+    public double VolumeOutlierMinPercent { get; init; } = 10.0;
+
     /// <summary>Trailing days whose data may still be arriving: scored and charted, never flagged.</summary>
     public int MaturityDays { get; init; } = 1;
+
+    /// <summary>
+    /// Whether the volume expectation may learn a recurring delivery cycle the weekday model cannot express:
+    /// the fortnightly refill, the every-third-day consolidation, the month-end settlement file. True.
+    /// <para>
+    /// Without it those vendors are reported every single time they behave exactly as they always have, which
+    /// is the worst kind of false positive because it is perfectly regular and therefore trains an operator to
+    /// ignore the surface. Worse, the inverse failure is invisible: a refill that never arrives just looks
+    /// like an ordinary day. With the cycle in the expectation, both read correctly, and the learned pattern
+    /// says so in words. See <see cref="CycleModel"/> for the bars a candidate cycle has to clear.
+    /// </para>
+    /// </summary>
+    public bool DetectDeliveryCycles { get; init; } = true;
+
+    /// <summary>The longest delivery cycle to look for, in days. Capped by the analysed span regardless: a
+    /// period is only considered when the window covers <see cref="CycleModel.MinCycles"/> of it, so a
+    /// thirty-day window can learn a ten-day cycle and a fortnightly one needs sixty.</summary>
+    public int CycleMaxPeriodDays { get; init; } = CycleModel.MaxPeriodDays;
 
     /// <summary>
     /// Whether a stream loading MORE than expected is reported. True, and it is only safe to be true because
@@ -292,8 +392,8 @@ public enum StreamStatus
 public sealed record StreamPattern
 {
     /// <summary>The rhythm, named: <c>daily</c>, <c>weekdays</c> (Monday to Friday, nothing at weekends),
-    /// <c>weekly</c>, <c>several-days-a-week</c>, <c>periodic</c> (a regular gap that is not a weekday
-    /// rhythm), or <c>sporadic</c> (no rhythm the history supports).</summary>
+    /// <c>weekly</c>, <c>several-days-a-week</c>, <c>fortnightly</c>, <c>monthly</c>, <c>periodic</c> (a
+    /// regular gap that fits none of those bands), or <c>sporadic</c> (no rhythm the history supports).</summary>
     public required string Shape { get; init; }
 
     /// <summary>The weekdays this table reliably loads on, in week order. Empty for a periodic or sporadic
@@ -317,7 +417,69 @@ public sealed record StreamPattern
     /// weekly rates and leaves the middle one where it was.</summary>
     public required double Reliability { get; init; }
 
+    /// <summary>
+    /// True when this table writes only when its SOURCE changes rather than on every run: a reference or
+    /// dimension table whose flow is scheduled daily and which changes a handful of times a year. Its empty
+    /// days are its normal, so nothing about it may be judged against the schedule's firing interval, and the
+    /// question "has it stopped" is answered from its own change history or not at all.
+    /// </summary>
+    public required bool ChangeDriven { get; init; }
+
+    /// <summary>The recurring delivery cycle on top of the rhythm, when the stream has one that its weekday
+    /// pattern cannot express: the vendor who ships a bigger refill every fortnight, the month-end file. Null
+    /// for the streams that simply deliver the same kind of load every time.</summary>
+    public StreamCycle? Cycle { get; init; }
+
     /// <summary>The pattern as a sentence, for a person reading one row of a board.</summary>
+    public required string Description { get; init; }
+}
+
+/// <summary>
+/// A recurring delivery the stream makes on top of its ordinary rhythm, learned from its own history: how
+/// often it comes, how much bigger (or smaller) it is, when it last landed, and when the next one is due.
+/// <para>
+/// This is what turns a fortnightly refill from a monthly false positive into a fact about the vendor. It is
+/// also the only thing that makes the opposite failure visible: once the cycle is part of the expectation, a
+/// refill that does not arrive is a shortfall on the day it was due rather than an ordinary day nobody looks
+/// at.
+/// </para>
+/// </summary>
+public sealed record StreamCycle
+{
+    /// <summary>The cycle length in days, or 0 for a monthly cycle whose length is whatever the calendar says
+    /// that month.</summary>
+    public required int PeriodDays { get; init; }
+
+    /// <summary>True when the cycle repeats on a position in the calendar month (the 1st, the last day)
+    /// rather than every fixed number of days.</summary>
+    public required bool Monthly { get; init; }
+
+    /// <summary>Occurrences of the cycle observed in the window: how many times this was actually seen, which
+    /// is what separates a pattern from two coincidences.</summary>
+    public required int Occurrences { get; init; }
+
+    /// <summary>Whether the cycle days are HEAVIER than an ordinary day. False for the rarer stream whose
+    /// cycle is a regular light day.</summary>
+    public required bool Heavier { get; init; }
+
+    /// <summary>The typical load on a cycle day, in rows.</summary>
+    public required double CycleRows { get; init; }
+
+    /// <summary>The typical load on an ordinary day, in rows: what <see cref="CycleRows"/> is a departure
+    /// from.</summary>
+    public required double OrdinaryRows { get; init; }
+
+    /// <summary>The share of the unexplained variation this cycle accounts for, in [0, 1]. Reported because a
+    /// cycle that explains most of the residual and one that explains a fifth of it are different claims.</summary>
+    public required double Lift { get; init; }
+
+    public required DateTime? LastOccurrenceUtc { get; init; }
+
+    /// <summary>The next day the cycle is due, from the analysis date. The date to check when the question is
+    /// "did the big one arrive".</summary>
+    public required DateTime? NextExpectedUtc { get; init; }
+
+    /// <summary>The cycle as a sentence, folded into the pattern description.</summary>
     public required string Description { get; init; }
 }
 
@@ -385,6 +547,17 @@ public sealed record StreamProfile
 
     /// <summary>The Theil-Sen slope in rows per day: a growing stream's growth is expectation, not anomaly.</summary>
     public required double TrendRowsPerDay { get; init; }
+
+    /// <summary>Of the mature days the flow RAN and at least one run SUCCEEDED, the share that actually wrote
+    /// rows, in [0, 1]. The ground truth behind <see cref="StreamPattern.ChangeDriven"/>: it says whether
+    /// running this flow produces data, which is the question a cron cannot answer.</summary>
+    public required double DeliveryShare { get; init; }
+
+    /// <summary>Days in the window the stream was expected to load on: every mature day whose weekday its
+    /// learned reliability cleared the threshold for. This is the denominator <see cref="UnexpectedNullDays"/>
+    /// is read against, carried so a board can say "3 of 30" rather than a bare "3". Zero for a stream with no
+    /// rhythm the history supports, which has no expected day to miss.</summary>
+    public required int ExpectedDays { get; init; }
 
     /// <summary>Days in the window the stream was expected to load on (its learned reliability for that
     /// weekday cleared the threshold) and wrote nothing. The headline number of this surface.</summary>

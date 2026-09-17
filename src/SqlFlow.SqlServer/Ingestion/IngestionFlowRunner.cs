@@ -213,6 +213,7 @@ public sealed class IngestionFlowRunner
         var statements = options.StatementSink ?? NullRunStatementSink.Instance;
         void Info(string step, string message) => events.Log(RunLogLevel.Info, step, message);
         void Dbg(string step, string message) => events.Log(RunLogLevel.Debug, step, message);
+        void Warn(string step, string message) => events.Log(RunLogLevel.Warning, step, message);
         var trace = new List<SqlTraceEntry>();
         void Trace(string step, string? sql)
         {
@@ -294,8 +295,16 @@ public sealed class IngestionFlowRunner
             IReadOnlyList<SqlColumn> sourceColumns;
             await using (var sourceConnection = await _factory.OpenAsync(resolvedSource, ct).ConfigureAwait(false))
             {
+                // A catalog that returns nothing has told us the object is not VISIBLE, which is weaker than
+                // "it does not exist": every engine we read (SQL Server's metadata visibility rules, MySQL's
+                // information_schema, and their equivalents) hides an object from a login that holds no
+                // privilege on it, so a dropped table, a renamed table, and a revoked grant are indistinguishable
+                // from here. Say exactly that, so nobody reads a permissions change as a schema change.
                 var introspected = await sourceCatalog.IntrospectObjectAsync(sourceConnection, ToName(flow.Source.Table), ct).ConfigureAwait(false)
-                    ?? throw new SqlFlowException($"Source object {flow.Source.Table.QualifiedName} was not found.");
+                    ?? throw new SqlFlowException(
+                        $"Source object {flow.Source.Table.QualifiedName} is not visible on the {resolvedSource.Kind} source: it was " +
+                        "dropped, it was renamed, or this login holds no privilege on it (an object a login cannot read is absent " +
+                        "from the catalog rather than refused).");
 
                 sourceColumns = CatalogSchemaAdapter.ToColumns(introspected, sourceTypeMapper)
                     .Where(c => !flow.Source.IgnoreColumns.Contains(c.Name, StringComparer.OrdinalIgnoreCase))
@@ -308,21 +317,30 @@ public sealed class IngestionFlowRunner
                 throw new SqlFlowException($"Source object {flow.Source.Table.QualifiedName} exposes no columns to ingest.");
             }
 
-            // 2. Build the desired target schema (data + system + hash + identity) and the bulk-copy name map.
+            // 2. Build the desired target schema (data + system + hash + identity) and the source read that fills
+            //    staging: every source column as itself, plus each virtual column as its expression (legacy
+            //    flw.IngestionVirtual), which from staging on is an ordinary data column.
             var targetSchema = new IngestionSchemaBuilder(new DefaultColumnNameCleaner()).Build(sourceColumns, flow, forStaging: false);
             var nameMap = targetSchema.SourceToTargetNames;
+            var projections = targetSchema.Projections;
             var byName = sourceColumns.ToDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
-            var bulkColumns = sourceColumns
-                .Where(c => nameMap.ContainsKey(c.Name))
-                .Select(c => (Source: c.Name, Target: nameMap[c.Name]))
-                .ToList();
+            var desiredByName = targetSchema.Columns.ToDictionary(c => c.Name, StringComparer.OrdinalIgnoreCase);
+            var bulkColumns = projections.Select(p => (Source: p.SourceName, Target: p.TargetName)).ToList();
             var dataColumnNames = bulkColumns.Select(c => c.Target).ToList();
-            var stagingColumns = bulkColumns.Select(c => byName[c.Source] with { Name = c.Target }).ToList();
+            // A source column stages with its introspected type; a virtual column with the type the schema builder
+            // settled (declared, or that of the source column it replaces).
+            var stagingColumns = projections
+                .Select(p => p.Expression is null ? byName[p.SourceName] with { Name = p.TargetName } : desiredByName[p.TargetName])
+                .ToList();
+            var virtualCount = projections.Count(p => p.Expression is not null);
 
             Info("source.introspect", $"{sourceColumns.Count} source column(s), {bulkColumns.Count} bulk-copied"
+                + (virtualCount > 0 ? $" ({virtualCount} virtual)" : string.Empty)
                 + (flow.Source.IgnoreColumns.Count > 0 ? $", {flow.Source.IgnoreColumns.Count} ignored" : string.Empty));
-            Dbg("source.introspect", "column map: " + string.Join(", ", bulkColumns.Select(c =>
-                string.Equals(c.Source, c.Target, StringComparison.Ordinal) ? c.Source : $"{c.Source} -> {c.Target}")));
+            Dbg("source.introspect", "column map: " + string.Join(", ", projections.Select(p =>
+                p.Expression is not null ? $"{p.TargetName} = {p.Expression}"
+                : string.Equals(p.SourceName, p.TargetName, StringComparison.Ordinal) ? p.SourceName
+                : $"{p.SourceName} -> {p.TargetName}")));
 
             // 2b. PreProcessOnTarget: raw T-SQL on the target, before any new data is staged or loaded (so it
             //     sees the old/absent target). On a first-ever run the target does not exist yet, so a pre-hook
@@ -332,6 +350,22 @@ public sealed class IngestionFlowRunner
                 Info("target.preprocess", "running the pre-process hook on the target");
                 Trace("target.preprocess", flow.Process.PreProcessOnTarget!.Trim());
                 await TargetProcessHooks.RunAsync(targetConnectionString, flow.Process.PreProcessOnTarget!.Trim(), ct).ConfigureAwait(false);
+            }
+
+            // 2b2. Preflight the target when this flow will never evolve it (schema.sync off). The load writes
+            //      the columns the SOURCE serves, introspected fresh on every run, while the target's shape is
+            //      whatever was built by hand. The day the source grows a column, the generated INSERT names a
+            //      column the target does not have and SQL Server answers "Invalid column name", a message that
+            //      says nothing about the source, the drift, or the setting that caused it, and that arrives only
+            //      after the source has been read and staging filled. Compare the two column sets here instead:
+            //      it costs one introspection, it runs before any data moves, and it names the cause. This sits
+            //      after the pre-process hook so a hook that adds the column is honored, and before the work-table
+            //      lease so a doomed run never takes one. With sync on, step 5 adds the columns, so there is
+            //      nothing to preflight.
+            if (!flow.SchemaSync.Sync)
+            {
+                await EnsureTargetAcceptsWrittenColumnsAsync(
+                    targetCatalog, targetConnectionString, flow, dataColumnNames, ct).ConfigureAwait(false);
             }
 
             // 2c. Take this flow's work-table lease and hold it for the rest of the run. Everything from the
@@ -399,7 +433,7 @@ public sealed class IngestionFlowRunner
                 }
 
                 window = new IncrementalWindow { SourceWhere = string.Empty, RunFullLoad = true };
-                var segments = InitLoadPlanner.Plan(initFlow, initFlow.Source.Table, bulkColumns.Select(c => c.Source).ToList(), sourceDialect);
+                var segments = InitLoadPlanner.Plan(initFlow, initFlow.Source.Table, projections, sourceDialect);
                 sourceSelect = segments.Count > 0 ? segments[0].Sql : null;
                 Info("source.initload", $"init-load backfill: {segments.Count} segment(s), {Math.Max(1, flow.Load.Threads ?? 1)} concurrent");
                 foreach (var segment in segments)
@@ -427,7 +461,7 @@ public sealed class IngestionFlowRunner
                     : window.SourceWhere.Length > 0 ? $"incremental read: WHERE 1=1{window.SourceWhere}" : "full read (no incremental bound)");
                 Trace("incremental.max-probe", window.TargetMaxProbeSql);
                 Trace("incremental.min-probe", window.SourceMinProbeSql);
-                sourceSelect = BuildSourceSelect(flow.Source.Table, bulkColumns, window.SourceWhere, sourceDialect);
+                sourceSelect = BuildSourceSelect(flow.Source.Table, projections, window.SourceWhere, sourceDialect);
                 Trace("source.select", sourceSelect);
                 rowsStaged = await BulkCopyAsync(resolvedSource, sourceSelect, targetConnectionString, staging, bulkColumns, flow.Load, ct).ConfigureAwait(false);
             }
@@ -472,6 +506,30 @@ public sealed class IngestionFlowRunner
                 foreach (var statement in targetOutcome.AppliedStatements)
                 {
                     Trace("target.evolve", statement.Text);
+                }
+
+                // Adding a column and re-typing one are not the same event, and reporting both as "N change(s)"
+                // hides the one that matters. An added column leaves every existing column as its consumers
+                // know it. An ALTER COLUMN changes the type a consumer already reads, which no downstream query
+                // asked for, so it is a warning even though the engine applied it successfully.
+                ReportEvolution(targetOutcome.Plan, flow.Target.Table, Info, Warn);
+
+                // The planner also records what it deliberately did NOT do. That is the half an operator never
+                // sees otherwise: the target silently keeps a type the source has moved away from, or stays
+                // nullable under a source column that is now NOT NULL, and every run repeats the decision in
+                // silence. Surface it. An extra target column is the benign, expected case (a legacy column the
+                // source never served), so it goes to debug rather than shouting on every run.
+                foreach (var finding in targetOutcome.Plan.Drift)
+                {
+                    var message = $"[{finding.Column}]: {finding.Detail}";
+                    if (finding.Kind == DriftKind.ExtraTargetColumn)
+                    {
+                        Dbg("target.drift", message);
+                    }
+                    else
+                    {
+                        Warn("target.drift", message);
+                    }
                 }
             }
 
@@ -642,7 +700,7 @@ public sealed class IngestionFlowRunner
                     Name = CanonicalWorkTableName("mkey", flow),
                 };
                 rowsDeleted = await RunMatchKeysAsync(
-                    flow, resolvedSource, targetConnectionString, matchKeyTable, nameMap, sourceDialect, Info, Dbg, Trace, ct).ConfigureAwait(false);
+                    flow, resolvedSource, targetConnectionString, matchKeyTable, nameMap, projections, sourceDialect, Info, Dbg, Trace, ct).ConfigureAwait(false);
             }
 
             // 7.5. Apply the declared (trgDesiredIndex) indexes, only on the run that created the target (the
@@ -981,6 +1039,7 @@ public sealed class IngestionFlowRunner
         string targetConnectionString,
         RelationalObject keyTable,
         IReadOnlyDictionary<string, string> nameMap,
+        IReadOnlyList<SourceProjection> projections,
         ISourceSqlDialect sourceDialect,
         Action<string, string> info,
         Action<string, string> dbg,
@@ -1032,8 +1091,11 @@ public sealed class IngestionFlowRunner
         // deleted (the legacy default of no filter deleted them).
         var filter = !string.IsNullOrWhiteSpace(policy.SourceFilter) ? policy.SourceFilter : flow.Source.Filter;
         var staticWhere = string.IsNullOrWhiteSpace(filter) ? string.Empty : " " + filter.Trim();
+        // A key may be a virtual column, which exists on the source only as its expression, so every key is read
+        // through the load's own projection (MapName above already proved each key is one), under the declared name.
+        var projectionBySource = projections.ToDictionary(p => p.SourceName, StringComparer.OrdinalIgnoreCase);
         var keySelect =
-            $"SELECT DISTINCT {string.Join(", ", keyPairs.Select(p => sourceDialect.QuoteIdentifier(p.Source)))} " +
+            $"SELECT DISTINCT {string.Join(", ", keyPairs.Select(p => projectionBySource[p.Source].Render(sourceDialect, p.Source)))} " +
             $"FROM {sourceDialect.QualifyObject(flow.Source.Table)} WHERE 1=1{staticWhere}";
         traceSql("matchkeys.source-keys", keySelect);
         var keysCopied = await BulkCopyAsync(resolvedSource, keySelect, targetConnectionString, keyTable, keyPairs, flow.Load, ct).ConfigureAwait(false);
@@ -1439,10 +1501,10 @@ public sealed class IngestionFlowRunner
 
     // The source read always uses a `WHERE 1=1` base so the incremental and filter fragments (each beginning
     // with " AND ", per the legacy raw-append contract) compose onto it. The text executes on the SOURCE, so
-    // its identifiers come from the source dialect.
-    private static string BuildSourceSelect(RelationalObject sourceTable, IReadOnlyList<(string Source, string Target)> columns, string sourceWhere, ISourceSqlDialect dialect)
+    // its identifiers come from the source dialect, and a virtual column's expression is evaluated there too.
+    private static string BuildSourceSelect(RelationalObject sourceTable, IReadOnlyList<SourceProjection> projections, string sourceWhere, ISourceSqlDialect dialect)
     {
-        var columnList = string.Join(", ", columns.Select(c => dialect.QuoteIdentifier(c.Source)));
+        var columnList = string.Join(", ", projections.Select(p => p.Render(dialect)));
         return $"SELECT {columnList} FROM {dialect.QualifyObject(sourceTable)} WHERE 1=1{sourceWhere}";
     }
 
@@ -1570,6 +1632,112 @@ public sealed class IngestionFlowRunner
                 .ToDictionary(c => c.Name, c => c.DataType, StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Reports what an applied evolution actually did, separating the additive half from the half that changes
+    /// what existing consumers of the target observe. New columns are announced at info. A re-typed column is a
+    /// warning: <c>SELECT</c> against that column starts returning a different type, no consumer asked for it,
+    /// and it is the change an operator needs to find later when a downstream contract breaks.
+    /// </summary>
+    private static void ReportEvolution(
+        EvolutionPlan plan, RelationalObject target, Action<string, string> info, Action<string, string> warn)
+    {
+        if (plan.ColumnsToAdd.Count > 0)
+        {
+            info("target.evolve",
+                $"{plan.ColumnsToAdd.Count} column(s) added to {target.QualifiedName}: "
+                + string.Join(", ", plan.ColumnsToAdd.Select(c => $"[{c.Name}] {c.DataType.Render()}")));
+        }
+
+        if (plan.ColumnsToAlter.Count > 0)
+        {
+            warn("target.evolve",
+                $"{plan.ColumnsToAlter.Count} existing column(s) of {target.QualifiedName} were re-typed to follow the "
+                + "source, which changes the type every downstream consumer reads: "
+                + string.Join(", ", plan.ColumnsToAlter.Select(a =>
+                    $"[{a.Name}] {a.FromType.Render()} -> {a.ToType.Render()}")));
+        }
+    }
+
+    /// <summary>
+    /// Fails a <c>schema.sync: false</c> run whose target cannot accept what the load will write, before any
+    /// data moves. The written set is the bulk-copied data columns plus the system columns the load generator
+    /// stamps; both are derived from the same policy fields the generator reads, so the check and the SQL can
+    /// never disagree. Target-only columns are not a problem (they are simply not written), so only the columns
+    /// the target LACKS are reported.
+    /// </summary>
+    private static async Task EnsureTargetAcceptsWrittenColumnsAsync(
+        ICatalogReader catalog,
+        string connectionString,
+        IngestionFlow flow,
+        IReadOnlyList<string> dataColumnNames,
+        CancellationToken ct)
+    {
+        // A keyed flow told to skip both branches generates no load statement at all (the dataset loop and the
+        // SCD2 and per-file-replace paths write regardless of the skips, and a keyless flow always inserts). It
+        // writes no column, so there is nothing for the target to accept and nothing to assert.
+        var writesNothing = flow.Load.SkipUpdateExisting
+            && flow.Load.SkipInsertNew
+            && string.IsNullOrWhiteSpace(flow.Load.ReloadColumn)
+            && string.IsNullOrWhiteSpace(flow.Load.DataSetColumn)
+            && !flow.Versioning.Scd2.Enabled
+            && EffectiveKeyColumns(flow).Count > 0;
+        if (writesNothing)
+        {
+            return;
+        }
+
+        var written = new List<string>(dataColumnNames);
+        if (flow.SystemColumns.InsertedDate)
+        {
+            written.Add("InsertedDate_DW");
+        }
+
+        if (flow.SystemColumns.UpdatedDate)
+        {
+            written.Add("UpdatedDate_DW");
+        }
+
+        if (flow.SystemColumns.DeletedDate)
+        {
+            written.Add("DeletedDate_DW");
+        }
+
+        if (flow.SystemColumns.RowStatus)
+        {
+            written.Add("RowStatus_DW");
+        }
+
+        if (flow.Versioning.Scd2.Enabled)
+        {
+            written.Add(flow.Versioning.Scd2.ValidFromColumn);
+            written.Add(flow.Versioning.Scd2.ValidToColumn);
+            written.Add(flow.Versioning.Scd2.CurrentFlagColumn);
+        }
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct).ConfigureAwait(false);
+        var introspected = await catalog.IntrospectObjectAsync(connection, ToName(flow.Target.Table), ct).ConfigureAwait(false);
+        if (introspected is null)
+        {
+            throw new SqlFlowException(
+                $"Target {flow.Target.Table.QualifiedName} does not exist and schema.sync is off, so this flow never creates it. " +
+                "Create the target, or set schema.sync to true.");
+        }
+
+        var actual = introspected.Columns.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var missing = written.Where(c => !actual.Contains(c)).ToList();
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        throw new SqlFlowException(
+            $"Target {flow.Target.Table.QualifiedName} is missing {missing.Count} column(s) this run would write " +
+            $"({string.Join(", ", missing)}), and schema.sync is off, so the target is never altered. The source now " +
+            "serves columns the target does not have. Add them to the target, list them under source.ignoreColumns " +
+            "to leave them behind, or set schema.sync to true to let the target follow the source.");
+    }
+
     /// <summary>Raised by <see cref="ApplyLoadAsync"/> when one load statement fails, carrying the offending
     /// statement so the run's failure is attributed to the exact trace entry rather than "the last one". The
     /// message is the underlying error verbatim, so the run's recorded error is unchanged.</summary>
@@ -1588,14 +1756,14 @@ public sealed class IngestionFlowRunner
         => new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
 
     // Canonical indexes reference the cleaned TARGET column names; the flow declares SOURCE names, so map
-    // through the bulk-copy name map (identity when column cleaning is off). A required key column that is
-    // not a bulk-copied target column (because it is ignored or virtual) is a contradictory configuration and
-    // fails fast with a clear message rather than emitting an index on a phantom column.
+    // through the bulk-copy name map (identity when column cleaning is off; virtual columns map too). A required
+    // key column that is not a bulk-copied target column (because it is ignored) is a contradictory configuration
+    // and fails fast with a clear message rather than emitting an index on a phantom column.
     private static string MapName(IReadOnlyDictionary<string, string> nameMap, string source)
         => nameMap.TryGetValue(source, out var target)
             ? target
             : throw new SqlFlowException(
-                $"Key column '{source}' is not a bulk-copied target column (is it in IgnoreColumns or a virtual column?).");
+                $"Key column '{source}' is not a bulk-copied target column (is it in IgnoreColumns?).");
 
     // For an OPTIONAL canonical index (date / dataset), a column that is not a real bulk-copied target column
     // simply yields no index, rather than failing the run.

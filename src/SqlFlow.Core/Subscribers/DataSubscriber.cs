@@ -91,7 +91,7 @@ public sealed record SubscriberQuery
     /// <summary>The connection alias the query runs against (legacy <c>srcServer</c>, a
     /// <c>flw.SysDataSource.Alias</c>), keyed into the document's <c>connections:</c> block. This is what pins
     /// the query's two-part object names to the right server and database, so a subscriber reading
-    /// <c>arc.Bysykkel_Bikes</c> lands on the same node the ingestion flow writes. A registered-source
+    /// <c>arc.Citybikes_Bikes</c> lands on the same node the ingestion flow writes. A registered-source
     /// subscriber's query carries <see cref="DataSubscriber.RegisteredSource"/> instead.</summary>
     public required string Server { get; init; }
 

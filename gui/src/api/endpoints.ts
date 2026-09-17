@@ -4,9 +4,9 @@
 import { del, get, getAnonymous, getText, post, postAnonymous, postBinary, put, streamSse, type QueryParams, type SseFrame } from "./client";
 import type {
   AccessToken, AllSearchResult, Attention, AuthProviders,
-  ChatAskRequest, ChatCapabilities, ChatConversation, ChatMessage, ChatTranscription,
+  ChatAskRequest, ChatCapabilities, ChatConversation, ChatConversationsPurged, ChatMessage, ChatTranscription,
   ColumnHit, ComputeTask, ComputeTaskAccepted, ComputeTaskRequest,
-  DataStream, DataStreams,
+  DataStream, DataStreams, DispatchSnapshot,
   ComputeTaskSummary, CreateAccessTokenRequest, CreateNotificationSubscriptionRequest, CreateScheduleRequest, CreatedAccessToken,
   CreateUserRequest, Dashboard, Datasource, DefinitionHit, DiscoveredFlow,
   FlowInsights, Recommendations, StepInsights,
@@ -106,11 +106,20 @@ export interface DataStreamQuery {
    * say in whether data is delivered, so holding it to a delivery expectation invents an incident. */
   includeUnscheduled?: boolean;
   limit?: number;
+  /** Ask about these flows only, for a caller that already knows its population (the lineage graph asking for
+   * the verdicts of the flows it has drawn). The other filters still apply on top, so such a caller normally
+   * sends scope "all" and includeUnscheduled with it. At most 200; the server refuses more. */
+  pipelineIds?: string[];
 }
 
 export const dataStreamApi = {
   /** The board: every stream's verdict, ranked most urgent first. No per-stream series (too large). */
-  list: (query: DataStreamQuery = {}) => get<DataStreams>("/api/v1/datastreams", query as QueryParams),
+  list: ({ pipelineIds, ...query }: DataStreamQuery = {}) => {
+    // Repeated query params, which the single-value query builder cannot express, so they are folded into the
+    // path the way the lineage graph's `expand` is.
+    const named = (pipelineIds ?? []).map((id) => `pipelineId=${encodeURIComponent(id)}`).join("&");
+    return get<DataStreams>(`/api/v1/datastreams${named === "" ? "" : `?${named}`}`, query as QueryParams);
+  },
   /** One stream in full: the day-by-day series the chart draws, and every detector's reasoning. */
   get: (pipelineId: string, days?: number, includeBackfills?: boolean) =>
     get<DataStream>(`/api/v1/datastreams/${pipelineId}`, { days, includeBackfills }),
@@ -350,6 +359,14 @@ export const nodeApi = {
   delete: (name: string) => del<void>(`/api/v1/nodes/${encodeURIComponent(name)}`),
   /** Drop every offline node from the fleet registry at once; returns how many entries were removed. */
   purgeOffline: () => del<NodePurgeResult>("/api/v1/nodes/offline"),
+};
+
+// ---- Dispatch -----------------------------------------------------------------------------------------------------------------
+
+export const dispatchApi = {
+  /** The dispatcher's own view of the queue: every queued run with the gate holding it back, every lease, the fleet,
+   *  ownership and the last housekeeping passes. */
+  snapshot: () => get<DispatchSnapshot>("/api/v1/dispatch"),
 };
 
 // ---- Datasources and ad-hoc compute ---------------------------------------------------------------------------------
@@ -722,6 +739,8 @@ export const chatApi = {
   renameConversation: (id: string, title: string) =>
     put<ChatConversation>(`/api/v1/chat/conversations/${id}`, { title }),
   deleteConversation: (id: string) => del<void>(`/api/v1/chat/conversations/${id}`),
+  /** Deletes every conversation of the signed-in user and returns how much was removed. */
+  deleteAllConversations: () => del<ChatConversationsPurged>("/api/v1/chat/conversations"),
   messages: (id: string) => get<ChatMessage[]>(`/api/v1/chat/conversations/${id}/messages`),
   /** One question, answered as SSE: a `conversation` frame, then `tool`/`delta` frames, then `done` (or `error`). */
   ask: (request: ChatAskRequest, onFrame: (frame: SseFrame) => void, signal: AbortSignal, onOpen?: () => void) =>

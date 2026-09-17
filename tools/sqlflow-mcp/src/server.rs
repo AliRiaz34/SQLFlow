@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::control_plane::{ControlPlane, PollOutcome};
+use crate::control_plane::{ControlPlane, PollOutcome, WhoAmI};
 use crate::docs::DocsIndex;
 use crate::links::GuiLinks;
 use sqlflow_lang::census::Census;
@@ -55,7 +55,66 @@ impl SqlFlowMcp {
             cp,
             links: GuiLinks::from_env(),
             http_mode,
-            tool_router: Self::tool_router(),
+            tool_router: Self::grounded_router(),
+        }
+    }
+
+    /// The generated router with [`GROUNDING_RULE`] appended to every tool description. The description is
+    /// the one text every consumer of this server sees: the built-in chatbot and the Slack bot reach the tools
+    /// through their provider's MCP connector, which forwards descriptions but not the server's
+    /// `instructions`, and an external client may ignore `instructions` too. Appending the rule here, once,
+    /// makes it hold on every surface without 85 hand-copies that would drift.
+    fn grounded_router() -> ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        for route in router.map.values_mut() {
+            let description = route.attr.description.take().unwrap_or_default();
+            route.attr.description = Some(format!("{description}\n\n{GROUNDING_RULE}").into());
+        }
+        router
+    }
+}
+
+/// The rule appended to every tool description: the model may state only what the tool returned. A missing
+/// fact is reported as missing, never filled in from what a flow or a run of that kind usually looks like.
+const GROUNDING_RULE: &str = "Grounding: state only values this result contains. A null or an empty list is \
+the answer (nothing declared, never happened), not a gap to fill. If a fact is not in the result, say so and \
+name the tool that holds it. Never invent rows, counts, SQL, or watermarks.";
+
+#[cfg(test)]
+mod grounding_tests {
+    use super::*;
+
+    /// Reads the router off a CONSTRUCTED server, not `grounded_router()` directly: `list_tools` serves
+    /// `self.tool_router`, and a `#[tool_handler]` left on its default would serve the generated router
+    /// instead, shipping ungrounded descriptions while a test calling `grounded_router()` still passed.
+    #[test]
+    fn every_tool_description_ends_with_the_grounding_rule() {
+        let server = SqlFlowMcp::new(Arc::new(DocsIndex::load()), Arc::new(ControlPlane::from_env(true)));
+
+        // Through ServerHandler::get_tool, which the #[tool_handler] macro generates from the SAME router
+        // expression as list_tools. Reading server.tool_router directly would pass even with the macro left on
+        // its default, which serves the ungrounded generated router: that is the bug this guards.
+        let served = ServerHandler::get_tool(&server, "find_similar_questions")
+            .expect("find_similar_questions is served");
+        assert!(
+            served.description.as_deref().unwrap_or("").ends_with(GROUNDING_RULE),
+            "the SERVED description lacks the grounding rule; is #[tool_handler] missing `router = self.tool_router`?"
+        );
+
+        let tools = server.tool_router.list_all();
+        assert!(tools.len() > 50, "expected the full tool set, got {}", tools.len());
+        for tool in tools {
+            let description = tool.description.as_deref().unwrap_or("");
+            assert!(
+                description.ends_with(GROUNDING_RULE),
+                "tool '{}' lacks the grounding rule: {description}",
+                tool.name
+            );
+            assert!(
+                description.len() > GROUNDING_RULE.len() + 10,
+                "tool '{}' has no description of its own",
+                tool.name
+            );
         }
     }
 }
@@ -499,6 +558,11 @@ pub struct StreamAnomalyInput {
     /// full day-by-day series and every detector's reasoning.
     #[serde(rename = "pipelineId")]
     pub pipeline_id: Option<String>,
+    /// The flow's NAME (for example "apc_norgesbuss_calls_02_ing") to drill into, for when the question names
+    /// the flow rather than its id: resolved to the pipeline server-side, so "why is this flow flagged" is
+    /// one call. Ignored when pipelineId is given.
+    #[serde(rename = "flowName")]
+    pub flow_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -745,14 +809,42 @@ const ANSWER_FORMAT: &str = "If your own instructions already define how to lay 
     confirm_question now, and only call it later if the person, after seeing this result, explicitly says it \
     is correct, corrects it, or asks you to save it.";
 
-/// How to behave between find_similar_questions and the answer. Carried in the result because the server
-/// instructions that say the same can be truncated by the client, and a model left to itself narrates its
-/// retrieval ("the only match is not trusted") in exactly the internal terms a business reader should never see.
-const RETRIEVAL_RULE: &str = "Say nothing to the person yet. Do not comment on these matches, whether any is \
-    trusted, their scores, saved answers or reports, or what you will look up next, and do not announce that you \
-    are building a query. Work silently until you have the answer or a query to offer, then reply once, laid out \
-    as your instructions describe or, when you have them, as auto_run_trusted_match, run_query, or prepare_query \
-    hands back.";
+/// THE single source of truth for the silent-retrieval rule: on the business-question path the person hears the
+/// answer, never the machinery that found it. Every place that states the rule (the tool descriptions, the server
+/// instructions, and the `responseRule` carried in the result) composes this text rather than restating it, so the
+/// wording cannot drift between them.
+///
+/// It is stated in three places on purpose, because each covers a window the others cannot. A tool description is
+/// the only one guaranteed to be read BEFORE the first call, so it is the only thing covering the opening preamble;
+/// the server instructions can be truncated by a client long before the business-question section; and the
+/// `responseRule` in the payload always arrives, but only once a call has already been made. The rule therefore
+/// leads the `find_similar_questions` description, where it is read before the model composes anything at all.
+/// It is a macro rather than a `const` so the server instructions can splice it with `concat!`, which needs a
+/// literal. The one place that cannot use it is the `#[tool(description = ...)]` attribute on
+/// `find_similar_questions`: rmcp's macro rejects anything but a bare literal, so that description repeats the
+/// text and `tool_description_leads_with_the_silent_rule` fails the build if the two ever drift apart.
+macro_rules! silent_retrieval_rule {
+    () => {
+        "Say nothing to the person before or between the tool calls on this path: no preamble, no restating the \
+        question, no announcing what you are about to look up or that you are building a query, and no commentary \
+        on what came back (whether a match is trusted, its score, who confirmed it, saved answers, reports, or tool \
+        names). All of that is yours to act on, never to narrate: to a business reader it reads as the assistant \
+        explaining its own plumbing, and calling a match untrusted or low-scoring reads as the assistant being \
+        unreliable. Work silently until you have the answer or a query to offer, then reply once."
+    };
+}
+
+/// The rule as a value, for the tests that hold every carrier of it to the one wording.
+#[cfg(test)]
+const SILENT_RETRIEVAL_RULE: &str = silent_retrieval_rule!();
+
+/// How to behave between find_similar_questions and the answer, as carried in that tool's own result. The rule
+/// itself is [`SILENT_RETRIEVAL_RULE`]; this adds only where the finished reply's layout comes from.
+const RETRIEVAL_RULE: &str = concat!(
+    silent_retrieval_rule!(),
+    " Lay that one reply out as your instructions describe or, when you have them, as auto_run_trusted_match, \
+    run_query, or prepare_query hands back."
+);
 
 /// Attaches the silent-retrieval rule to a find_similar_questions response; an error payload is left alone.
 fn attach_retrieval_rule(value: &mut Value) {
@@ -1275,33 +1367,65 @@ and fix every finding first."
         }
     }
 
-    #[tool(description = "Poll the pending device-flow sign-in (or report current auth state).")]
+    #[tool(
+        description = "Poll the pending device-flow sign-in (or report current auth state). With no sign-in \
+            in progress, this asks the control plane who the stored credential actually authenticates as \
+            (`GET /api/v1/me`) rather than trusting the locally cached expiry, so it never reports \
+            \"Authenticated\" for a credential the server has since revoked or lost (a revoked token, a session \
+            past its maximum age, or a local-dev catalog reset). A rejected credential is cleared automatically; \
+            call login again."
+    )]
     async fn check_auth_status(&self, Parameters(input): Parameters<CheckAuthInput>) -> String {
         if self.http_mode {
             return HTTP_MODE_AUTH_NOTE.to_string();
         }
         let code = input.device_code.or_else(|| self.cp.pending_device_code());
         let Some(code) = code else {
-            return if self.cp.is_authenticated() {
-                "Authenticated.".to_string()
-            } else {
-                "Not authenticated and no sign-in in progress. Call login first.".to_string()
+            return match self.cp.whoami().await {
+                Ok(WhoAmI::Authenticated { subject, role, scopes }) => {
+                    let role = role.map(|r| format!(", role {r}")).unwrap_or_default();
+                    let scopes = if scopes.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", scopes: {}", scopes.join(" "))
+                    };
+                    format!("Authenticated as {subject}{role}{scopes}.")
+                }
+                Ok(WhoAmI::Unauthenticated) => {
+                    if let Some(reason) = self.cp.session_ended_reason() {
+                        format!("The stored session ended: {reason} Call login to sign in again.")
+                    } else if self.cp.has_token() {
+                        self.cp.clear_token();
+                        "The stored credential was rejected by the control plane (expired, revoked, or the \
+                            catalog it lived in was reset). It has been cleared; call login again."
+                            .to_string()
+                    } else {
+                        "Not authenticated and no sign-in in progress. Call login first.".to_string()
+                    }
+                }
+                Err(e) => format!(
+                    "Could not verify authentication with the control plane: {e:#}. Check \
+                        check_connectivity, then try again."
+                ),
             };
         };
         match self.cp.poll_device_token(&code).await {
             Ok(PollOutcome::Approved(t)) => {
-                // The device grant hands back a short-lived session token. Exchange it for a long-lived, self-
-                // rotating personal access token so the user does not have to sign in again; if the control plane
-                // cannot mint one, the device token stands and sign-in still succeeds.
-                let scope = if t.scope.is_empty() { "read operate".to_string() } else { t.scope.clone() };
-                match self.cp.provision_managed_token(&scope).await {
-                    Ok(()) => format!(
-                        "Signed in. A long-lived access token (scopes: {scope}) was provisioned and will refresh automatically; you will not need to sign in again while this client stays in use."
-                    ),
-                    Err(_) => format!(
-                        "Signed in. Scopes: {}. (Could not provision a long-lived token; this session token expires and will need a fresh sign-in.)",
-                        if scope.is_empty() { "(none reported)".into() } else { scope }
-                    ),
+                // The device grant hands back a session token with the same lifetime and the same absolute cap as the
+                // approving browser session. It is kept as is and rolled on the GUI's schedule; no longer-lived
+                // credential is minted in its place.
+                let scopes = if t.scope.is_empty() { "(none reported)".to_string() } else { t.scope.clone() };
+                if t.renews {
+                    format!(
+                        "Signed in. Scopes: {scopes}. The session renews itself a few minutes before each token \
+                         expires, for as long as the control plane's session limit allows (measured from your \
+                         browser sign-in, 30 days by default); after that, call login again."
+                    )
+                } else {
+                    format!(
+                        "Signed in. Scopes: {scopes}. This credential does not renew (it was approved from a \
+                         personal access token or bootstrap session), so call login again when it expires."
+                    )
                 }
             }
             Ok(PollOutcome::Pending) => "Still waiting for approval. Approve in the browser, then check again.".to_string(),
@@ -1317,26 +1441,21 @@ and fix every finding first."
         if self.http_mode {
             return HTTP_MODE_AUTH_NOTE.to_string();
         }
-        let token = input.token.trim().to_string();
-        let is_pat = token.starts_with("sqlf_");
-        let scope = input.scope.unwrap_or_else(|| "read operate".to_string());
-        self.cp.set_token(crate::config::TokenCache {
-            access_token: token,
-            scope: scope.clone(),
-            expires_at: None,
-            token_id: None,
-            // A pasted personal access token is already long-lived and owned by the user; we do not manage its
-            // lifecycle. A pasted session token is short-lived, so we exchange it below for one we do manage.
-            renewable: false,
-        });
-        if is_pat {
-            "Access token stored.".to_string()
-        } else {
-            match self.cp.provision_managed_token(&scope).await {
-                Ok(()) => "Access token stored and exchanged for a long-lived, self-refreshing token.".to_string(),
-                Err(_) => "Access token stored.".to_string(),
-            }
-        }
+        // A pasted token is dated from its own exp claim and renews exactly when it is an interactive session (it
+        // carries auth_time); a personal access token keeps the lifetime its owner gave it.
+        let cache = crate::config::TokenCache::from_bearer(
+            input.token.trim().to_string(),
+            input.scope.unwrap_or_else(|| "read operate".to_string()),
+        );
+        let reply = match (cache.renews, cache.expires_at) {
+            (true, _) => "Access token stored. It is an interactive session, so it renews itself before each token \
+                expires, up to the control plane's session limit; after that, call login again."
+                .to_string(),
+            (false, Some(exp)) => format!("Access token stored. It does not renew and expires at {exp}."),
+            (false, None) => "Access token stored.".to_string(),
+        };
+        self.cp.set_token(cache);
+        reply
     }
 
     #[tool(description = "Forget the stored access token.")]
@@ -1387,7 +1506,13 @@ and fix every finding first."
         self.get("/api/v1/pipelines/batches", &q).await
     }
 
-    #[tool(description = "Get one pipeline (flow) by id.")]
+    #[tool(
+        description = "Get one pipeline (flow) by id: its identity, YAML, definition, `runsOnSchedule` (whether a \
+            schedule fire runs it at all: active and in auto mode), and `loadProfile`, the server's statement \
+            of how it loads (`readMode` full / incremental / window / generated / external / notApplicable / \
+            unknown, `summary`, `read`, `write`, `keyColumns`, `watermarkColumns`, `replacesTargetEachRun`). \
+            Answer \"is this flow a full load or incremental\" from `loadProfile`, never from reading the YAML."
+    )]
     async fn get_pipeline(&self, Parameters(input): Parameters<GuidInput>) -> String {
         self.get(&format!("/api/v1/pipelines/{}", input.id), &[]).await
     }
@@ -1427,7 +1552,14 @@ and fix every finding first."
 
     // ---- Runs (read) -----------------------------------------------------
 
-    #[tool(description = "List runs, filterable by repo, pipeline, status, flow name, batch, and latest-only.")]
+    #[tool(
+        description = "List runs, filterable by repo, pipeline, status, flow name, batch, and latest-only. Each row \
+            carries the outcome (status, error, rows loaded / inserted / updated / deleted) and what kind of \
+            run it was: `triggerSource` (schedule / manual / cli), `fullLoad` and `backfillFrom`/`backfillTo` \
+            (operator overrides), and `incrementalMode` / `incrementalFilter` / `incrementalWatermark`, the \
+            read scope the engine actually applied (null when the run never reached the read or the flow \
+            kind has no incremental surface). Read those before comparing row counts across runs."
+    )]
     async fn list_runs(&self, Parameters(i): Parameters<ListRunsInput>) -> String {
         let q = vec![
             ("repoId", i.repo_id.unwrap_or_default()),
@@ -1442,7 +1574,13 @@ and fix every finding first."
         self.get("/api/v1/runs", &q).await
     }
 
-    #[tool(description = "Get one run by id (status, timings, row counts).")]
+    #[tool(
+        description = "Get one run by id: status, timings, row counts, error, the failed statement (on a failed run), \
+            what started it (`triggerSource`, `triggerScheduleId`), the operator's overrides (fullLoad, \
+            backfill window, source filter), and the incremental scope the engine actually applied \
+            (`incrementalMode`, `incrementalFilter`, `incrementalWatermark`, `incrementalWatermarkSource`). \
+            The SQL it executed is in run_statements; quote that, never reconstruct it."
+    )]
     async fn get_run(&self, Parameters(i): Parameters<RunIdInput>) -> String {
         self.get(&format!("/api/v1/runs/{}", i.run_id), &[]).await
     }
@@ -1667,13 +1805,21 @@ and fix every finding first."
 
     #[tool(
         description = "How an object is populated and HOW OFTEN it updates, in one call: every flow that WRITES \
-            the table, each with its latest run (status, when, rows loaded) and the schedules that fire it \
-            (cron/interval, timezone, enabled/paused, next and last fire; a chained schedule reports the \
-            schedules it fires after instead of a clock). The one-call answer to \"when does <table> update\", \
-            \"how is <table> loaded\", and \"did its last load work\". A view with no writing flow reports \
-            viaModules instead: the derivation lives in that module's body (describe_object shows it). An \
-            object with neither producers nor modules is loaded outside SQLFlow, and that absence IS the \
-            answer. Takes the object `key` from search_all / describe_object / lineage_objects."
+            the table, each with its `loadProfile` (derived from the flow definition: `readMode` full / \
+            incremental / window / generated / external / notApplicable / unknown, a one-sentence `summary`, \
+            the `read` and `write` behavior, `keyColumns` the upsert matches on, `watermarkColumns` that \
+            bound an incremental read, and `replacesTargetEachRun`), its `lastRun` (newest of any status, with \
+            error, trigger source, and the `incrementalMode` / `incrementalFilter` the engine actually \
+            applied), its `lastSuccessfulRun` (the last time the table was actually loaded; null if never), \
+            `runsOnSchedule` (false means no schedule fire runs it: inactive, manual, or disabled), and the \
+            schedules that fire it (cron/interval, timezone, `fires` = enabled and not paused, next and last \
+            fire; a chained schedule carries `parentSchedules` with the parents' own clocks). The one-call \
+            answer to \"when does <table> update\", \"how is <table> loaded\", \"is it a full load or \
+            incremental\", and \"did its last load work\": read those fields, never infer the load mode \
+            from the YAML or from the key (an upsert key is not a watermark). A view with no writing flow \
+            reports viaModules instead: the derivation lives in that module's body (describe_object shows \
+            it). An object with neither producers nor modules is loaded outside SQLFlow, and that absence IS \
+            the answer. Takes the object `key` from search_all / describe_object / lineage_objects."
     )]
     async fn describe_object_refresh(&self, Parameters(i): Parameters<KeyInput>) -> String {
         self.get("/api/v1/lineage/objects/refresh", &[("key", i.key)]).await
@@ -1800,7 +1946,7 @@ and fix every finding first."
     #[tool(
         description = "SEARCH WHAT CHANGED IN A MANAGED DATABASE (tables, views, procedures, functions). Use \
             this for questions about DATABASE OBJECTS: 'what changed in the warehouse last week', 'when did \
-            this column appear', 'was anything dropped from arc', 'has pre.v_Bysykkel_Trips been edited'. \
+            this column appear', 'was anything dropped from arc', 'has pre.v_Citybikes_Trips been edited'. \
             Returns one row per object per change: database, category (Table/View/StoredProcedure/...), \
             schema, name, changeType (Added|Changed|Deleted), the commit that holds the DDL diff, and \
             occurredUtc. Filter with database, changeType, since (ISO instant), and search (matches the \
@@ -1889,7 +2035,7 @@ and fix every finding first."
 
     #[tool(
         description = "SEARCH WHAT CHANGED IN THE PIPELINE DEFINITIONS (the flow YAML in git). Use this for \
-            questions about ETL CODE: 'what pipelines changed this week', 'who edited the citybike flows', \
+            questions about ETL CODE: 'what pipelines changed this week', 'who edited the cyclehire flows', \
             'which commits mention watermark', 'what changed under the apc folder'. Returns commits newest \
             first: sha, shortSha, author name and email, committedUtc, the message, and the paths each \
             commit touched. Filter with path (a repo-relative file or folder prefix), author, message \
@@ -2158,7 +2304,17 @@ and fix every finding first."
     }
 
     #[tool(
-        description = "ONLY call this when the user's message is the explicit command `!cwd <question>` - \
+        // The first sentence is SILENT_RETRIEVAL_RULE, kept verbatim in sync by the
+        // `tool_description_leads_with_the_silent_rule` test below: rmcp's #[tool] attribute takes only a
+        // literal, so this one site cannot compose the macro and is asserted instead.
+        description = "Say nothing to the person before or between the tool calls on this path: no preamble, no \
+            restating the question, no announcing what you are about to look up or that you are building a query, \
+            and no commentary on what came back (whether a match is trusted, its score, who confirmed it, saved \
+            answers, reports, or tool names). All of that is yours to act on, never to narrate: to a business \
+            reader it reads as the assistant explaining its own plumbing, and calling a match untrusted or \
+            low-scoring reads as the assistant being unreliable. Work silently until you have the answer or a \
+            query to offer, then reply once. \
+            ONLY call this when the user's message is the explicit command `!cwd <question>` - \
             e.g. \"!cwd what is our revenue by region\", \"!cwd how many customers churned\". The `!cwd` \
             prefix is what marks a message as a typed BUSINESS QUESTION bound for this tool; strip it and \
             pass the remainder as `question`. Do NOT guess from phrasing alone that a message unprefixed by \
@@ -2189,10 +2345,7 @@ and fix every finding first."
             search_semantic_layer, or any other lookup to confirm the table it reads is real before offering it. That verification is what \
             being trusted already means, and re-deriving it defeats the reason this store exists, which is \
             to reuse a checked answer instead of re-checking one. Only an UNTRUSTED match (or none at all) is \
-            a lead rather than an answer. Do not narrate between tool calls: the response's `responseRule` \
-            says to work silently until you have a result or a query to approve. Treat that as your own working knowledge, never as something to tell \
-            the person: do not say a match is untrusted, low-scoring, or below a threshold, since to a business \
-            reader that sounds like the assistant is unreliable; just ask whether to run the query. Only then fall back to \
+            a lead rather than an answer; just ask whether to run the query. Only then fall back to \
             search_semantic_layer/describe_semantic_table to compose or verify something yourself. A trusted confirmed match runs with \
             auto_run_trusted_match; anything else goes through prepare_query/run_query. Each match also \
             carries a `provenance`: \"powerbi\" means a dashboard asks this question, \"user-confirmed\" means \
@@ -2452,8 +2605,17 @@ and fix every finding first."
             A zero-row day is judged against what the table normally does on THAT KIND OF DAY: reliability \
             is learned per weekday, and how often it delivers is the median week rather than the mean day, \
             so a feed that never loads at weekends is not reported every Saturday and an outage cannot \
-            teach the detector that outages are normal. Where the stream joins a schedule, the cadence \
-            comes from its cron instead. \
+            teach the detector that outages are normal. \
+            \
+            A cron says how often the platform ASKS the source, not how often the answer differs, and the \
+            two part company on reference and dimension tables: a twenty-five row account list read every \
+            morning that changes twice a year delivers on a few percent of its runs. A stream that delivers \
+            on under half the days its flow ran and succeeded is CHANGE-DRIVEN (pattern.changeDriven, and \
+            profile.deliveryShare is the evidence): its empty days are its normal, its silence is measured \
+            against its own changes or not at all, and a quiet one is category rarely-changes at OK rather \
+            than a stalled outage. Its flow is still held to the cron by the cadence detector, which is the \
+            failure that can actually befall such a table. Where a stream does deliver per fire, the cron \
+            remains the delivery cadence exactly as before. \
             \
             Only streams on an ENABLED schedule are analysed by default: a flow nothing schedules has no \
             say in whether data is delivered. The answer reports how many were left out for that reason. \
@@ -2465,18 +2627,37 @@ and fix every finding first."
             \
             Six detectors vote. Three are PRIMARY and can raise a finding alone: silence (no data now), \
             nullDays (more empty days than the median week explains), cadence (the flow stopped running). \
-            Three measure volume and corroborate: rateChange (overdispersion-adjusted count rate), \
-            levelShift (PELT change point: halved and STAYED halved), volumeOutlier (generalized ESD). \
-            Trust a finding with agreeingDetectors >= 2; treat a lone one as a lead. Each stream also \
-            carries its learned PATTERN (shape, load weekdays, typical row band, reliability) and its \
-            averages per run. \
+            Three measure volume and corroborate: rateChange (the last 7 days against the baseline rate, \
+            overdispersion-adjusted, and it must ALSO move 50% of expected volume), levelShift (PELT change \
+            point over the residuals: halved and STAYED halved, and it must ALSO move 10% of the stream\'s \
+            level), volumeOutlier (generalized ESD over the residuals, and a day must ALSO deviate 10%). \
+            Those size floors are deliberate: sigma is the stream\'s OWN noise, so a very steady feed makes a \
+            hundred-row wobble on a hundred thousand \"4 sigma\"; significance without size is not a fault. \
+            Trust a finding with agreeingDetectors >= 2; a lone detector is a lead, and a lone VOLUME \
+            detector on a stream that still loads every day is nearly always noise worth saying so about. \
             \
-            Pass pipelineId to drill one stream down to its day-by-day series and every detector\'s \
-            reasoning. Use insights_attention for run FAILURES and durations; use this for whether the \
-            DATA is arriving."
+            Every detector, fired or quiet, returns a `detail` sentence carrying its evidence with the \
+            numbers in it (rows delivered against rows expected, sigma, the date a level moved, how many \
+            expected days went empty and whether the flow ran on them). Each stream also carries its \
+            learned PATTERN (shape, load weekdays, typical row band, reliability, any recurring delivery \
+            cycle) and a PROFILE (expected days, missed days split into ran-empty and no-run, predicted \
+            misses, trend, averages per run, days trimmed as reprocessing). \
+            \
+            Pass pipelineId, or flowName, to drill one stream down to its day-by-day series (rows written, \
+            expected, sigma severity, flagged and why) and every detector\'s reasoning: that is the answer to \
+            \"why is this table flagged\". The method is documented in the concept page \
+            data-stream-detection (search_docs). Use insights_attention for run FAILURES and durations; \
+            use this for whether the DATA is arriving."
     )]
     async fn detect_stream_anomalies(&self, Parameters(i): Parameters<StreamAnomalyInput>) -> String {
-        if let Some(id) = i.pipeline_id.as_deref().filter(|s| !s.is_empty()) {
+        let pipeline_id = match self
+            .resolve_stream_pipeline(i.pipeline_id.as_deref(), i.flow_name.as_deref())
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => return format!("Error: {e:#}"),
+        };
+        if let Some(id) = pipeline_id {
             let q = vec![
                 ("days", i.days.map(|n| n.to_string()).unwrap_or_default()),
                 ("includeBackfills", i.include_backfills.map(|b| b.to_string()).unwrap_or_default()),
@@ -2499,6 +2680,66 @@ and fix every finding first."
         ];
         self.get_about("/api/v1/datastreams", &q, ("board", "datastreams"),
             json!({ "page": self.links.datastreams() })).await
+    }
+
+    /// Which single stream a caller means, or none for the board: the pipeline id they gave, else the flow
+    /// whose NAME they gave, resolved through the pipeline list. The list filters by substring, so the exact
+    /// name wins when it is among the hits, a single hit is taken as the answer, and anything else is
+    /// reported with the candidates rather than guessed, because the drill-down of the wrong stream reads
+    /// exactly like the drill-down of the right one.
+    async fn resolve_stream_pipeline(
+        &self,
+        pipeline_id: Option<&str>,
+        flow_name: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        if let Some(id) = pipeline_id.map(str::trim).filter(|s| !s.is_empty()) {
+            return Ok(Some(id.to_string()));
+        }
+
+        let Some(name) = flow_name.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+
+        let page = self
+            .cp
+            .get("/api/v1/pipelines", &[("name", name.to_string()), ("pageSize", "50".to_string())])
+            .await?;
+        let items: Vec<&Value> = page["items"].as_array().into_iter().flatten().collect();
+        let exact: Vec<&Value> = items
+            .iter()
+            .copied()
+            .filter(|p| p["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+            .collect();
+        let chosen = match (exact.len(), items.len()) {
+            (1, _) => exact[0],
+            (0, 1) => items[0],
+            (0, 0) => anyhow::bail!(
+                "No pipeline is named '{name}'. Try search_flows with a fragment of the name, then pass pipelineId."
+            ),
+            _ => {
+                let candidates = if exact.is_empty() { &items } else { &exact };
+                let listed: Vec<String> = candidates
+                    .iter()
+                    .map(|p| {
+                        format!(
+                            "{} ({})",
+                            p["name"].as_str().unwrap_or("?"),
+                            p["id"].as_str().unwrap_or("?")
+                        )
+                    })
+                    .collect();
+                anyhow::bail!(
+                    "'{name}' matches {} pipelines: {}. Pass pipelineId to choose one.",
+                    listed.len(),
+                    listed.join(", ")
+                );
+            }
+        };
+
+        chosen["id"]
+            .as_str()
+            .map(|id| Some(id.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("The pipeline list returned no id for '{name}'."))
     }
 
     #[tool(
@@ -3210,7 +3451,7 @@ pub struct ObjectCompareInput {
 pub struct FlowHistoryInput {
     #[serde(rename = "repoId")]
     pub repo_id: Option<String>,
-    /// A repo-relative file or folder prefix, e.g. "citybike" or "citybike/citybike_00_api.yaml".
+    /// A repo-relative file or folder prefix, e.g. "cyclehire" or "cyclehire/cyclehire_00_api.yaml".
     pub path: Option<String>,
     /// Substring match on the commit author's name or email.
     pub author: Option<String>,
@@ -3382,7 +3623,10 @@ mod surface_tests {
     }
 }
 
-#[tool_handler]
+// `router = self.tool_router` on purpose: the macro otherwise generates `list_tools`/`get_tool` against
+// `Self::tool_router()`, the freshly generated router, so the GROUNDING_RULE that `grounded_router` appends
+// would be applied to a router no client ever reads. The field is the grounded one built in `with_mode`.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for SqlFlowMcp {
     /// Hand-written dispatch (the #[tool_handler] macro only generates `call_tool`
     /// when the impl lacks one): over HTTP, rmcp injects the request's
@@ -3442,17 +3686,19 @@ const DISCOVERY_STDIO: &str = "\
 const ONLINE_SETUP_STDIO: &str = "\
 ONLINE (needs the control plane; sign in first):
 - Setup: get/set_control_plane_url, check_connectivity, login (device flow) then check_auth_status,
-  or set_access_token to paste a bearer token.
+  or set_access_token to paste a bearer token. A signed-in session renews itself in the background up to
+  the control plane's session limit; check_auth_status reports when a fresh sign-in is needed.
 ";
 
 const ONLINE_SETUP_HTTP: &str = "\
 ONLINE (needs the control plane):
-- Auth is per request: every call to this server already carries the caller's bearer token, and
-  control-plane requests run as that caller with scopes enforced server-side. There is no login
-  step; check_connectivity probes reachability.
+- Auth is per request: every call to this server already carries the caller's bearer token, verified
+  with the control plane before any tool runs, and control-plane requests run as that caller with its
+  authority enforced server-side. There is no login step; check_connectivity probes reachability.
 ";
 
-const INSTRUCTIONS_ONLINE_TAIL: &str = "\
+const INSTRUCTIONS_ONLINE_TAIL: &str = concat!(
+    "\
 - Read: list_repos, list_pipelines, get_pipeline, pipeline_definition, pipeline_columns,
   pipeline_file_stats, list_runs,
   get_run, run_statements/assertions/files/health_metrics, lineage_objects/_detail/_columns/_edges/
@@ -3479,18 +3725,17 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
   Adapting a close match beats composing new SQL from scratch. A `trusted` match carrying an `exampleId`
   MUST be run immediately with auto_run_trusted_match: never prepare_query/run_query for it, never ask the
   person for permission, and never ask which datasource to use (it is worked out from the tables the SQL
-  reads). Do not narrate between tool calls on this path (no \"found a trusted match\", no \"let me run
-  it\"): say nothing until you have the result, then answer ONCE for a business reader, opening with the
-  finding in a plain sentence (\"You have 4 customers.\"), without scores, matched terms, provenance, who
-  confirmed it, datasource references, or tool names unless asked. ALWAYS close that answer with the SQL
+  reads). ",
+    silent_retrieval_rule!(),
+    " Answer ONCE for a business reader, opening with the
+  finding in a plain sentence (\"You have 4 customers.\"). ALWAYS close that answer with the SQL
   that actually ran: the result's `sqlIntro` line (\"Here's the saved query I ran:\"), then its `sqlBlock`
   copied exactly as its own fenced code block (the result's `answerFormat` spells this out), so the person can check it, rerun
   it, or confirm it. Never put it inline in a sentence, paraphrase it, or omit it, however obvious the
   query looks. The same goes for every answer backed by run_query.
   Only fall through to search_semantic_layer/describe_semantic_table when nothing
   matches, or every match is untrusted and you need to understand the schema to write a fresh query.
-  Whether a match is trusted, and its score, are for YOU: never tell the person a match is untrusted,
-  low-scoring, or below a threshold, and never ask them to judge the data source. When a query needs their
+  Never ask them to judge the data source. When a query needs their
   approval, open with \"I don't have a saved answer for this question yet, so I've put together a query that
   should answer it.\" (or, for a question a report already answers, that a report already answers it), say
   what it will show, give the SQL, and ask \"Want me to run it?\" (prepare_query's
@@ -3540,10 +3785,16 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
 - Ask about an object (text-to-query): describe_object returns one object's identity, columns, generating
   script, module body, and lineage edges in one call: start here to reason about, or author SQL against, a
   specific table or view.
-- \"When does <table> update / how is it populated / did its last load work?\": describe_object_refresh(key)
-  answers all three at once: the writing flows, each flow's latest run, and the schedules that fire it with
-  the next fire time. For a view it names the modules the content derives from instead; read them with
-  describe_object.
+- \"When does <table> update / how is it populated / is it full or incremental / did its last load work?\":
+  describe_object_refresh(key) answers all four at once: the writing flows, each with its `loadProfile`
+  (`readMode`, `summary`, `keyColumns`, `watermarkColumns`, `replacesTargetEachRun`), its `lastRun` and
+  `lastSuccessfulRun`, `runsOnSchedule`, and the schedules that fire it with the next fire time. State the
+  load mode from `loadProfile.readMode`, never from the YAML or the key. When the latest run failed, say so
+  and give `lastSuccessfulRun` as the last time the table was loaded. For a view it names the modules the
+  content derives from instead; read them with describe_object.
+- Every fact you state must be a value a tool returned. If no tool returned it, say so and name the tool
+  that would; never fill a gap with what a flow of that kind usually does. Executed SQL comes only from
+  run_statements; never reconstruct it from a flow settings.
 - \"Where does <table>'s data come from / what feeds it / what depends on it?\": object_lineage(key) walks
   the graph transitively, upstream to the true origin (the source system's table, file, or API endpoint) and
   downstream to every dependent, each step naming the flow that carries the hop. Use it whenever the answer
@@ -3568,7 +3819,8 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = "\
 - Operate (privileged): trigger_run, cancel_run, analyze_warehouse_health.
 
 SQLFlow authors T-SQL against SQL Server and orchestrates it with `.flow.yaml` documents. It is a
-distinct product from DeltaForge; use these tools and the embedded corpus as the source of truth.";
+distinct product from DeltaForge; use these tools and the embedded corpus as the source of truth."
+);
 
 #[cfg(test)]
 mod tests {
@@ -3754,6 +4006,36 @@ mod tests {
         let mut error = json!("Error: the control plane is unreachable");
         attach_retrieval_rule(&mut error);
         assert_eq!(error, json!("Error: the control plane is unreachable"));
+    }
+
+    /// The silent rule has to reach the model BEFORE it writes its opening line, and a tool description is the
+    /// only carrier guaranteed to do that: the server instructions can be truncated by the client, and the
+    /// `responseRule` in the payload arrives only after a call has been made. So the rule leads the description
+    /// rather than sitting deep inside it, where a model composing a preamble has already passed it by.
+    #[test]
+    fn tool_description_leads_with_the_silent_rule() {
+        let router = SqlFlowMcp::tool_router();
+        let tool = router
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "find_similar_questions")
+            .expect("find_similar_questions is a registered tool");
+        let description = tool.description.clone().unwrap_or_default();
+
+        // rmcp's #[tool] attribute takes only a literal, so this description cannot compose
+        // silent_retrieval_rule!(). Asserting the prefix is what keeps that one copy from drifting.
+        assert!(
+            description.starts_with(SILENT_RETRIEVAL_RULE),
+            "find_similar_questions must lead with SILENT_RETRIEVAL_RULE verbatim, but began:\n{}",
+            &description[..description.len().min(240)]
+        );
+    }
+
+    /// Every carrier of the rule states the same thing, so a fix to one is a fix to all.
+    #[test]
+    fn the_response_rule_is_built_from_the_shared_silent_rule() {
+        assert!(RETRIEVAL_RULE.starts_with(SILENT_RETRIEVAL_RULE));
+        assert!(INSTRUCTIONS_ONLINE_TAIL.contains(SILENT_RETRIEVAL_RULE));
     }
 
     #[test]

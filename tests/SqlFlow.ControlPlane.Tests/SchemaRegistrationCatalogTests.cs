@@ -4,6 +4,7 @@ using SqlFlow.Catalog;
 using SqlFlow.ControlPlane.Api;
 using SqlFlow.Core.Identity;
 using SqlFlow.Core.SchemaRegistration;
+using SqlFlow.Dispatch;
 using SqlFlow.Lineage.Collection;
 using SqlFlow.SqlServer.Catalog;
 using Xunit;
@@ -94,8 +95,8 @@ public sealed class SchemaRegistrationCatalogTests
                 var runJson = Path.Combine(dir, "first.json");
                 await File.WriteAllTextAsync(runJson, Artifact(Guid.NewGuid(), flowName, ("Orders", "Table"), ("OrderLines", "View")));
                 Assert.Equal(
-                    RunCompletionOutcome.Recorded,
-                    await RunQueueStore.CompleteFromArtifactAsync(db, RunIdOf(runJson), repoId, runJson, DateTime.UtcNow));
+                    RunOutcomeStatus.Recorded,
+                    (await RunQueueStore.CompleteFromArtifactAsync(db, RunIdOf(runJson), runJson, DateTime.UtcNow)).Status);
             }
 
             await using (var db = CatalogDatabase.Create(cs))
@@ -124,8 +125,8 @@ public sealed class SchemaRegistrationCatalogTests
                 var runJson = Path.Combine(dir, "second.json");
                 await File.WriteAllTextAsync(runJson, Artifact(Guid.NewGuid(), flowName, ("Customers", "Table")));
                 Assert.Equal(
-                    RunCompletionOutcome.Recorded,
-                    await RunQueueStore.CompleteFromArtifactAsync(db, RunIdOf(runJson), repoId, runJson, DateTime.UtcNow));
+                    RunOutcomeStatus.Recorded,
+                    (await RunQueueStore.CompleteFromArtifactAsync(db, RunIdOf(runJson), runJson, DateTime.UtcNow)).Status);
             }
 
             await using (var db = CatalogDatabase.Create(cs))

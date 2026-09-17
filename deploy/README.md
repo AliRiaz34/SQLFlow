@@ -4,9 +4,9 @@ Three core images, plus optional ones for the Slack assistant and for Power BI u
 
 | Image | Built from | Scales on | Behind the ingress? |
 |---|---|---|---|
-| `sqlflow-control-plane` | `Dockerfile` | request load (HPA) | yes, under `/api` |
+| `sqlflow-control-plane` | `Dockerfile` | one replica (dispatch has one owner) | yes, under `/api` |
 | `sqlflow-gui` | `gui/Dockerfile` | trivially (static) | yes, under `/` |
-| `sqlflow-worker` | `Dockerfile.worker` | queue depth (KEDA) | never (pull model, no inbound surface) |
+| `sqlflow-worker` | `Dockerfile.worker` | the control plane's replica target (KEDA) | never (pull model: it polls the control plane for work, no inbound surface) |
 | `sqlflow-mcp` (optional) | `Dockerfile.mcp` | pinned to 1 (in-memory MCP sessions) | own ingress, bearer-gated `/mcp` |
 | `sqlflow-slack-bot` (optional) | `Dockerfile.slackbot` | pinned to 1 (Socket Mode dials out) | never |
 | `sqlflow-pbix-extractor` (optional) | `Dockerfile.pbix-extractor` | upload volume (slot-limited per replica) | never; internal only, called by the control plane |
@@ -29,6 +29,18 @@ docker compose up -d --build
 docker compose up -d --scale worker=3   # more compute, nothing else changes
 ```
 
+Workers take work from the control plane's dispatcher over HTTP, authenticated with a personal access token
+minted with the `node` scope. That token can only be minted once the control plane is running, so a first
+start is two steps: bring up everything but the worker, sign in as the admin and mint the token
+(`POST /api/v1/me/tokens` with scopes `["node"]`, or the GUI's token page), set it as `SQLFLOW_NODE_TOKEN` in
+`.env`, then start the worker:
+
+```bash
+docker compose up -d mssql controlplane gui
+# mint the node token, put it in .env as SQLFLOW_NODE_TOKEN
+docker compose up -d worker
+```
+
 The stack includes the isolated Power BI extractor (`pbix-extractor`), which reads `.pbix` files uploaded on the
 Semantic layer page. It is attached only to an `internal` network it shares with the control plane, publishes no
 port, runs read-only with every capability dropped, and holds nothing but `SQLFLOW_EXTRACTOR_KEY`, the key the two
@@ -45,7 +57,7 @@ The same three-tier layout on managed infrastructure, one template per tier plus
 |---|---|
 | `main.bicep` | The full estate: Log Analytics + the Container Apps environment, a Key Vault holding every secret, an Azure SQL catalog database, and the three apps below. |
 | `control-plane.bicep` | The API as an always-on Container App. Standalone it is the single-app mode ADF triggers; `main.bicep` runs it API-only. |
-| `worker.bicep` | One worker pool: no ingress, scaled 0..N on queue depth by the built-in KEDA mssql scaler. One deployment per pool. |
+| `worker.bicep` | One worker pool: no ingress, scaled 0..N on the control plane's replica target by the built-in KEDA metrics-api scaler, authenticated with the node token. One deployment per pool. |
 | `gui.bicep` | The SPA behind its own ingress. |
 | `ai-foundry.bicep` | Optional: an Azure AI Foundry account + project beside the estate (`aiFoundryName` on `main.bicep`), the app identities granted keyless caller access, plus an optional pinned model deployment (`aiFoundryModelName`) and Responses API access (Cognitive Services OpenAI User) for the Slack bot identity. |
 | `mcp.bicep` | Optional: the SQLFlow MCP server in HTTP mode (`mcpImage` on `main.bicep`), the tool source for the Foundry agent and any remote MCP client. Holds no credentials; every `/mcp` request must present a SQLFlow bearer token, which it forwards to the control plane. |
@@ -75,8 +87,8 @@ the user); point ADF at `controlPlaneBaseUrl` (see `deploy/adf`). How the k8s la
 - **Two origins instead of a path split**: every Container App has its own ingress FQDN, so `main.bicep` wires
   the GUI's `SQLFLOW_API_BASE_URL` to the control plane URL and CORS-lists the GUI origin on the control plane.
   Put Front Door or Application Gateway in front of both apps to restore the one-host layout, then blank both.
-- **KEDA is built in**: `worker.bicep` runs the same mssql queue-depth query as `worker-pool.yaml` with
-  `minReplicas: 0`. Add a pool with another deployment of it (`-p name=sqlflow-worker-<pool> pool=<pool>`).
+- **KEDA is built in**: `worker.bicep` reads the same scale-target endpoint as `worker-pool.yaml`, with
+  `minReplicas: 0` and the node token as the scaler's credential. Add a pool with another deployment of it (`-p name=sqlflow-worker-<pool> pool=<pool>`).
 - **Secrets live in Key Vault, read by managed identity**: no secret value appears in the templates or app
   configuration, and the same identities resolve `${keyvault:...}` references at run time
   (`SQLFLOW_AZURE_AUTH=mi`). The three estate databases are wired for free: flows reach staging and the
@@ -199,20 +211,22 @@ The layout and the reasoning behind it:
 - **One host, path split** (`/api` and `/openapi` to the control plane, `/` to the GUI): the SPA runs
   same-origin with the API, so no CORS configuration exists anywhere. The GUI image's
   `SQLFLOW_API_BASE_URL=""` means "same origin".
-- **Control plane replicas are API-only** (`ControlPlane__Worker__Enabled=false`): the HTTP tier scales on
-  request load via the HPA, independent of compute. Multi-replica is safe by construction: stateless JWT
-  validation, and the scheduler / managed sync / run queue all claim work atomically in the catalog.
+- **The control plane runs one replica, API-only** (`ControlPlane__Worker__Enabled=false`): the run queue lives
+  in that process and is owned by exactly one replica through the dispatch lease, so a second replica adds no
+  dispatch capacity and refuses every node call that lands on it (the nodes retry, so a rolling update's brief
+  overlap is harmless, but a steadily larger tier only slows hand-outs). Compute scales separately.
 - **Forwarded headers are trusted from the ingress only** (`ControlPlane__Proxy__*`): set `KnownNetworks` to
   your cluster's ingress/pod CIDR. Without this, rate limiting and login throttling would key on the ingress
   address instead of the real client.
-- **Workers scale 0 to N per pool on queue depth**: KEDA's mssql scaler counts queued runs for the pool and
-  scales the matching worker Deployment; `minReplicaCount: 0` means an idle pool costs nothing. Copy
-  `worker-pool.yaml` per pool (set `SQLFLOW_WORKER_POOL` and the query's `TargetPool` predicate). Because runs
-  are pinned to the repo's synced commit at enqueue, a cold-started worker needs only its environment: it
-  materializes the exact commit from git and executes.
+- **Workers scale 0 to N per pool on the control plane's replica target**: KEDA's metrics-api scaler reads
+  `GET /api/v1/node/scale-target?pool=<name>` with the node token and scales the matching worker Deployment;
+  `minReplicaCount: 0` means an idle pool costs nothing. Copy `worker-pool.yaml` per pool (set
+  `SQLFLOW_WORKER_POOL` and the URL's `?pool=`). A cold-started worker needs only its environment: it is handed a
+  run with its definition, fetches the snapshotted YAML (or materializes the pinned commit from git) and executes.
 - **Secrets stay on the tier that uses them**: the control plane gets the catalog connection and JWT material;
-  workers additionally get the git token and every `${env:...}` connection their pool's flows reference. Nothing
-  data-plane ever passes through the control plane.
+  workers get a node token, the git token and every `${env:...}` connection their pool's flows reference, and
+  never the catalog connection: a node speaks only the node protocol, and the scaler reads the control plane with
+  that same node token. Nothing data-plane ever passes through the control plane.
 
 ## Placement reminder
 

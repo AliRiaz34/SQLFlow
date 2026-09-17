@@ -313,6 +313,31 @@ namespace SqlFlow.Catalog.Migrations
                     b.ToTable("ComputeTask", "catalog");
                 });
 
+            modelBuilder.Entity("SqlFlow.Catalog.CatalogDispatchLease", b =>
+                {
+                    b.Property<string>("Name")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<DateTime>("AcquiredUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long>("Epoch")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime>("ExpiresUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Owner")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Name");
+
+                    b.ToTable("DispatchLease", "catalog");
+                });
+
             modelBuilder.Entity("SqlFlow.Catalog.CatalogFlowDependency", b =>
                 {
                     b.Property<long>("Id")
@@ -467,6 +492,9 @@ namespace SqlFlow.Catalog.Migrations
 
                     b.Property<DateTime?>("RestartRequestedUtc")
                         .HasColumnType("datetime2");
+
+                    b.Property<int>("RunSlots")
+                        .HasColumnType("int");
 
                     b.Property<string>("Version")
                         .HasMaxLength(64)

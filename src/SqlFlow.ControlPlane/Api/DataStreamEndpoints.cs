@@ -1,4 +1,4 @@
-using System.Linq.Expressions;
+﻿using System.Linq.Expressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Routing;
@@ -18,13 +18,29 @@ namespace SqlFlow.ControlPlane.Api;
 public sealed record StreamSignalDto(
     string Detector, bool Fired, double Score, string Direction, bool Primary, string Detail);
 
+/// <summary>A recurring delivery on top of the ordinary rhythm: the vendor who ships a bigger refill every
+/// fortnight, the month-end settlement file. <c>periodDays</c> is the cycle length (0 when it repeats on a
+/// position in the calendar month, which <c>monthly</c> marks); <c>cycleRows</c> against <c>ordinaryRows</c>
+/// is how much bigger it is; <c>nextExpectedUtc</c> is the day to check.</summary>
+public sealed record StreamCycleDto(
+    int PeriodDays, bool Monthly, int Occurrences, bool Heavier, double CycleRows, double OrdinaryRows,
+    double Lift, DateTime? LastOccurrenceUtc, DateTime? NextExpectedUtc, string Description);
+
 /// <summary>What one table's traffic normally looks like, learned from its own history after reprocessing was
 /// excluded. <c>shape</c> is <c>daily</c>, <c>weekdays</c>, <c>weekly</c>, <c>several-days-a-week</c>,
-/// <c>periodic</c>, or <c>sporadic</c>; <c>loadDays</c> names the weekdays it reliably loads on;
-/// <c>reliability</c> is the share of expected days it actually delivered on.</summary>
+/// <c>fortnightly</c>, <c>monthly</c>, <c>periodic</c>, or <c>sporadic</c>; <c>loadDays</c> names the weekdays
+/// it reliably loads on;
+/// <c>reliability</c> is the share of expected days it actually delivered on; <c>cycle</c> is the recurring
+/// larger (or smaller) delivery on top of that rhythm, null for a stream that has none.</summary>
 public sealed record StreamPatternDto(
     string Shape, IReadOnlyList<string> LoadDays, double TypicalRows, double LowRows, double HighRows,
-    double Reliability, string Description);
+    double Reliability,
+    // True for a table that writes only when its SOURCE changes rather than on every run: a reference or
+    // dimension table read every morning that changes a handful of times a year. Nothing about such a stream
+    // may be judged against its schedule's firing interval, because the cron says how often we ask, not how
+    // often the answer differs.
+    bool ChangeDriven,
+    StreamCycleDto? Cycle, string Description);
 
 /// <summary>A stream's measured normal: how much it writes, how often, and where it is trending. These are the
 /// averages an operator checks a verdict against, and what every detector is calibrated on.</summary>
@@ -36,8 +52,28 @@ public sealed record StreamProfileDto(
     long TotalRowsInserted, long TotalRowsUpdated, long TotalRowsDeleted,
     double AvgRowsInsertedPerRun, double AvgRowsUpdatedPerRun, double AvgRowsDeletedPerRun,
     double AvgRowsWrittenPerLoadedDay, double MedianRowsWrittenPerLoadedDay, double TrendRowsPerDay,
-    int UnexpectedNullDays, int EmptyRunDays, int NoRunDays, double PredictedNullDays,
+    // Of the mature days the flow ran and at least one run succeeded, the share that actually wrote rows: the
+    // evidence behind ChangeDriven, and the answer to "does running this flow produce data".
+    double DeliveryShare,
+    // The days the stream was expected to load on, so a client can state the missed count as "3 of 30".
+    int ExpectedDays, int UnexpectedNullDays, int EmptyRunDays, int NoRunDays, double PredictedNullDays,
     int TrimmedLoadDays, double TrimFence);
+
+/// <summary>
+/// The stream's last two weeks, compact enough to ride on every board row: one number per day for what
+/// arrived and what was expected, plus the positions of the days the analysis flagged and the expected days
+/// that wrote nothing. A row on the board can then SHOW "less data than usual" as a shape instead of asking
+/// the reader to trust a sentence, and it costs a few hundred bytes rather than the full scored series.
+/// </summary>
+/// <param name="FromUtc">The day the first entry describes, or null when the stream has no analysed day.</param>
+/// <param name="Rows">Rows written per day, oldest first.</param>
+/// <param name="Expected">The trend-and-weekday expectation per day, aligned with <paramref name="Rows"/>.</param>
+/// <param name="FlaggedDays">Zero-based positions of the days the analysis flagged as anomalous.</param>
+/// <param name="MissedDays">Zero-based positions of the days the stream was expected to load on and did not.</param>
+/// <param name="ImmatureDays">How many trailing entries may still be receiving data and were never judged.</param>
+public sealed record StreamSparklineDto(
+    DateTime? FromUtc, IReadOnlyList<long> Rows, IReadOnlyList<double> Expected,
+    IReadOnlyList<int> FlaggedDays, IReadOnlyList<int> MissedDays, int ImmatureDays);
 
 /// <summary>One analysed day: what arrived, what was expected, and how the point was judged.</summary>
 public sealed record StreamPointDto(
@@ -49,11 +85,16 @@ public sealed record StreamPointDto(
 /// <summary>
 /// One data stream: a flow, the table it writes, and the ensemble's verdict on whether data is still arriving
 /// the way it should. <see cref="Series"/> is null on the board (a hundred streams times sixty days is a
-/// payload nobody reads) and populated on the single-stream endpoint, which is what the chart draws.
+/// payload nobody reads) and populated on the single-stream endpoint, which is what the chart draws; the
+/// board carries the two-week <see cref="Sparkline"/> instead, which is what a row draws.
 /// </summary>
 public sealed record DataStreamDto(
     Guid PipelineId, string FlowName, string FlowKind, string? Batch, bool Active, string? TargetObject,
-    // The data SOURCE this stream belongs to (Citybike, Fara, Baatbooking), from the repository layout or
+    // The lineage key of that same target, so a verdict can open the object's graph. The qualified name above
+    // is for reading; the key is the identity the lineage endpoints index on, and deriving one from the other
+    // in the client would be a second spelling of the estate's naming rules.
+    string? TargetObjectKey, string? TargetObjectKind,
+    // The data SOURCE this stream belongs to (Cyclehire, Fara, Boatbooking), from the repository layout or
     // schedule membership rather than from the flow's name. One source routinely has fifty objects, so
     // without it a board is a flat wall of tables with no way to see that forty rows are one vendor. Not the
     // same thing as Batch, which groups the flows of one DATASET inside a source.
@@ -70,7 +111,8 @@ public sealed record DataStreamDto(
     string Stage,
     string? ScheduleName, string? Cron, string? Timezone,
     string Status, string Category, string Severity, double Confidence, int AgreeingDetectors, string Summary,
-    StreamProfileDto Profile, IReadOnlyList<StreamSignalDto> Signals, IReadOnlyList<StreamPointDto>? Series);
+    StreamProfileDto Profile, IReadOnlyList<StreamSignalDto> Signals, StreamSparklineDto Sparkline,
+    IReadOnlyList<StreamPointDto>? Series);
 
 /// <summary>
 /// The data-stream board: every monitored stream with its verdict, ranked most urgent first, plus the counts
@@ -136,6 +178,25 @@ public static class DataStreamEndpoints
 
     public const int MaxResults = 500;
 
+    /// <summary>
+    /// How many streams one request may name explicitly. A caller naming its streams (the lineage graph
+    /// asking about the flows it has drawn) sends them as repeated query parameters, and a query string has a
+    /// practical ceiling; refusing past this point is a clear answer, where letting it through would be an
+    /// unexplained truncated URL somewhere between the browser and the server.
+    /// </summary>
+    public const int MaxNamedStreams = 200;
+
+    /// <summary>
+    /// How many windows of history before the analysed one are read to judge whether a stream that loaded
+    /// nothing inside the window is dead or merely static. Three is enough for the question (did running this
+    /// flow ever produce data) and bounds a query that would otherwise walk a stream's whole life.
+    /// </summary>
+    private const int PriorHistoryWindows = 3;
+
+    /// <summary>The days a board row's sparkline covers. Two weeks is long enough for a weekly stream to show
+    /// two loads and for a shortfall to read as a shape, and short enough that a row stays a row.</summary>
+    public const int SparklineDays = 14;
+
     /// <summary>Vendor deliveries: streams that bring data in from outside the estate. The default scope,
     /// because "has the vendor delivered" is the question with an owner outside this building, and because a
     /// single upstream going quiet would otherwise light up its whole downstream chain as separate findings.</summary>
@@ -193,16 +254,27 @@ public static class DataStreamEndpoints
     /// a flow nothing schedules has no say in whether data is delivered, so holding it to a delivery
     /// expectation invents an incident out of a flow that was never promised to run.</param>
     /// <param name="limit">How many streams to return (the counts still cover every analysed stream).</param>
+    /// <param name="pipelineId">Restrict to these flows, named explicitly (repeat the parameter). For a caller
+    /// that already knows which streams it is asking about, such as a lineage graph asking for the verdicts of
+    /// the flows it has drawn. The other filters still apply on top, so a caller naming its own population
+    /// normally sends <c>scope=all</c> and <c>includeUnscheduled=true</c> with it.</param>
     /// <param name="ct">Cancellation.</param>
     private static async Task<Results<Ok<DataStreamsDto>, ProblemHttpResult>> GetDataStreamsAsync(
         CatalogDbContext db, TimeProvider clock, IOptions<ControlPlaneOptions> options, int? days, Guid? repoId,
         string? batch, string? status, string? scope, bool? includeBackfills, bool? includeUnscheduled,
-        int? limit, CancellationToken ct)
+        int? limit, Guid[]? pipelineId, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (Validate(days, limit) is { } problem)
         {
             return problem;
+        }
+
+        if (pipelineId is { Length: > MaxNamedStreams })
+        {
+            return TypedResults.Problem(
+                detail: $"At most {MaxNamedStreams} pipelineId values may be named in one request.",
+                statusCode: StatusCodes.Status400BadRequest, title: "Invalid request");
         }
 
         var requested = NormalizeScope(scope);
@@ -215,7 +287,8 @@ public static class DataStreamEndpoints
 
         var report = await ComputeAsync(
             db, clock, options.Value.DataStreams, days ?? DefaultWindowDays, repoId, batch,
-            includeBackfills == true, includeUnscheduled == true, requested, pipelineId: null, ct)
+            includeBackfills == true, includeUnscheduled == true, requested,
+            pipelineId is { Length: > 0 } named ? named : null, includeSeries: false, ct)
             .ConfigureAwait(false);
 
         var filtered = string.IsNullOrWhiteSpace(status)
@@ -241,7 +314,7 @@ public static class DataStreamEndpoints
         // show it because it sits on the other side of the split would be obstruction, not filtering.
         var report = await ComputeAsync(
             db, clock, options.Value.DataStreams, days ?? DefaultWindowDays, repoId: null, batch: null,
-            includeBackfills == true, includeUnscheduled: true, AllScopes, pipelineId, ct)
+            includeBackfills == true, includeUnscheduled: true, AllScopes, [pipelineId], includeSeries: true, ct)
             .ConfigureAwait(false);
 
         var stream = report.Streams.FirstOrDefault(s => s.PipelineId == pipelineId);
@@ -257,8 +330,8 @@ public static class DataStreamEndpoints
     /// </summary>
     private static async Task<DataStreamsDto> ComputeAsync(
         CatalogDbContext db, TimeProvider clock, DataStreamOptions classification, int windowDays, Guid? repoId,
-        string? batch, bool includeBackfills, bool includeUnscheduled, string scope, Guid? pipelineId,
-        CancellationToken ct)
+        string? batch, bool includeBackfills, bool includeUnscheduled, string scope,
+        IReadOnlyList<Guid>? pipelineIds, bool includeSeries, CancellationToken ct)
     {
         var now = clock.GetUtcNow().UtcDateTime;
         var fromUtc = now.Date.AddDays(-(windowDays - 1));
@@ -267,7 +340,7 @@ public static class DataStreamEndpoints
             .Where(r => r.WrittenUtc >= fromUtc
                 && (r.Status == RunStatuses.Succeeded || r.Status == RunStatuses.Failed)
                 && (repoId == null || r.RepoId == repoId)
-                && (pipelineId == null || r.PipelineId == pipelineId));
+                && (pipelineIds == null || pipelineIds.Contains(r.PipelineId)));
 
         // Ordinary traffic only, unless the caller asked otherwise: see Reprocessing for what that excludes.
         var counted = includeBackfills ? window : window.Where(NotReprocessing);
@@ -346,6 +419,38 @@ public static class DataStreamEndpoints
                 .Select(g => new { PipelineId = g.Key, LastLoadUtc = g.Max(r => r.WrittenUtc) })
                 .ToDictionaryAsync(x => x.PipelineId, x => x.LastLoadUtc, ct).ConfigureAwait(false);
 
+        // For those same streams: how often running them USED to produce data. A window with no loads in it
+        // cannot tell a table that died from a table that simply does not change, because both run, succeed,
+        // and write nothing. The history before the window can: a stream that delivered on nearly every day it
+        // ran and has delivered on none since is an outage, while one that delivered on two days in three
+        // hundred is a reference table whose quiet is its normal.
+        //
+        // Counted per DAY, like every other measure on this surface, because a flow run several times a day
+        // delivers on the first run and reports nothing on the rest: that is an incremental load working, and
+        // per run it would look like a stream that seldom delivers.
+        var priorFrom = fromUtc.AddDays(-PriorHistoryWindows * windowDays);
+        var priorDays = silentIds.Count == 0
+            ? []
+            : await db.Runs.AsNoTracking()
+                .Where(r => silentIds.Contains(r.PipelineId)
+                    && r.WrittenUtc >= priorFrom
+                    && r.WrittenUtc < fromUtc
+                    && r.Status == RunStatuses.Succeeded)
+                .GroupBy(r => new { r.PipelineId, Day = r.WrittenUtc.Date })
+                .Select(g => new
+                {
+                    g.Key.PipelineId,
+                    LoadingRuns = g.Count(r => (r.RowsInserted ?? 0) + (r.RowsUpdated ?? 0) + (r.RowsDeleted ?? 0) > 0
+                        || (r.RowsInserted == null && r.RowsUpdated == null && r.RowsDeleted == null
+                            && (r.RowsLoaded ?? 0) > 0)),
+                })
+                .ToListAsync(ct).ConfigureAwait(false);
+        var priorDelivery = priorDays
+            .GroupBy(d => d.PipelineId)
+            .ToDictionary(
+                g => g.Key,
+                g => new PriorDelivery(g.Key, g.Count(), g.Count(d => d.LoadingRuns > 0)));
+
         // The candidates, newest activity first, so a capped sweep keeps the streams whose state is current.
         var ordered = candidateIds
             .Where(id => batchFilter is null
@@ -394,12 +499,15 @@ public static class DataStreamEndpoints
                 {
                     ExpectedGapDaysOverride = schedule?.ExpectedGapDays,
                     LastKnownLoadUtc = lastLoadBeforeWindow.TryGetValue(id, out var seen) ? seen : null,
+                    PriorRunDays = priorDelivery.GetValueOrDefault(id)?.RunDays ?? 0,
+                    PriorLoadingDays = priorDelivery.GetValueOrDefault(id)?.LoadingDays ?? 0,
                 });
 
             var pipeline = meta.GetValueOrDefault(id);
             results.Add(new DataStreamDto(
                 id, pipeline?.Name ?? id.ToString(), pipeline?.Kind ?? "?", pipeline?.Batch,
                 pipeline?.Active ?? false, graph.Targets.GetValueOrDefault(id).Name,
+                graph.Targets.GetValueOrDefault(id).Key, graph.Targets.GetValueOrDefault(id).Kind,
                 SourceOf(pipeline?.RelativePath, schedule?.Name, pipeline?.Name ?? string.Empty),
                 scopeById[id].Scope, scopeById[id].Reason, StageOf(pipeline?.Kind, scopeById[id].Scope),
                 schedule?.Name, schedule?.Cron, schedule?.Timezone,
@@ -409,7 +517,8 @@ public static class DataStreamEndpoints
                 analysis.Signals.Select(s => new StreamSignalDto(
                     DetectorName(s.Detector), s.Fired, s.Score, DirectionName(s.Direction), s.Primary,
                     s.Detail)).ToList(),
-                pipelineId is null ? null : analysis.Series.Select(ToDto).ToList()));
+                ToSparkline(analysis.Series),
+                includeSeries ? analysis.Series.Select(ToDto).ToList() : null));
         }
 
         var ranked = results
@@ -439,6 +548,10 @@ public static class DataStreamEndpoints
             ranked.Count(s => s.Status == "insufficient-history"),
             ranked);
     }
+
+    /// <summary>How often running one stream produced data over the history BEFORE the analysed window,
+    /// counted in DAYS: the evidence that separates a dead feed from a table nobody ever changes.</summary>
+    private sealed record PriorDelivery(Guid PipelineId, int RunDays, int LoadingDays);
 
     /// <summary>Backfill runs on one day of one stream, counted but never analysed.</summary>
     private sealed record ExcludedDay(Guid PipelineId, DateTime Day, int Runs);
@@ -528,7 +641,7 @@ public static class DataStreamEndpoints
     /// joined to the object registry for the write side.
     /// </summary>
     private sealed record ScopeGraph(
-        Dictionary<Guid, (string? Name, string? Schema)> Targets,
+        Dictionary<Guid, (string? Name, string? Schema, string? Key, string? Kind)> Targets,
         Dictionary<Guid, List<string>> Reads,
         Dictionary<string, List<Guid>> Producers);
 
@@ -553,7 +666,7 @@ public static class DataStreamEndpoints
             .Join(db.Objects.AsNoTracking(), e => e.ObjectKey, o => o.Key, (e, o) => new
             {
                 PipelineId = e.PipelineId!.Value, e.ObjectKey, e.ObjectName, e.Tier,
-                o.Database, o.Schema, ObjectRealName = o.Name,
+                o.Database, o.Schema, ObjectRealName = o.Name, o.Kind,
             })
             .ToListAsync(ct).ConfigureAwait(false);
 
@@ -573,7 +686,7 @@ public static class DataStreamEndpoints
                 {
                     var best = g.FirstOrDefault(w => w.Tier == "Declared") ?? g.First();
                     return ((string?)Qualify(best.Database, best.Schema, best.ObjectRealName ?? best.ObjectName),
-                        best.Schema);
+                        best.Schema, (string?)best.ObjectKey, (string?)best.Kind);
                 });
 
         return new ScopeGraph(
@@ -779,12 +892,19 @@ public static class DataStreamEndpoints
     /// does not).</summary>
     private sealed record ScheduleCadence(string Name, string? Cron, string Timezone, double? ExpectedGapDays);
 
+    private static StreamCycleDto? ToDto(StreamCycle? cycle) => cycle is null
+        ? null
+        : new StreamCycleDto(
+            cycle.PeriodDays, cycle.Monthly, cycle.Occurrences, cycle.Heavier, cycle.CycleRows,
+            cycle.OrdinaryRows, cycle.Lift, cycle.LastOccurrenceUtc, cycle.NextExpectedUtc, cycle.Description);
+
     private static StreamProfileDto ToDto(StreamProfile profile) => new(
         new StreamPatternDto(
             profile.Pattern.Shape,
             profile.Pattern.LoadDays.Select(d => d.ToString()).ToList(),
             profile.Pattern.TypicalRows, profile.Pattern.LowRows, profile.Pattern.HighRows,
-            profile.Pattern.Reliability, profile.Pattern.Description),
+            profile.Pattern.Reliability, profile.Pattern.ChangeDriven, ToDto(profile.Pattern.Cycle),
+            profile.Pattern.Description),
         profile.Cadence.ToString().ToLowerInvariant(), profile.ExpectedGapDays, profile.CadenceSource,
         profile.MaxObservedGapDays, profile.LastLoadUtc, profile.LastRunUtc,
         Finite(profile.DaysSinceLastLoad), Finite(profile.DaysSinceLastRun),
@@ -792,8 +912,26 @@ public static class DataStreamEndpoints
         profile.TotalRowsInserted, profile.TotalRowsUpdated, profile.TotalRowsDeleted,
         profile.AvgRowsInsertedPerRun, profile.AvgRowsUpdatedPerRun, profile.AvgRowsDeletedPerRun,
         profile.AvgRowsWrittenPerLoadedDay, profile.MedianRowsWrittenPerLoadedDay, profile.TrendRowsPerDay,
-        profile.UnexpectedNullDays, profile.EmptyRunDays, profile.NoRunDays, profile.PredictedNullDays,
+        profile.DeliveryShare, profile.ExpectedDays, profile.UnexpectedNullDays, profile.EmptyRunDays, profile.NoRunDays,
+        profile.PredictedNullDays,
         profile.TrimmedLoadDays, profile.TrimFence);
+
+    /// <summary>The trailing <see cref="SparklineDays"/> of the scored series, as parallel arrays. The series
+    /// is one entry per calendar day of the window, so the tail is the most recent fortnight; a stream with
+    /// fewer analysed days than that (one dead before the window, whose series is only the runs it made) ships
+    /// what it has, and an empty series ships empty arrays rather than a null a client has to special-case.</summary>
+    private static StreamSparklineDto ToSparkline(IReadOnlyList<StreamPoint> series)
+    {
+        var recent = series.Count <= SparklineDays ? series : series.Skip(series.Count - SparklineDays).ToList();
+        var indexed = recent.Select((point, index) => (point, index)).ToList();
+        return new StreamSparklineDto(
+            recent.Count > 0 ? recent[0].Date : null,
+            recent.Select(p => p.RowsWritten).ToList(),
+            recent.Select(p => Math.Round(p.Expected, 1)).ToList(),
+            indexed.Where(x => x.point.Anomaly).Select(x => x.index).ToList(),
+            indexed.Where(x => x.point.UnexpectedNull).Select(x => x.index).ToList(),
+            recent.Count(p => p.Immature));
+    }
 
     private static StreamPointDto ToDto(StreamPoint point) => new(
         point.Date, point.RowsWritten, point.RowsInserted, point.RowsUpdated, point.RowsDeleted,

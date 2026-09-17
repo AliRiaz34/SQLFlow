@@ -149,10 +149,27 @@ export interface PipelineBatch {
   activeCount: number;
 }
 
+/** How a flow selects what it reads and what it does to its target, derived server-side from its definition. */
+export interface FlowLoadProfile {
+  /** "full" | "incremental" | "window" | "generated" | "external" | "notApplicable" | "unknown". */
+  readMode: string;
+  /** One plain sentence combining read and write. */
+  summary: string;
+  read: string;
+  write: string;
+  target: string | null;
+  replacesTargetEachRun: boolean;
+  keyColumns: string[];
+  watermarkColumns: string[];
+}
+
 export interface PipelineDetail extends PipelineSummary {
   contentHash: string;
   yaml: string;
   definitionJson: string;
+  /** Whether a schedule fire runs this flow at all (active and in auto mode). */
+  runsOnSchedule: boolean;
+  loadProfile: FlowLoadProfile;
 }
 
 /** One resolved column of a pipeline's pre-ingestion transformation view: "declared" rows come from the flow
@@ -211,6 +228,18 @@ export interface RunSummary {
   /** Why a failed run failed, carried on the summary so a set (a schedule's fire, a batch run) can show its
    * failures where they happened. Null for every run that did not fail. */
   error: string | null;
+  /** What started the run: "schedule", "manual" (the GUI, the API, an MCP tool), or "cli" (a synced local
+   * run); null on runs recorded before it was tracked. */
+  triggerSource: string | null;
+  fullLoad: boolean;
+  backfillFrom: string | null;
+  backfillTo: string | null;
+  /** The incremental read scope the engine computed and applied this run: mode (full / incremental / backfill /
+   * init-load), the filter that bounded the read, and the resolved watermark. Null on flows with no incremental
+   * surface. Distinct from the operator's backfill parameters above. */
+  incrementalMode: string | null;
+  incrementalFilter: string | null;
+  incrementalWatermark: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -223,21 +252,13 @@ export interface RunDetail extends RunSummary {
   endUtc: string | null;
   error: string | null;
   host: string | null;
-  fullLoad: boolean;
-  backfillFrom: string | null;
-  backfillTo: string | null;
   filePattern: string | null;
   /** The raw predicate this run appended to the source read, in the source's own dialect, or null. */
   sourceFilter: string | null;
   /** True when this run evaluated the flow's data-quality assertions (manual-mode ones included) against the
    * current target without loading anything (the on-demand assertion run). */
   assertionsOnly: boolean;
-  /** The incremental read scope the engine computed and applied this run: mode (full / incremental / backfill /
-   * init-load), the filter that bounded the read, and the resolved watermark with the object it was probed from.
-   * Null on flows with no incremental surface. Distinct from the operator's backfill parameters above. */
-  incrementalMode: string | null;
-  incrementalFilter: string | null;
-  incrementalWatermark: string | null;
+  /** The object the incremental watermark was probed from (see incrementalMode on the summary). */
   incrementalWatermarkSource: string | null;
   /** How DataSet_DW was derived for a file run (e.g. "filename dates; month-first (inferred from file set)" or
    * "last-modified"), so the detail view shows what the reader detected. Null for flows with no DataSet_DW. */
@@ -247,6 +268,8 @@ export interface RunDetail extends RunSummary {
   failedStatementOrdinal: number | null;
   failedStatementStep: string | null;
   failedStatementSql: string | null;
+  /** The schedule whose fire enqueued this run, when triggerSource is "schedule"; null otherwise. */
+  triggerScheduleId: string | null;
 }
 
 export interface RunFile {
@@ -681,6 +704,12 @@ export interface Node {
   online: boolean;
   /** When set, a restart was requested and is pending until the node observes it on its next heartbeat. */
   restartRequestedUtc: string | null;
+  /** The pool the node serves; empty or null is the default (untargeted) pool. */
+  pool: string | null;
+  /** How many runs the node executes at once, as it reported on its last poll. */
+  runSlots: number;
+  /** How many runs the node was executing at its last poll. */
+  busyRuns: number;
 }
 
 /** The outcome of purging the fleet registry's offline nodes: how many dead entries were removed. */
@@ -689,8 +718,9 @@ export interface NodePurgeResult {
 }
 
 /** One worker pool's desired compute state and its live resolution. `pool` is the empty string for the default
- *  (untargeted) pool. `replicaTarget` is the count the autoscaler holds: max of queued runs, the always-on floor,
- *  and the manual override while active. */
+ *  (untargeted) pool. `replicaTarget` is the count the autoscaler holds, exactly what the control plane answers the
+ *  scaler with: the greatest of the demand (`eligibleQueuedRuns` over `runSlotsPerNode`, rounded up, plus
+ *  `busyNodes`), the always-on floor, and the manual override while active. */
 export interface WorkerPool {
   pool: string;
   minReplicas: number;
@@ -703,6 +733,109 @@ export interface WorkerPool {
   onlineNodes: number;
   updatedUtc: string | null;
   updatedBy: string | null;
+  /** The part of the backlog a node could take right now: queued runs no gate holds back. */
+  eligibleQueuedRuns: number;
+  /** Online workers of the pool that hold at least one run. */
+  busyNodes: number;
+  /** What one worker of the pool executes at once, as the workers report it. */
+  runSlotsPerNode: number;
+}
+
+// ---- Dispatch ---------------------------------------------------------------------------------------------------------
+
+/** Per-pool counts as the dispatcher sees them: the backlog, what is executing, and what capacity is online. */
+export interface DispatchPoolView {
+  pool: string;
+  queuedRuns: number;
+  leasedRuns: number;
+  queuedTasks: number;
+  leasedTasks: number;
+  onlineNodes: number;
+  freeRunSlots: number;
+}
+
+/** Why a queued run is not being handed out right now; the empty string means it is eligible. */
+export type DispatchBlockReason = "" | "pipeline-busy" | "wave-gated" | "group-cap" | "no-eligible-node";
+
+/** One queued run and the gate holding it back, if any. */
+export interface QueuedRunView {
+  runId: string;
+  pipelineId: string;
+  pool: string;
+  groupId: string | null;
+  groupWave: number;
+  groupMaxConcurrency: number | null;
+  enqueuedUtc: string;
+  attempt: number;
+  cancelRequested: boolean;
+  blocked: DispatchBlockReason;
+}
+
+/** One run handed to a node: who holds it, under which attempt, and until when unless renewed. `state` is `leased`,
+ *  `reserved` (a hand-out whose journal write is in flight) or `expiring` (the lease lapsed and its disposition is
+ *  in flight). */
+export interface LeasedRunView {
+  runId: string;
+  pipelineId: string;
+  pool: string;
+  groupId: string | null;
+  node: string | null;
+  attempt: number;
+  leasedUtc: string | null;
+  leaseExpiresUtc: string | null;
+  cancelRequested: boolean;
+  state: string;
+}
+
+export interface QueuedTaskView {
+  taskId: string;
+  pool: string;
+  enqueuedUtc: string;
+  blocked: DispatchBlockReason;
+}
+
+export interface LeasedTaskView {
+  taskId: string;
+  pool: string;
+  node: string | null;
+  leasedUtc: string | null;
+  leaseExpiresUtc: string | null;
+  cancelRequested: boolean;
+  state: string;
+}
+
+/** One node as the dispatcher's registry last heard from it. */
+export interface DispatchNodeView {
+  name: string;
+  version: string | null;
+  pools: string[];
+  runSlots: number;
+  freeRunSlots: number;
+  taskSlots: number;
+  freeTaskSlots: number;
+  firstSeenUtc: string;
+  lastSeenUtc: string;
+  startedUtc: string;
+  restartRequestedUtc: string | null;
+  online: boolean;
+}
+
+/** The dispatcher as it sees itself: ownership, the last housekeeping passes, and the whole queue with every gate
+ *  and lease explained. A replica that does not own dispatch reports `active: false` with an empty queue. */
+export interface DispatchSnapshot {
+  active: boolean;
+  owner: string | null;
+  activatedUtc: string | null;
+  lastReconcileUtc: string | null;
+  lastTickUtc: string | null;
+  /** Node polls currently parked waiting for work or a signal. */
+  waiters: number;
+  pools: DispatchPoolView[];
+  queuedRuns: QueuedRunView[];
+  leasedRuns: LeasedRunView[];
+  queuedTasks: QueuedTaskView[];
+  leasedTasks: LeasedTaskView[];
+  nodes: DispatchNodeView[];
 }
 
 /** A change to a pool's desired state. Every field is optional: send `minReplicas` to set/clear the always-on
@@ -2377,8 +2510,30 @@ export interface StreamSignal {
 
 /** What one table's traffic normally looks like, learned from its own history after reprocessing was
  * excluded. This is the reference every verdict is stated against. */
+/** A recurring delivery on top of the ordinary rhythm: the vendor who ships a bigger refill every fortnight,
+ * the month-end settlement file. periodDays is the cycle length, or 0 when it repeats on a position in the
+ * calendar month (which `monthly` marks). */
+export interface StreamCycle {
+  periodDays: number;
+  monthly: boolean;
+  /** How many times the cycle was actually seen in the window. */
+  occurrences: number;
+  /** True when the cycle days are heavier than an ordinary day, false for a regular light day. */
+  heavier: boolean;
+  cycleRows: number;
+  ordinaryRows: number;
+  /** The share of the unexplained variation this cycle accounts for, in [0, 1]. */
+  lift: number;
+  lastOccurrenceUtc: string | null;
+  /** The next day the cycle is due: the date to check when the question is "did the big one arrive". */
+  nextExpectedUtc: string | null;
+  description: string;
+}
+
 export interface StreamPattern {
-  shape: "daily" | "weekdays" | "weekly" | "several-days-a-week" | "periodic" | "sporadic";
+  shape:
+    | "daily" | "weekdays" | "weekly" | "several-days-a-week" | "fortnightly" | "monthly" | "periodic"
+    | "sporadic";
   /** The weekdays it reliably loads on, Monday first. Empty for a periodic or sporadic stream. */
   loadDays: string[];
   /** The median load on a day it loads, from the TRIMMED volumes, so a backfill is not what "typical" means. */
@@ -2388,6 +2543,12 @@ export interface StreamPattern {
   highRows: number;
   /** How often it NORMALLY delivers on a day it loads on, in [0, 1]: the median week, not the mean day. */
   reliability: number;
+  /** True for a table that writes only when its SOURCE changes rather than on every run: a reference or
+   * dimension table read every morning that changes a handful of times a year. Its empty days are its normal,
+   * so nothing about it is judged against the schedule's firing interval. */
+  changeDriven: boolean;
+  /** The recurring larger (or smaller) delivery on top of the rhythm, null for a stream that has none. */
+  cycle: StreamCycle | null;
   description: string;
 }
 
@@ -2417,6 +2578,12 @@ export interface StreamProfile {
   avgRowsWrittenPerLoadedDay: number;
   medianRowsWrittenPerLoadedDay: number;
   trendRowsPerDay: number;
+  /** Of the mature days the flow ran and at least one run succeeded, the share that actually wrote rows: the
+   * evidence behind changeDriven, and the answer to "does running this flow produce data". */
+  deliveryShare: number;
+  /** Days in the window it was expected to load on: the denominator unexpectedNullDays is read against, so a
+   * board can say "3 of 30" rather than a bare "3". Zero for a stream with no rhythm the history supports. */
+  expectedDays: number;
   /** Days it was expected to load on and wrote nothing: the headline number of this surface. */
   unexpectedNullDays: number;
   /** Of those, the days the flow RAN and still wrote nothing (an upstream problem). */
@@ -2464,8 +2631,21 @@ export type StreamScope = "source" | "internal";
  * "archive" means it arrived and we did not take it in. */
 export type StreamStage = "integration" | "file-ingestion" | "archive" | "derived";
 
+/** The stream's last two weeks, compact enough to ride on every board row: rows written and the expectation
+ * per day (oldest first, aligned), the zero-based positions of the days the analysis flagged and of the
+ * expected days that wrote nothing, and how many trailing entries are still arriving and were never judged.
+ * fromUtc is the day the first entry describes, null when there is no analysed day at all. */
+export interface StreamSparkline {
+  fromUtc: string | null;
+  rows: number[];
+  expected: number[];
+  flaggedDays: number[];
+  missedDays: number[];
+  immatureDays: number;
+}
+
 /** One data stream: a flow, the table it writes, and the verdict. series is null on the board and populated
- * on the single-stream endpoint. */
+ * on the single-stream endpoint; sparkline is always present and is what a board row draws. */
 export interface DataStream {
   pipelineId: string;
   flowName: string;
@@ -2473,6 +2653,10 @@ export interface DataStream {
   batch: string | null;
   active: boolean;
   targetObject: string | null;
+  /** The lineage key and kind of that target, so the verdict can open the object's graph without the client
+   * having to rebuild the key from the qualified name. Null when the flow has no recorded write edge. */
+  targetObjectKey: string | null;
+  targetObjectKind: string | null;
   /** The data source this stream belongs to, from the repository layout or schedule membership rather than
    * from the flow's name, so a misnamed flow still groups with its siblings. */
   source: string;
@@ -2492,6 +2676,7 @@ export interface DataStream {
   summary: string;
   profile: StreamProfile;
   signals: StreamSignal[];
+  sparkline: StreamSparkline;
   series: StreamPoint[] | null;
 }
 
@@ -2681,6 +2866,12 @@ export interface ChatConversation {
   title: string;
   createdUtc: string;
   updatedUtc: string;
+}
+
+/** What a chat-history purge removed. */
+export interface ChatConversationsPurged {
+  conversations: number;
+  messages: number;
 }
 
 /** One tool call an answer made (in call order); status is "started" | "completed" | "failed". */

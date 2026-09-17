@@ -74,7 +74,7 @@ param acrName string = ''
 @description('Login server of a registry outside this resource group (grant AcrPull to the app identity yourself). Ignored when acrName is set.')
 param acrLoginServer string = ''
 
-@description('Enable the GUI chat assistant (/api/v1/chat): the same assistant core as the Slack bot, streamed to the GUI, with every agent run forwarding the calling user\'s own bearer to the MCP server. Requires the Foundry and MCP parameters below; the key-based providers are configured out of band via ControlPlane__Assistant__* env vars instead.')
+@description('Enable the GUI chat assistant (/api/v1/chat): the same assistant core as the Slack bot, streamed to the GUI, with every agent run presenting a short-lived token delegated from the calling user to the MCP server. Requires the Foundry and MCP parameters below; the key-based providers are configured out of band via ControlPlane__Assistant__* env vars instead.')
 param assistantEnabled bool = false
 
 @description('The Foundry project endpoint the assistant runs against (https://<account>.services.ai.azure.com/api/projects/<project>). Required when assistantEnabled.')
@@ -99,8 +99,9 @@ param reportExtractionKeySecretName string = ''
 @minValue(1)
 param minReplicas int = 1
 
-@description('Maximum replicas for ingress autoscale.')
-param maxReplicas int = 3
+@description('Maximum replicas. Keep at 1: the run queue is owned by exactly one replica (the dispatch lease), so an extra replica adds no dispatch capacity and refuses every node call that lands on it (503, retried by the node), which only slows hand-outs. Raise it only once passive replicas forward node calls to the owner.')
+@minValue(1)
+param maxReplicas int = 1
 
 // The Key Vault Secrets User built-in role, so the app's identity can read the configured secrets.
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
