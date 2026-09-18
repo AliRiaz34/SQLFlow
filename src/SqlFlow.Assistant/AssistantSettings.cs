@@ -279,10 +279,13 @@ public sealed class McpOptions
         "scaffold_ingestion_flow",
         // Session and transport plumbing, inert or meaningless over HTTP with a forwarded bearer.
         "login", "logout", "check_auth_status", "set_access_token", "set_control_plane_url",
-        // The raw schema readers. Each sees every catalogued table and column (or, for detect_unique_key, profiles
-        // live rows) regardless of the column allow-list, so on the chat surfaces the semantic layer tools replace
-        // them: the allow-listed schema is the only schema an assistant is given. They stay available to other MCP
-        // clients and their data stays on the GUI's own Catalog pages.
+        // The raw schema readers, kept off chat so the allow-listed schema is the only schema an assistant is
+        // given. Not every one of them is unfiltered: the column search serves allow-listed columns only, and
+        // describe_object's column list is filtered the same way. They are excluded as a group because the rest
+        // of what they carry is not, and cannot be - an object or definition search returns table names, CREATE
+        // TABLE text, and module bodies naming every column a table has, and detect_unique_key profiles live
+        // rows. They stay available to other MCP clients, and their data stays on the GUI's own Catalog pages,
+        // which is the surface a signed-in engineer browses the catalog from.
         "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
         "describe_object", "search_all", "search_schema", "pipeline_columns", "get_table_key",
         "get_table_joins", "detect_unique_key",

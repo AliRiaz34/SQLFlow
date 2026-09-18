@@ -2219,20 +2219,21 @@ and fix every finding first."
     }
 
     #[tool(
-        description = "Page one warehouse-schema surface in full, once search_all has named which surface \
-            holds the term. `surface` picks it: objects (tables, views, procedures, functions by name), \
-            columns (columns of schema-synced objects), definitions (object code: the live module body and \
-            the generating DDL, which is where a value computed in a view or procedure is found), or \
-            flowColumns (the columns flows produce, by output name, by the raw source column behind them, or \
-            by the SQL expression that computes them). columns and flowColumns are the pair worth keeping \
-            straight: columns sees only what the schema sync has imported, while flowColumns needs no sync \
-            and so sees columns that exist only inside a pipeline, so a column missing from one is routinely \
-            present in the other. On a flowColumns hit, `matchedIn` says whether the flow computes the value \
-            (Expression), emits it under that name (Column), or reads it from the raw data (Source). This \
-            reads the RAW CATALOG, so it sees every table and column regardless of the semantic layer's \
-            allow-list: to write SQL for someone, use search_semantic_layer and describe_semantic_table \
-            instead, which serve the governed schema. Follow a hit with describe_object(key), or a \
-            flowColumns hit with pipeline_definition(pipelineId)."
+        description = "Page one warehouse-schema surface in full, once search_all has named which surface holds the term. `surface` \
+            picks it: objects (tables, views, procedures, functions by name), columns (columns of schema-synced objects), \
+            definitions (object code: the live module body and the generating DDL, which is where a value computed in a view \
+            or procedure is found), or flowColumns (the columns flows produce, by output name, by the raw source column \
+            behind them, or by the SQL expression that computes them). columns and flowColumns are the pair worth keeping \
+            straight: columns sees only what the schema sync has imported, while flowColumns needs no sync and so sees \
+            columns that exist only inside a pipeline, so a column missing from one is routinely present in the other. On a \
+            flowColumns hit, `matchedIn` says whether the flow computes the value (Expression), emits it under that name \
+            (Column), or reads it from the raw data (Source). How the allow-list applies here differs BY SURFACE: columns \
+            serves only columns an admin has allow-listed (a column with no policy row is as invisible as a denied one), \
+            while objects, definitions, and flowColumns are unfiltered, and definitions returns raw DDL and module bodies, \
+            which name every column a table has. So this tool is kept off the chat surfaces as a whole. To write SQL for \
+            someone, use search_semantic_layer and describe_semantic_table, which serve the governed schema with its \
+            business context. Follow a hit with describe_object(key), or a flowColumns hit with \
+            pipeline_definition(pipelineId)."
     )]
     async fn search_schema(&self, Parameters(i): Parameters<SearchInput>) -> String {
         self.page_surface(i, schema_surface_spec, &["objects", "columns", "definitions", "flowColumns"])

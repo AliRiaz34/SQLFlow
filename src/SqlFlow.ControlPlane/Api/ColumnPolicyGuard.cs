@@ -12,8 +12,11 @@ namespace SqlFlow.ControlPlane.Api;
 /// The data-scope half of the ad-hoc query trust boundary: where <see cref="ReadOnlyQueryGuard"/> proves a
 /// statement is a single read-only SELECT, this proves it reads only columns an admin has explicitly allow-listed
 /// (see <see cref="CatalogColumnPolicy"/>). Both must pass before a statement may be prepared, confirmed as a
-/// PowerAI example, or auto-run, so a query built by an LLM (which never sees a denied column's name, since
-/// search/describe already filter them out) cannot reach one anyway by guessing or by an old stored example.
+/// PowerAI example, or auto-run, so a query built by an LLM cannot reach a denied column by guessing or by an
+/// old stored example. This is the last line rather than the only one: the semantic layer and the column search
+/// both withhold denied column names from an assistant composing SQL. They do not withhold them on every
+/// surface, though - a definition search returns CREATE TABLE text and module bodies, which name every column a
+/// table has - so what a caller could or could not see is never assumed here; the statement itself is checked.
 ///
 /// The model is default-deny, at two levels. First, a table reference the catalog has no object for at all - a
 /// synonym, or anything else not harvested into the catalog - is refused outright: with no catalog object there
