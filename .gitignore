@@ -46,6 +46,10 @@ Thumbs.db
 ## Local secrets / env (never commit)
 *.env
 .env
+# A dated or suffixed copy of an env file carries the same secrets as the original, and the
+# patterns above match neither (".env.bak.20260918" ends in a date, not in ".env").
+.env.*
+*.env.*
 appsettings.*.local.json
 secrets.json
 
