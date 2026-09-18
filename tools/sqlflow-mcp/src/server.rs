@@ -390,7 +390,9 @@ pub struct SemanticTablesInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SimilarQuestionsInput {
-    /// The business question, in the user's own words, with the `!cwd` command prefix stripped. Pass the
+    /// The question to answer from warehouse data, in the user's own words, with the `!cwd` command prefix
+    /// stripped. It need not be about business: an operational or data-quality question asked with `!cwd`
+    /// belongs here too. Pass the
     /// rest exactly as they typed it: the match is on meaning, so rewording it into schema terms first
     /// throws away the signal this searches on.
     pub question: String,
@@ -2174,9 +2176,9 @@ and fix every finding first."
     #[tool(
         description = "Locate a named identifier anywhere in the estate - a table, column, flow, or file whose name (or a fragment of \
             it) you already have, as in \"where does CustomerId live\" or \"where is Sales computed\". Not for a message \
-            given as the `!cwd <question>` command (e.g. \"!cwd what is our revenue by region\", \"!cwd how many customers \
-            churned\") - that exact prefix routes to find_similar_questions instead, called before this tool, since a \
-            question like that names no single identifier this can search for. A question phrased the same way but without \
+            given as the `!cwd <question>` command (e.g. \"!cwd what is our revenue by region\", \"!cwd how many rows \
+            landed last night\") - that exact prefix routes to find_similar_questions instead, called before this tool, \
+            since a question to be answered from warehouse data names no single identifier this can search for. A question phrased the same way but without \
             the `!cwd` prefix still belongs here, not there. One term fanned across every catalog surface at once - \
             warehouse objects, their columns, their code, processed files, flow YAML, and the columns flows produce - \
             returning each surface's full match count with a preview of its top hits, plus a nextSteps plan naming the tool \
@@ -2314,14 +2316,17 @@ and fix every finding first."
             that is yours to act on, never to narrate: to a business reader it reads as the assistant explaining its own \
             plumbing, and calling a match untrusted or low-scoring reads as the assistant being unreliable. Work silently \
             until you have the answer or a query to offer, then reply once. ONLY call this when the user's message is the \
-            explicit command `!cwd <question>` - e.g. \"!cwd what is our revenue by region\", \"!cwd how many customers \
-            churned\". The `!cwd` prefix is what marks a message as a typed business question bound for this tool; strip it \
-            and pass the remainder as `question`. Do not guess from phrasing alone that a message unprefixed by `!cwd` is a \
-            business question, even one that reads like \"what is our revenue by region\" or names things that sound like \
-            table or column names: without the `!cwd` prefix, route it through search_semantic_layer/describe_semantic_table \
-            like any other question instead. A full question is not an identifier to a schema search's index; it is what \
-            this tool matches, once `!cwd` has activated it. Finds the business questions this estate's dashboards or a \
-            person already answered that mean the same thing as the one just typed. Wording need not match, because you \
+            explicit command `!cwd <question>` - e.g. \"!cwd what is our revenue by region\", \"!cwd how many rows \
+            landed last night\". The `!cwd` prefix is what marks a message as a question to be answered from warehouse \
+            data, whatever it is about: a reported figure, an operational count, a data-quality check. Who is asking and \
+            whether the subject sounds commercial or technical make no difference; needing SQL over the warehouse to \
+            answer is the whole criterion. Strip the prefix and pass the remainder as `question`. Do not guess from \
+            phrasing alone that a message unprefixed by `!cwd` belongs here, even one that reads like \"what is our \
+            revenue by region\" or names things that sound like table or column names: without the `!cwd` prefix, route \
+            it through search_semantic_layer/describe_semantic_table like any other question instead. A full question is \
+            not an identifier to a schema search's index; it is what this tool matches, once `!cwd` has activated it. \
+            Finds the questions this estate's dashboards or a person already answered that mean the same thing as the \
+            one just typed. Wording need not match, because you \
             expand the question first: pass `expanded_terms` with the question's own meaningful words plus the business \
             synonyms and related terms a dashboard could have used for the same thing, in their common grammatical forms \
             (\"what drives our turnover\" -> turnover, revenue, sales, income, drive, driver, ...), so it can find \"revenue \
@@ -3723,8 +3728,10 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = concat!(
   row that came back without links. A result about something the CALL named rather than about its rows (a
   flow's columns, an object's columns, a repo's edges, one file's provenance, the insights boards, summary)
   carries the subject's links on the envelope beside `items`, so those answers have a destination too.
-- The command `!cwd <question>` (e.g. \"!cwd what is our revenue by region?\", \"!cwd how many customers
-  churned last month\"): this exact prefix, not phrasing, is what activates the business-question path.
+- The command `!cwd <question>` (e.g. \"!cwd what is our revenue by region?\", \"!cwd how many rows landed
+  last night\"): this exact prefix, not phrasing, is what activates the path for a question answered from
+  warehouse data. It covers any such question, commercial or operational; needing SQL over the warehouse is
+  the criterion, not the subject.
   Strip `!cwd` and call find_similar_questions FIRST, before any schema lookup, with the
   remainder as the question. It matches the question against ones this estate's dashboards and confirmed
   answers already answer, expanding the wording so a paraphrase still finds them, and returns the SQL
@@ -3756,7 +3763,7 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = concat!(
   result; wait for the person to say, after seeing it, that it is right, needs a fix, or should be
   saved. A
   message with NO `!cwd` prefix is never routed to find_similar_questions, no matter how much it reads
-  like a business question in plain English: treat it as a normal schema/lookup question and work it
+  like a question the warehouse could answer: treat it as a normal schema/lookup question and work it
   through the semantic layer and the rest of this list instead.
 - Writing SQL, or any question about which tables and columns exist and what they mean: use the SEMANTIC
   LAYER, the governed schema holding only the tables and columns an admin has allow-listed, with their
