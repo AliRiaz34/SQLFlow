@@ -14,6 +14,7 @@ import { Check, CircleCheck, Pencil, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { ComboBoxField } from "../../components/ComboBoxField";
 import { isApiError } from "../../api/client";
@@ -85,6 +86,7 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
   const [stage, setStage] = useState<Stage>("idle");
   const [selectedBlock, setSelectedBlock] = useState(0);
   const [editedSql, setEditedSql] = useState<string | null>(null);
+  const [editedQuestion, setEditedQuestion] = useState<string | null>(null);
   const [sourceRef, setSourceRef] = useState<string | null>(null);
   const [decision, setDecision] = useState<ConfirmedQuestion | null>(null);
 
@@ -95,7 +97,9 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
   // The question is the user turn this answer replies to. Resolved from the thread once the answer is
   // finished and known to carry a query, so a thread of prose answers never walks its own history.
   // A re-opened conversation resolves it exactly like a live one: the transcript is the same record.
-  const question = useMemo(() => {
+  // It is only the STARTING point: what gets stored is whatever the person has in the field when they
+  // press Store, since they are vouching for that text as the question this query answers.
+  const askedQuestion = useMemo(() => {
     if (status === "running" || sqlBlocks.length === 0) {
       return "";
     }
@@ -129,23 +133,36 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
   });
 
   const sql = editedSql ?? sqlBlocks[selectedBlock] ?? "";
-  const tooLong = question.length > MAX_QUESTION_LENGTH;
-  const ready = status !== "running" && question.length > 0 && sqlBlocks.length > 0;
+  const question = editedQuestion ?? askedQuestion;
+  const trimmedQuestion = question.trim();
+  const tooLong = trimmedQuestion.length > MAX_QUESTION_LENGTH;
+  const ready = status !== "running" && askedQuestion.length > 0 && sqlBlocks.length > 0;
 
   if (!enabled || !ready) {
     return null;
   }
 
-  // Over the store's question limit, no outcome can be recorded: the endpoint checks the length before
-  // it even reaches the rejection shortcut. Saying so beats three buttons that can only answer 400.
-  if (tooLong) {
+  // Over the store's question limit while the row is closed, there is nothing to press: the endpoint
+  // checks the length before it even reaches the rejection shortcut. The panel below can still shorten
+  // it, so this points at that rather than turning the answer away outright.
+  if (tooLong && stage === "idle") {
     return (
-      <div
-        className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
-        data-testid="answer-confirmation-too-long"
-      >
-        This question is {question.length} characters, over the {MAX_QUESTION_LENGTH}-character limit the
-        example store accepts, so it cannot be confirmed. Ask it again more briefly to confirm that answer.
+      <div className="mt-3 rounded-md border border-border bg-muted/30" data-testid="answer-confirmation-too-long">
+        <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+          <span className="text-xs text-muted-foreground">
+            This question is {trimmedQuestion.length} characters, over the {MAX_QUESTION_LENGTH}-character
+            limit the example store accepts. Shorten it to confirm this answer.
+          </span>
+          <Button
+            variant="ghost"
+            size="xs"
+            className="ms-auto"
+            onClick={() => setStage("accepting")}
+            data-testid="answer-shorten"
+          >
+            <Pencil /> Shorten
+          </Button>
+        </div>
       </div>
     );
   }
@@ -163,7 +180,7 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
   }
 
   const send = (outcome: QuestionConfirmationOutcome, statement: string) => confirm.mutate({
-    question,
+    question: trimmedQuestion,
     sql: statement,
     outcome,
     // Deliberately absent: objectKeys (no lineage pass produced them here, and inventing identities
@@ -179,7 +196,7 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
           {stage === "idle"
             ? "Did this query answer your question?"
             : stage === "accepting"
-              ? "Store this query as the confirmed answer:"
+              ? "Store this query as the confirmed answer to this question:"
               : "Fix the query, then store what actually worked:"}
         </span>
         <div className="ms-auto flex items-center gap-1">
@@ -223,6 +240,7 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
                   size="xs"
                   onClick={() => {
                     setEditedSql(null);
+                    setEditedQuestion(null);
                     setStage("idle");
                   }}
                 >
@@ -230,7 +248,7 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
                 </Button>
                 <Button
                   size="xs"
-                  disabled={confirm.isPending || sql.trim().length === 0}
+                  disabled={confirm.isPending || sql.trim().length === 0 || trimmedQuestion.length === 0 || tooLong}
                   onClick={() => send(stage === "accepting" ? "accepted" : "corrected", sql)}
                   data-testid="answer-confirm"
                 >
@@ -243,6 +261,28 @@ export function AnswerConfirmation({ enabled }: { enabled: boolean }) {
 
       {stage !== "idle" && (
         <div className="flex flex-col gap-2 border-t border-border px-3 py-2">
+          {/* The question is stored alongside the query and is what every later question is matched
+              against, so it is shown and editable rather than taken silently from the transcript: a
+              person can fix a typo, or say more plainly what they meant, without touching the query
+              they are confirming. What lands in the store is this text, not what was typed. */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-muted-foreground" htmlFor="answer-confirmation-question">
+              Saved as this question
+            </label>
+            <Textarea
+              id="answer-confirmation-question"
+              value={question}
+              onChange={(event) => setEditedQuestion(event.target.value)}
+              rows={2}
+              className="min-h-0 text-xs"
+              data-testid="answer-confirmation-question"
+            />
+            <p className={cn("text-xs", tooLong ? "text-destructive" : "text-muted-foreground")}>
+              {tooLong
+                ? `${trimmedQuestion.length} characters, over the ${MAX_QUESTION_LENGTH}-character limit.`
+                : "Later questions are matched against this text, so word it the way someone would ask it again."}
+            </p>
+          </div>
           {sqlBlocks.length > 1 && (
             <div className="flex flex-wrap items-center gap-1">
               <span className="text-xs text-muted-foreground">The answer carries several queries:</span>

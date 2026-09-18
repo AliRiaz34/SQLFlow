@@ -433,9 +433,11 @@ fn similar_questions_query(input: SimilarQuestionsInput) -> Vec<(&'static str, S
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ConfirmQuestionInput {
-    /// The question that was asked, in the user's own words, exactly as they typed it. This is the text
-    /// later questions are matched against, so rewriting it into schema terms would store something nobody
-    /// will ever ask again.
+    /// The question that was asked, in the user's own words, exactly as they typed it, or the wording they
+    /// gave you when you showed them what would be saved. This is the text later questions are matched
+    /// against, so rewriting it into schema terms would store something nobody will ever ask again. Do not
+    /// tidy it on your own judgement either, not even an obvious typo: show the person what you are about to
+    /// save and change it only if they ask, since the stored question is theirs, not yours.
     pub question: String,
     /// The query that answers it. On outcome="corrected" this is the CORRECTED SQL, not what was first
     /// proposed: the store holds what worked, never what was fixed. Must be a single read-only SELECT; it is
@@ -1771,7 +1773,9 @@ and fix every finding first."
     // ---- Semantic layer (the allow-listed schema) --------------------------
 
     #[tool(
-        description = "START HERE to write SQL for someone: the governed schema a query may read. Answers which tables exist, what \
+        description = "START HERE to write SQL for someone, unless the person's message begins with the literal `!cwd` \
+            prefix, which activates find_similar_questions instead and is that tool's alone to answer: the governed \
+            schema a query may read. Answers which tables exist, what \
             their columns mean, and what may be queried at all. The semantic layer is the governed schema: only the tables \
             and columns an admin has allow-listed exist in it, each with its business description and synonyms. Returns the \
             layer's general instructions (read and follow them whenever you write SQL), where its tables live \
@@ -2310,21 +2314,23 @@ and fix every finding first."
         // The first sentence is SILENT_RETRIEVAL_RULE, kept verbatim in sync by the
         // `tool_description_leads_with_the_silent_rule` test below: rmcp's #[tool] attribute takes only a
         // literal, so this one site cannot compose the macro and is asserted instead.
-        description = "Say nothing to the person before or between the tool calls on this path: no preamble, no restating the question, \
+        description = "THE `!cwd` COMMAND ROUTES HERE. Call this, before any schema or semantic-layer lookup, whenever the \
+            user's message is the explicit command `!cwd <question>` - e.g. \"!cwd what is our revenue by region\", \
+            \"!cwd how many rows landed last night\". The `!cwd` prefix is what marks a message as a question to be \
+            answered from warehouse data, whatever it is about: a reported figure, an operational count, a data-quality \
+            check. Who is asking and whether the subject sounds commercial or technical make no difference; needing SQL \
+            over the warehouse to answer is the whole criterion. Strip the prefix and pass the remainder as `question`. \
+            Do not guess from phrasing alone that a message unprefixed by `!cwd` belongs here, even one that reads like \
+            \"what is our revenue by region\" or names things that sound like table or column names: without the `!cwd` \
+            prefix, route it through search_semantic_layer/describe_semantic_table like any other question instead. A \
+            full question is not an identifier to a schema search's index; it is what this tool matches, once `!cwd` has \
+            activated it. \
+            Say nothing to the person before or between the tool calls on this path: no preamble, no restating the question, \
             no announcing what you are about to look up or that you are building a query, and no commentary on what came \
             back (whether a match is trusted, its score, who confirmed it, saved answers, reports, or tool names). All of \
             that is yours to act on, never to narrate: to a business reader it reads as the assistant explaining its own \
             plumbing, and calling a match untrusted or low-scoring reads as the assistant being unreliable. Work silently \
-            until you have the answer or a query to offer, then reply once. ONLY call this when the user's message is the \
-            explicit command `!cwd <question>` - e.g. \"!cwd what is our revenue by region\", \"!cwd how many rows \
-            landed last night\". The `!cwd` prefix is what marks a message as a question to be answered from warehouse \
-            data, whatever it is about: a reported figure, an operational count, a data-quality check. Who is asking and \
-            whether the subject sounds commercial or technical make no difference; needing SQL over the warehouse to \
-            answer is the whole criterion. Strip the prefix and pass the remainder as `question`. Do not guess from \
-            phrasing alone that a message unprefixed by `!cwd` belongs here, even one that reads like \"what is our \
-            revenue by region\" or names things that sound like table or column names: without the `!cwd` prefix, route \
-            it through search_semantic_layer/describe_semantic_table like any other question instead. A full question is \
-            not an identifier to a schema search's index; it is what this tool matches, once `!cwd` has activated it. \
+            until you have the answer or a query to offer, then reply once. \
             Finds the questions this estate's dashboards or a person already answered that mean the same thing as the \
             one just typed. Wording need not match, because you \
             expand the question first: pass `expanded_terms` with the question's own meaningful words plus the business \
@@ -2387,7 +2393,11 @@ and fix every finding first."
             right. Storing an example is a separate decision with lasting effect (every later similar question reuses it, \
             and a trusted one auto-runs with no approval), so call this ONLY when the person, after seeing the result, \
             explicitly says the answer is correct, tells you how to fix it, or asks you to save it. Never call it in the \
-            same turn you present a result, and never on a run approval alone. This is the other half of \
+            same turn you present a result, and never on a run approval alone. Tell them in one line what you will save \
+            as the question, quoting it, and let them amend the wording before you call this: the question is stored as \
+            typed and is what every later question is matched against, so fixing a typo or an offhand phrasing is the \
+            person's call, never a tidy-up you make silently. An amended question never changes the query: pass the sql \
+            they judged, unchanged, with whatever wording they settled on. This is the other half of \
             find_similar_questions, and it is what makes retrieval improve with use rather than staying frozen at whatever \
             the dashboards happened to ask. Call it after a person has actually told you the answer was right (or told you \
             what to fix), never on your own judgement that a query looks correct: the whole value of the store is that a \
@@ -3677,7 +3687,17 @@ impl ServerHandler for SqlFlowMcp {
 }
 
 const INSTRUCTIONS_OFFLINE: &str = "\
-SQLFlow MCP server. Two tiers of tools:
+SQLFlow MCP server.
+
+ROUTING, BEFORE ANYTHING ELSE: a message beginning with the literal `!cwd` is a question to be answered
+from warehouse data. Strip the prefix and call find_similar_questions FIRST, before any schema lookup,
+any semantic-layer search, and any word to the person. It returns SQL that already answers the question,
+confirmed by a human; a `trusted` match with an `exampleId` is then run with auto_run_trusted_match. Do
+not compose SQL by hand until that path has come up empty. A message WITHOUT the `!cwd` prefix never goes
+to find_similar_questions, however much it reads like a question the warehouse could answer. The fuller
+rule, including how to lay out the answer, is in the online section below.
+
+Two tiers of tools:
 
 OFFLINE (always available):
 - Docs: search_docs, get_doc, get_doc_by_yaml_path, get_doc_by_cli_command, related_docs, list_docs.
@@ -3761,7 +3781,9 @@ const INSTRUCTIONS_ONLINE_TAIL: &str = concat!(
   Approving a run (\"yes\", \"go ahead\", \"run it\") is NOT judging the answer: running and saving are
   separate decisions, so never call confirm_question on a run approval or in the same turn you present a
   result; wait for the person to say, after seeing it, that it is right, needs a fix, or should be
-  saved. A
+  saved. When you do call it, first say in one line what you will save as the question, quoting it, so they
+  can amend the wording; the question is stored as typed and is what later questions match against, so a
+  typo is theirs to fix, not yours to correct silently, and amending it leaves the query untouched. A
   message with NO `!cwd` prefix is never routed to find_similar_questions, no matter how much it reads
   like a question the warehouse could answer: treat it as a normal schema/lookup question and work it
   through the semantic layer and the rest of this list instead.
@@ -4030,7 +4052,7 @@ mod tests {
     /// `responseRule` in the payload arrives only after a call has been made. So the rule leads the description
     /// rather than sitting deep inside it, where a model composing a preamble has already passed it by.
     #[test]
-    fn tool_description_leads_with_the_silent_rule() {
+    fn tool_description_leads_with_the_cwd_trigger_and_carries_the_silent_rule() {
         let router = SqlFlowMcp::tool_router();
         let tool = router
             .list_all()
@@ -4039,12 +4061,21 @@ mod tests {
             .expect("find_similar_questions is a registered tool");
         let description = tool.description.clone().unwrap_or_default();
 
-        // rmcp's #[tool] attribute takes only a literal, so this description cannot compose
-        // silent_retrieval_rule!(). Asserting the prefix is what keeps that one copy from drifting.
+        // This tool is surfaced to some clients by NAME ALONE, deferred until a tool search loads its
+        // schema. The name says nothing about `!cwd`, so the trigger has to be the first thing in the
+        // description for the routing to be discoverable at all: an agent that has not yet read this
+        // text is exactly the one that needs to know the command routes here.
         assert!(
-            description.starts_with(SILENT_RETRIEVAL_RULE),
-            "find_similar_questions must lead with SILENT_RETRIEVAL_RULE verbatim, but began:\n{}",
+            description.starts_with("THE `!cwd` COMMAND ROUTES HERE."),
+            "find_similar_questions must lead with the `!cwd` trigger, but began:\n{}",
             &description[..description.len().min(240)]
+        );
+
+        // rmcp's #[tool] attribute takes only a literal, so this description cannot compose
+        // silent_retrieval_rule!(). Asserting it appears verbatim keeps that one copy from drifting.
+        assert!(
+            description.contains(SILENT_RETRIEVAL_RULE),
+            "find_similar_questions must carry SILENT_RETRIEVAL_RULE verbatim"
         );
     }
 
