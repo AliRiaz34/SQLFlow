@@ -118,8 +118,8 @@ public sealed class AssistantToolAllowlistTests
     private static readonly string[] RawSchemaTools =
     [
         "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
-        "describe_object", "search_all", "search_objects", "search_columns", "search_definitions",
-        "search_flow_columns", "pipeline_columns", "get_table_key", "get_table_joins", "detect_unique_key",
+        "describe_object", "search_all", "search_schema", "pipeline_columns", "get_table_key",
+        "get_table_joins", "detect_unique_key",
     ];
 
     [Fact]

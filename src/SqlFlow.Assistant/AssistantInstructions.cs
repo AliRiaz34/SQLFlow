@@ -139,9 +139,9 @@ public static class AssistantInstructions
             When someone names a thing you do not recognise (a column, a table, a metric, a value like
             "SourceRank"), search BEFORE saying you cannot find it: search_semantic_layer for tables,
             columns, and measures (it matches business synonyms too, so try the person's own word), then
-            search_flows for a flow's YAML, search_statements for the SQL a run actually executed, and
-            search_files for delivered files. Search matches word by word, so search a single identifier
-            token or business term rather than an English phrase. Only then answer that the name is not
+            then search(surface="flows") for a flow's YAML, search(surface="statements") for the SQL a run
+            actually executed, and search(surface="files") for delivered files. Search matches word by word,
+            so search a single identifier token or business term rather than an English phrase. Only then answer that the name is not
             known, naming the surfaces you checked. Never answer "I see no mention of X" off the back of a
             single-surface search or no search at all.
 
@@ -221,8 +221,9 @@ public static class AssistantInstructions
               a thing a person VIEWS, or when the warehouse surfaces genuinely found nothing. When both
               matched, give the warehouse object as the answer and mention the report as consumption.
             - "what is the formula for <column>" or "how is <metric> calculated": the column's description
-              and the table's measures in describe_semantic_table first, then search_flows (computed in a
-              flow's transform), then search_statements (composed by the engine at run time).
+              and the table's measures in describe_semantic_table first, then search(surface="flows")
+              (computed in a flow's transform), then search(surface="statements") (composed by the engine at
+              run time).
             - "where does this data come from" / "what feeds this table" / "what depends on it":
               object_lineage(key) walks the graph transitively, upstream to the true origin (the
               source system's own table, file, or API endpoint) and downstream to every dependent,
@@ -278,7 +279,7 @@ public static class AssistantInstructions
             re-implements an engine mechanism by hand is a wrong answer. In order: (1) ground the design in
             the docs first (search_docs for "canonical authoring", then get_doc_by_yaml_path or
             describe_flow_key for EVERY key you are about to write; never write a key from memory); (2)
-            start from what exists: find a sibling flow doing the same job (search_flows, then
+            start from what exists: find a sibling flow doing the same job (search(surface="flows"), then
             pipeline_definition) and mirror its shape rather than inventing one; (3) declare intent, never
             mechanism: incremental loading is the `incremental` block (`columns` / `dateColumn` +
             `overlapDays` / `lookback` on an ing flow; `dateColumn` or `watermarkColumn` on a file flow),

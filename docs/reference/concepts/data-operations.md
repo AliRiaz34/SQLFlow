@@ -224,7 +224,7 @@ let it read it:
 - **Schema discovery**: the chat assistants' only schema readers are the semantic layer tools
   (`get_semantic_layer`, `search_semantic_layer`, `list_semantic_tables`, `describe_semantic_table`), which serve
   nothing outside the allow-list, not even inside a key, join, measure, or example query; see
-  [Semantic layer](semantic-layer.md). The raw readers stay filtered too: `search_columns`
+  [Semantic layer](semantic-layer.md). The raw readers stay filtered too: `search_schema`'s `columns` surface
   (`SearchEndpoints.ColumnsQuery`), the object's paged column list (`GET /api/v1/lineage/objects/columns`), and the
   object dossier's column list (`GET /api/v1/lineage/objects/dossier`, behind `describe_object`) show only columns
   with an `IsAllowed` row.
@@ -406,7 +406,7 @@ the builder, so a name carrying its own bracket is refused rather than escaped.
 
 The semantic layer tools (`describe_semantic_table` above all) never surface a column outside the allow-list, in
 any field, so composing SQL from what they return cannot name one by accident. They are the chat assistants'
-schema surface; `search_columns` and `describe_object`'s column list are filtered the same way for other MCP
+schema surface; `search_schema`'s `columns` surface and `describe_object`'s column list are filtered the same way for other MCP
 clients.
 
 ## Composing SQL against these tables

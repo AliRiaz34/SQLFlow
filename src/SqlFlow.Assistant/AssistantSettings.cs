@@ -187,7 +187,7 @@ public sealed class McpOptions
         "describe_object_refresh", "object_lineage", "list_file_sources", "file_provenance",
         "lineage_edges", "lineage_waves", "lineage_dependencies",
         "list_subscribers", "describe_subscriber", "describe_subscriber_report", "find_similar_questions",
-        "search_flows", "search_files", "search_statements",
+        "search",
         "list_schedules", "get_schedule", "get_schedule_plan", "list_nodes", "list_repo_sources", "summary",
         "insights_flows", "insights_attention", "insights_recommendations", "insights_steps",
         "detect_stream_anomalies",
@@ -284,8 +284,8 @@ public sealed class McpOptions
         // them: the allow-listed schema is the only schema an assistant is given. They stay available to other MCP
         // clients and their data stays on the GUI's own Catalog pages.
         "list_schemas", "catalog_tree", "lineage_objects", "lineage_object_detail", "lineage_object_columns",
-        "describe_object", "search_all", "search_objects", "search_columns", "search_definitions",
-        "search_flow_columns", "pipeline_columns", "get_table_key", "get_table_joins", "detect_unique_key",
+        "describe_object", "search_all", "search_schema", "pipeline_columns", "get_table_key",
+        "get_table_joins", "detect_unique_key",
         // Git history and schema-diff readers reachable through the GUI, kept off the chat surface to bound
         // the tool count the model has to choose between.
         "database_schema_changes", "database_schema_history_databases", "database_object_ddl",

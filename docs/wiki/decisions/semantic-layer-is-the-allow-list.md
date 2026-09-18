@@ -35,7 +35,7 @@ referenceRefs:
 related:
   - wiki-design-doc-drift
   - wiki-powerbi-model-entity-resolution
-updated: 2026-09-15
+updated: 2026-09-17
 ---
 
 # The semantic layer is the column allow-list
@@ -73,9 +73,9 @@ same way would be a parallel store for one fact.
 The layer only works as the assistant's schema if the assistant has no other schema to read. The raw MCP
 readers expose far more than the allow-list permits:
 
-- `describe_object`, `search_all`, `search_definitions`, `get_table_joins`, `pipeline_columns` and the rest
+- `describe_object`, `search_all`, `search_schema`, `get_table_joins`, `pipeline_columns` and the rest
   serve view bodies, join predicates, and key columns.
-- `search_columns` and the object column list are filtered, but the other surfaces still name columns the
+- `search_schema`'s `columns` surface and the object column list are filtered, but the others still name columns the
   allow-list withholds.
 
 The human chose to take those tools off the GUI and Slack chat allowlists (`McpOptions.ExcludedTools`) and give
@@ -140,8 +140,8 @@ resolves to, through lineage's own identity resolution, and `describe_semantic_t
 
 ## The tools the chat kept still returned column names in their text
 
-Taking the raw schema readers away left the operational tools. `run_statements`, `search_statements`,
-`search_flows`, `pipeline_definition` and stored example SQL return free text that names any column. So did two
+Taking the raw schema readers away left the operational tools. `run_statements`, `search` (its `statements`
+and `flows` surfaces), `pipeline_definition` and stored example SQL return free text that names any column. So did two
 data-operations tasks, which read live rows without the column guard.
 
 **Rejected: removing those tools too.** The assistant would have lost run diagnosis, one of the main things it

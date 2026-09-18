@@ -319,3 +319,20 @@ table now lives in the semantic layer as `CatalogSemanticExample`), the SQL-reso
 the SQL-backed sample report, is done). Only status lines and step markers changed; the design text stays as
 the record. Updated [the design document drift map](maps/design-doc-drift.md) to say the retrieval document's
 three stale claims are now corrected in place.
+
+## [2026-09-17] ingest | MCP tool consolidation and the capitals convention
+
+Merged the seven single-surface search tools into two that take a `surface` argument, splitting them along the
+privacy boundary the assistant allowlist already drew rather than into one tool: `search` pages the ETL-side
+surfaces (flows, files, statements) that the chat surfaces are given, and `search_schema` pages the warehouse
+schema surfaces (objects, columns, definitions, flowColumns) that they are denied, because those see every
+column regardless of the semantic layer's allow-list. A single merged tool could not express that split, since
+`McpOptions` gates by tool name and not by argument. 93 tools became 88.
+
+Also rationed capitals across every description, from 222 emphasized words to 100. They had stopped carrying
+information: `START HERE` sat on two tools that answer different questions (`get_semantic_layer`, which now
+keeps it, and `search_all`, which lost it), and `USE THIS` on three that overlap. The convention (capitals for
+a routing lead and a real safety constraint, every other contrast in lowercase prose) is documented above
+`GROUNDING_RULE` in `server.rs` and enforced by `capitals_are_rationed_to_routing_and_safety`, which caps the
+per-description budget and asserts at most one tool claims `START HERE`. Updated
+[the semantic layer allow-list decision](decisions/semantic-layer-is-the-allow-list.md) for the renamed tools.

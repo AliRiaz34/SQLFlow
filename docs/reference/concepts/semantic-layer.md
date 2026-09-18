@@ -150,14 +150,14 @@ column) and `PUT /api/v1/powerai/column-policies/objects` (every column of an ob
 On the GUI chat and Slack assistants these are the **only** schema tools (`McpOptions.GuiDefaultTools`,
 `McpOptions.SlackDefaultTools`). The raw schema readers, which see every catalogued column regardless of the
 allow-list (`list_schemas`, `catalog_tree`, `lineage_objects`, `lineage_object_detail`, `lineage_object_columns`,
-`describe_object`, `search_all`, `search_objects`, `search_columns`, `search_definitions`, `search_flow_columns`,
+`describe_object`, `search_all`, `search_schema` (its `objects`, `columns`, `definitions`, and `flowColumns` surfaces),
 `pipeline_columns`, `get_table_key`, `get_table_joins`, `detect_unique_key`), are in `McpOptions.ExcludedTools`.
 They remain available to other MCP clients, and the GUI's Catalog pages are unchanged.
 
 ## The assistant surface
 
 The tool allowlist decides which tools the chat assistants have; the assistant surface decides what the remaining
-tools show them. Operational tools such as `run_statements`, `search_statements`, `search_flows`,
+tools show them. Operational tools such as `run_statements`, `search` (its `statements` and `flows` surfaces),
 `pipeline_definition`, and `find_similar_questions` return free text (SQL, flow YAML, stored example queries) that
 can name any column, so the allow-list is applied to that text too:
 
