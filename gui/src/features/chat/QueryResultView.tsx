@@ -1,4 +1,4 @@
-// Renders one ad-hoc query result (POWERAI.md's Run affordance) as a fitting chart plus a table, or a table
+// Renders one ad-hoc query result (docs/powerai/design.md's Run affordance) as a fitting chart plus a table, or a table
 // alone when no chart form fits the shape. Follows the dataviz skill: the form is picked by the data's job
 // (a single headline is a stat tile, not a chart; magnitude-by-category is a bar; change-over-time is a
 // line), categorical hue is assigned in the app's own fixed order (--chart-1.. never cycled), and a table

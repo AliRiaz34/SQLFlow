@@ -18,7 +18,7 @@ public sealed record VisualQuestionField(string Role, string TableName, string C
 
 /// <summary>
 /// Turns one PowerBI report visual's title, chart type, and projected fields into 1-3 natural-language business
-/// questions it answers, as text-to-query training material (POWERAI.md Section 6). This is a plain, stateless,
+/// questions it answers, as text-to-query training material (docs/powerai/design.md Section 6). This is a plain, stateless,
 /// single-turn completion, deliberately not built on <see cref="IAssistantGateway"/>/<see cref="AnthropicGateway"/>:
 /// that gateway exists for the interactive chat surfaces and carries an MCP tool loop, adaptive thinking,
 /// streaming, and a per-user MCP bearer token, none of which this batch, unattended, sync-time job needs. It

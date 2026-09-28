@@ -241,7 +241,7 @@ public sealed record SubscriberReportFieldDto(
 /// projects with their roles, and the name of the <see cref="SubscriberQueryDto"/> it was rendered as, so a
 /// caller can go from "this visual plots Sales Amount as Y" to the actual SQL without matching text.
 /// <c>Questions</c> is 1-3 natural-language business questions this visual answers, generated from its title,
-/// chart type, and fields (POWERAI.md's "business-question field"), or written by a person; empty when neither has
+/// chart type, and fields (docs/powerai/design.md's "business-question field"), or written by a person; empty when neither has
 /// happened for this visual. <c>QuestionEntries</c> carries the same questions with what an editor needs (each one's
 /// id and origin), and <c>VisualKey</c> is the visual's catalog key, which a question is added under.</summary>
 public sealed record SubscriberReportVisualDto(
@@ -1752,7 +1752,7 @@ public static class LineageEndpoints
 
     /// <summary>
     /// Matches stored business questions against a typed one, returning each with the SQL that already answers
-    /// it (POWERAI.md Section 6). The stored questions are ranked by how many expanded business-vocabulary terms
+    /// it (docs/powerai/design.md Section 6). The stored questions are ranked by how many expanded business-vocabulary terms
     /// they match. A caller that is itself an LLM (the MCP tool's usual caller) should expand the question into
     /// that vocabulary itself and pass the result as <paramref name="expandedTerms"/>, which skips the
     /// server-side expansion call entirely; when <paramref name="expandedTerms"/> is omitted or empty, an LLM

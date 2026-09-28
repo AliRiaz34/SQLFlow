@@ -2,7 +2,7 @@
 // human-in-the-loop DataOps path prepare_query/run_query use over MCP (prepare mints a token, run redeems
 // it), then show the result as a fitting chart or a table (QueryResultView). The SQL is already fully
 // visible in the block above this panel, so clicking Run is the person's approval; there is no second
-// confirmation step, the same way running a confirmed example needs no re-approval (POWERAI.md Section 6).
+// confirmation step, the same way running a confirmed example needs no re-approval (docs/powerai/design.md Section 6).
 //
 // Exposed as a hook rather than one component because the button belongs INSIDE CodeView's own toolbar row
 // (its `extraActions` slot, beside format/copy) while the result panel is a sibling below CodeView; both

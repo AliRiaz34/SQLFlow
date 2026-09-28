@@ -18,7 +18,7 @@ public sealed record DatasourceInferenceResult(string? Reference, IReadOnlyList<
 
 /// <summary>
 /// Works out which datasource a query runs against from what the catalog already knows, so a person is not asked
-/// to pick a connection for a question whose tables already say where they live (POWERAI.md Section 6). This is
+/// to pick a connection for a question whose tables already say where they live (docs/powerai/design.md Section 6). This is
 /// the ONE place that decision is made: question retrieval, confirming an example, auto-run, and preparing an
 /// ad-hoc query all call it rather than each guessing in its own way.
 /// <para>

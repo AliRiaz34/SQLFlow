@@ -19,7 +19,7 @@ sourceRefs:
   - tools/pbix-extract/src/datamodel.h
   - tools/pbix-extract/tests/test_reportlayout.c
 rawRefs:
-  - POWERAI.md
+  - docs/powerai/design.md
 referenceRefs:
   - flow-subscribers
 related:

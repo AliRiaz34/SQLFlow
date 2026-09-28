@@ -15,7 +15,7 @@ using SqlFlow.SqlServer.Query;
 namespace SqlFlow.ControlPlane.Api;
 
 /// <summary>
-/// What a person decided about a proposed answer. POWERAI.md Section 6's loop is accept/correct/reject, and all
+/// What a person decided about a proposed answer. docs/powerai/design.md Section 6's loop is accept/correct/reject, and all
 /// three arrive here: the first two are knowledge worth keeping, and the third is accepted and stores nothing.
 /// </summary>
 public static class QuestionConfirmationOutcome
@@ -27,7 +27,7 @@ public static class QuestionConfirmationOutcome
     /// the example the estate learns from is the one that actually worked.</summary>
     public const string Corrected = "corrected";
 
-    /// <summary>The query did not answer the question. Nothing is stored: POWERAI.md Section 6 is explicit that
+    /// <summary>The query did not answer the question. Nothing is stored: docs/powerai/design.md Section 6 is explicit that
     /// only correct, verified answers become precedent, so a rejection leaves no trace in the store.</summary>
     public const string Rejected = "rejected";
 
@@ -102,7 +102,7 @@ public sealed record AutoRunResultDto(
     Guid? TaskId, string? Status, JsonElement? Result, string Message);
 
 /// <summary>
-/// The write half of PowerAI retrieval: the confirmed-example store POWERAI.md Sections 6 and 8 specify, and
+/// The write half of PowerAI retrieval: the confirmed-example store docs/powerai/design.md Sections 6 and 8 specify, and
 /// the endpoint that grows it from real usage. Retrieval without this reads only what PowerBI extraction
 /// derived, so the system never gets better at the questions people actually ask; with it, an answer a person
 /// checked today is precedent the next similar question is matched against.
@@ -175,7 +175,7 @@ public static class QuestionExampleEndpoints
         }
 
         // A rejection is answered before the SQL is validated: nothing is stored either way, so refusing it because
-        // the wrong query also failed to parse would only turn a person's "no" into an error. POWERAI.md Section 6
+        // the wrong query also failed to parse would only turn a person's "no" into an error. docs/powerai/design.md Section 6
         // is explicit that only correct, verified answers become precedent: a rejected query is not knowledge the
         // estate keeps, so it is neither stored nor remembered as a "do not propose this again" row.
         if (string.Equals(outcome, QuestionConfirmationOutcome.Rejected, StringComparison.Ordinal))
@@ -321,7 +321,7 @@ public static class QuestionExampleEndpoints
     }
 
     /// <summary>
-    /// Runs a TRUSTED confirmed example's SQL directly, capped small (POWERAI.md Section 6): no prepare/approve
+    /// Runs a TRUSTED confirmed example's SQL directly, capped small (docs/powerai/design.md Section 6): no prepare/approve
     /// round trip, because the SQL was already shown to and confirmed by a person once, when it was stored. The
     /// row cap and command timeout are always the deployment's own auto-run limits, never a caller's, since the
     /// whole safety argument for skipping a fresh confirmation is that nobody watching THIS call chose those

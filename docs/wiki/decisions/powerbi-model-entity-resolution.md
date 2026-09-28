@@ -22,8 +22,8 @@ sourceRefs:
   - src/SqlFlow.Lineage/Collection/LineageFacts.cs
   - samples/powerbi/AdventureWorks_Sales.spec.yaml
 rawRefs:
-  - docs/powerai-model-entity-resolution-design.md
-  - POWERAI.md
+  - docs/powerai/model-entity-resolution.md
+  - docs/powerai/design.md
 referenceRefs:
   - flow-subscribers
   - concept-lineage-graph-and-plan

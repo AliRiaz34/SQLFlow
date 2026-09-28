@@ -8,7 +8,7 @@ using Xunit;
 namespace SqlFlow.ControlPlane.Tests;
 
 /// <summary>
-/// The contract POWERAI.md's business-question field depends on across syncs. A sync rewrites every visual row but
+/// The contract docs/powerai/design.md's business-question field depends on across syncs. A sync rewrites every visual row but
 /// never the question rows, so these tests seed the post-sync state directly and run the step that follows a sync:
 /// an unchanged visual keeps its questions with NO generator call (proven with a generator whose every call fails),
 /// a new, changed, or unanswered one is sent to it, generation replaces only generated questions, a question follows

@@ -28,7 +28,7 @@ sourceRefs:
   - Dockerfile.pbix-extractor
   - deploy/compose/docker-compose.yml
 rawRefs:
-  - POWERAI.md
+  - docs/powerai/design.md
 referenceRefs:
   - flow-subscribers
   - concept-semantic-layer
@@ -48,7 +48,7 @@ rebuild only had one input: running `tools/pbix-extract` over the `.pbix` a subs
 routinely missing where a sync runs:
 
 - the extractor, which the control plane deliberately never carries (a `.pbix` is untrusted input for a
-  memory-unsafe decoder, see [the model entity decision](powerbi-model-entity-resolution.md) and POWERAI.md's
+  memory-unsafe decoder, see [the model entity decision](powerbi-model-entity-resolution.md) and docs/powerai/design.md's
   security posture section), and
 - the `.pbix` itself, which is large and usually git-ignored (the sample under `samples/powerbi/` is).
 
@@ -71,7 +71,7 @@ where it is, and its OUTPUT becomes the unit that moves and is stored.
 3. **A GUI upload is read by an isolated service, not the control plane.** `SqlFlow.PbixExtractor` is its own image
    with no catalog, warehouse, or git credential, on a network only the control plane can reach, behind a shared
    key. The control plane streams the upload through and validates the answer as it validates any upload. This is
-   the "separate sandboxed job" POWERAI.md had named as the right shape, built as a small always-on service rather
+   the "separate sandboxed job" docs/powerai/design.md had named as the right shape, built as a small always-on service rather
    than an on-demand job.
 4. **Every path ends at one store.** The GUI extracts, shows the result, then calls the store endpoint;
    `sqlflow powerbi publish` calls the same endpoint; the CLI's `extract` uses the local tool when a machine has one

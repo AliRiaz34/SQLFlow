@@ -8,7 +8,7 @@ namespace SqlFlow.Assistant;
 
 /// <summary>
 /// Expands a typed business question into the related vocabulary a stored question might have used instead, so
-/// a search for "turnover" also reaches a dashboard question phrased as "revenue" (POWERAI.md Section 6). This
+/// a search for "turnover" also reaches a dashboard question phrased as "revenue" (docs/powerai/design.md Section 6). This
 /// is the paraphrase gap a plain word search cannot close on its own.
 /// <para>
 /// The expansion covers BOTH synonymy ("turnover"/"revenue") and grammatical form ("sales"/"sells"/"sold").

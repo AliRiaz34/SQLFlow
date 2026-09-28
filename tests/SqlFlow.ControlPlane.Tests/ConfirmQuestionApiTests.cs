@@ -10,7 +10,7 @@ namespace SqlFlow.ControlPlane.Tests;
 
 /// <summary>
 /// The write half of PowerAI retrieval at the HTTP boundary: the confirm endpoint that grows the
-/// confirmed-example store (POWERAI.md Section 6). What matters here is the contract a caller acts on rather
+/// confirmed-example store (docs/powerai/design.md Section 6). What matters here is the contract a caller acts on rather
 /// than the ranking (covered by <see cref="QuestionSearchTests"/>): a rejection stores NOTHING and says so, an
 /// acceptance stores exactly one example, a query that would write is refused before it can become precedent
 /// later answers are adapted from, and confirming the same pair twice refreshes one row instead of stacking

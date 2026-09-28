@@ -1003,7 +1003,7 @@ public static class SubscriberQuestionOrigin
 }
 
 /// <summary>
-/// One question/query pair the estate is willing to stand behind: the confirmed-example store POWERAI.md
+/// One question/query pair the estate is willing to stand behind: the confirmed-example store docs/powerai/design.md
 /// Sections 6 and 8 specify. A row records that a question was answered by a particular query and that the
 /// answer was CONFIRMED, either by having been derived from a report a team already runs in production
 /// (<see cref="SemanticExampleProvenance.PowerBi"/>) or by a person accepting or correcting a generated answer
@@ -1018,7 +1018,7 @@ public static class SubscriberQuestionOrigin
 /// estate-wide when it is not.
 /// </para>
 /// <para>
-/// A rejection is NOT stored: POWERAI.md Section 6 is explicit that only correct, verified answers become
+/// A rejection is NOT stored: docs/powerai/design.md Section 6 is explicit that only correct, verified answers become
 /// precedent. A query a person told us was wrong is not knowledge the estate should keep, and storing it would
 /// risk a mistake resurfacing as if it were checked.
 /// </para>
@@ -1051,7 +1051,7 @@ public class CatalogSemanticExample
     public string Provenance { get; set; } = string.Empty;
 
     /// <summary>The retrieval score the confirmed answer was built from, or null when it was composed without
-    /// a prior match. This is the similarity that was actually observed, never a model's self-rating: POWERAI.md
+    /// a prior match. This is the similarity that was actually observed, never a model's self-rating: docs/powerai/design.md
     /// Section 6 rests on the difference, because a wrong query can sound exactly as confident as a right one.</summary>
     public int? Confidence { get; set; }
 

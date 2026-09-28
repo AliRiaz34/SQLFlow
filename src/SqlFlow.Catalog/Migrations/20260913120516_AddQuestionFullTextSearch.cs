@@ -11,7 +11,7 @@ namespace SqlFlow.Catalog.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             // Full-text search over the stored business questions, so a typed question can be matched against
-            // them by meaning-bearing words rather than exact string equality (POWERAI.md Section 6). Reuses the
+            // them by meaning-bearing words rather than exact string equality (docs/powerai/design.md Section 6). Reuses the
             // CatalogFullText catalog created by ObjectFullTextSearch, creating it only if that migration's own
             // guard skipped it, and keys on the table's primary key exactly as the RunStatement index does.
             // Guarded by the instance having the Full-Text feature installed, so this is a clean no-op where it

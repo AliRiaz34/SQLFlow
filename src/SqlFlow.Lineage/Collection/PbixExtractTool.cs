@@ -541,7 +541,7 @@ file static class SpecGraph
                         {
                             // The target column/measure node itself may not exist in the graph: the model half
                             // is absent for a report connected live to a published dataset (Section 10 of
-                            // POWERAI.md), or the model reader simply could not resolve that particular field.
+                            // docs/powerai/design.md), or the model reader simply could not resolve that particular field.
                             // The `projects` edge's own target id already carries everything a field needs
                             // (table, field name, and column-vs-measure via the "col:"/"measure:" tag), because
                             // the C tool derives that id the same way regardless of whether the model side

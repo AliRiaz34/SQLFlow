@@ -11,7 +11,7 @@ namespace SqlFlow.Catalog.Migrations
         protected override void Up(MigrationBuilder migrationBuilder)
         {
             // The confirmed-example store searched the same way the PowerBI-derived questions are, so one
-            // search ranks both halves with one mechanism (POWERAI.md Section 6). Mirrors
+            // search ranks both halves with one mechanism (docs/powerai/design.md Section 6). Mirrors
             // AddQuestionFullTextSearch exactly: reuse the CatalogFullText catalog, create it only if that
             // migration's own guard skipped it, key on the table's primary key, and guard on the instance
             // having the Full-Text feature installed so this is a clean no-op where it is absent. Full-text

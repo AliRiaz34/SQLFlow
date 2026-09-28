@@ -9,8 +9,8 @@ writes the confirmed one); the GUI asks a person to confirm on every answer that
 closing the learning loop. Two items are open: extraction is proven against one report, one Power BI
 version, and one source shape (`Sql.Database`), and the isolated extractor is not yet deployed to the
 Azure estate. Section 10 states exactly what is built versus what remains. For the systems this feature builds on, see
-[docs/reference/flow/subscribers.md](reference/flow/subscribers.md) and
-[docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md).
+[docs/reference/flow/subscribers.md](../reference/flow/subscribers.md) and
+[docs/reference/concepts/data-operations.md](../reference/concepts/data-operations.md).
 
 ## 1. The goal
 
@@ -45,7 +45,7 @@ decided were worth asking, and how they answered them."
 This feature extends the existing subscriber pipeline, not a parallel one, per the Single Code Path
 Principle.
 
-- **`subscribers.yaml`** ([docs/reference/flow/subscribers.md](reference/flow/subscribers.md))
+- **`subscribers.yaml`** ([docs/reference/flow/subscribers.md](../reference/flow/subscribers.md))
   declares a PowerBI report as a `CatalogSubscriber` with `type: PowerBI`, an owner, a URL, and a
   list of named queries with their SQL. A subscriber can additionally declare `pbix:`, naming either
   one `.pbix` file or a directory of them (Section 4); every report found is extracted under that
@@ -65,7 +65,7 @@ Principle.
   is stored at sync and served by the semantic layer (`describe_semantic_table`'s `reportModels`) on the
   warehouse table each model table loads from.
 - **The safety net.** Ad-hoc query execution
-  ([docs/reference/concepts/data-operations.md](reference/concepts/data-operations.md)) is read-only
+  ([docs/reference/concepts/data-operations.md](../reference/concepts/data-operations.md)) is read-only
   by construction (single `SELECT`, always run inside a rolled-back transaction) and gated behind
   human confirmation and the `ControlPlane__DataOps__Enabled` switch. Any query this feature proposes
   must go through that same gate, not a new one.
@@ -297,7 +297,7 @@ Sequenced, each step landing before the next starts. Strikethrough marks what ha
    `CatalogSemanticExample` (Section 8), written through `POST /api/v1/powerai/questions/confirm` and the
    `confirm_question` MCP tool, and searched by the SAME `QuestionSearch.FindSimilarAsync` pass rather than a
    second one. See
-   [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) for the design and what
+   [question-retrieval.md](question-retrieval.md) for the design and what
    each step landed.
 7. ~~**Wire the learning loop.**~~ **Done.** The store and the write path already existed, reachable over MCP,
    so a model that was TOLD to confirm an answer could record it; what was missing was the part that makes it
@@ -461,7 +461,7 @@ limitations, below) will need to read; cutting it now would mean re-adding it on
   connection's catalog into exactly those facts first, so the two identities never met for any
   connection string that names a database, which is all of them. Both are fixed and covered by
   tests. See
-  [docs/powerai-model-entity-resolution-design.md](powerai-model-entity-resolution-design.md).
+  [model-entity-resolution.md](model-entity-resolution.md).
 
   **What that leaves**: one report, one source shape. `Sql.Database` is the only recognized shape,
   and the proof rests on a single file whose model reads a single SQL Server database.
@@ -528,7 +528,7 @@ tool stays where it is; what changed is where its output lives:
 
 The consumption edges derived from a report stay where they were (lineage, repo-scoped, rebuilt each pass): they
 are simply rebuilt from a specification that is now always available. See
-[docs/wiki/decisions/powerbi-report-specifications.md](docs/wiki/decisions/powerbi-report-specifications.md) for
+[docs/wiki/decisions/powerbi-report-specifications.md](../wiki/decisions/powerbi-report-specifications.md) for
 the alternatives considered.
 
 ### The security posture: extraction does not run in the control plane
@@ -591,7 +591,7 @@ In roughly the order it would need to land, since each depends on groundwork the
    rather than an LLM's self-rating. All of it is off by default behind `ControlPlane:PowerAI:Retrieval`,
    and it adds no vendor beyond the Anthropic key: an embedding-based version was built first and removed
    for that reason, which
-   [docs/powerai-question-retrieval-design.md](powerai-question-retrieval-design.md) records along with
+   [question-retrieval.md](question-retrieval.md) records along with
    what the switch traded away. The store: `CatalogSemanticExample` (Section 8) holds the flat
    question/query/objects/provenance/confidence/timestamp/user row, `POST /api/v1/powerai/questions/confirm`
    (`QuestionExampleEndpoints`, "operate" scope) writes it, and `confirm_question` exposes that to every
@@ -639,20 +639,20 @@ In roughly the order it would need to land, since each depends on groundwork the
 
 9. ~~**Questions about a database no flow loads.**~~ **Done.** A query could only run on a connection an active
    pipeline declares, so a dashboard over a database SQLFlow does not load could be searched but never run. A
-   schema registration flow (`flowType: sch`, [docs/reference/flow/sch.md](docs/reference/flow/sch.md)) now
+   schema registration flow (`flowType: sch`, [docs/reference/flow/sch.md](../reference/flow/sch.md)) now
    registers that database's tables and views in the catalog; its connection is a declared datasource, a
    subscriber library with no connections links onto the registered tables by database, schema, and name, and
    datasource inference follows the `Registers` edges to the connection and database. The dashboard, not the
    registration, supplies joins and measures. See
-   [docs/wiki/decisions/schema-registration-flows.md](docs/wiki/decisions/schema-registration-flows.md).
+   [docs/wiki/decisions/schema-registration-flows.md](../wiki/decisions/schema-registration-flows.md).
 10. ~~**Dashboard matches whose SQL cannot run.**~~ **Done.** A visual's rendered SQL names the report's model,
    not the database, so a dashboard match could be found but not run. Each sync now translates every visual's
    query into T-SQL over the source tables its model loads from (`VisualSqlTranslator`: Power Query column
    lineage including merged queries, joins along the model's active relationships, and a stated DAX subset),
    stores it as `SourceSql` beside the report's query, and serves it as the match's runnable `sql`. A visual
    outside the subset carries a `translationProblem` and stays a lead. See
-   [docs/reference/flow/subscribers.md](docs/reference/flow/subscribers.md#source-sql-per-visual) and
-   [docs/wiki/decisions/visual-sql-translation.md](docs/wiki/decisions/visual-sql-translation.md).
+   [docs/reference/flow/subscribers.md](../reference/flow/subscribers.md#source-sql-per-visual) and
+   [docs/wiki/decisions/visual-sql-translation.md](../wiki/decisions/visual-sql-translation.md).
 
 Each item is scoped so it can be picked up, implemented, and landed independently; nothing here
 should be treated as a single large batch of work.

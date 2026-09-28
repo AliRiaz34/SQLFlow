@@ -346,7 +346,7 @@ A model table's `ObjectKey` is resolved at sync through the same identity resolu
 
 ## Business questions per visual
 
-When question generation is on, a control-plane-only step runs after each sync that touches subscriber report rows: it turns every extracted visual's title, chart type, and projected fields into 1-3 natural-language business questions the visual answers (`catalog.SubscriberReportVisualQuestion`), the text-to-query training material POWERAI.md's learning loop needs. This is deliberately not part of `tools/pbix-extract` or `CatalogSync`: the tool stays a pure parser with no network access, and the sync itself stays shared code the bare CLI also runs with no LLM wiring at all.
+When question generation is on, a control-plane-only step runs after each sync that touches subscriber report rows: it turns every extracted visual's title, chart type, and projected fields into 1-3 natural-language business questions the visual answers (`catalog.SubscriberReportVisualQuestion`), the text-to-query training material docs/powerai/design.md's learning loop needs. This is deliberately not part of `tools/pbix-extract` or `CatalogSync`: the tool stays a pure parser with no network access, and the sync itself stays shared code the bare CLI also runs with no LLM wiring at all.
 
 Whether it is on is decided once per sync. `ControlPlane:PowerAI:QuestionGeneration:Enabled` is the deployment's default, and an admin can override it at runtime with the switch on the semantic layer's Power BI reports tab (`PUT /api/v1/powerai/semantic-layer/reports/question-generation`), stored on the layer's settings row. Neither can turn it on without `ControlPlane:Assistant:Anthropic:ApiKey`, whose presence is what registers the generator.
 

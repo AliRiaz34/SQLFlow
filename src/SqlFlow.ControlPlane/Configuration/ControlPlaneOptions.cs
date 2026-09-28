@@ -949,7 +949,7 @@ public sealed class DataOpsOptions
     }
 }
 
-/// <summary>The PowerAI (text-to-query) feature surface. See <c>POWERAI.md</c> for the roadmap this
+/// <summary>The PowerAI (text-to-query) feature surface. See <c>docs/powerai/design.md</c> for the roadmap this
 /// implements against.</summary>
 public sealed class PowerAiOptions
 {
@@ -1031,7 +1031,7 @@ public sealed class ReportExtractionOptions
 }
 
 /// <summary>
-/// Retrieval over stored questions (POWERAI.md Section 6): an LLM expands a typed question into related
+/// Retrieval over stored questions (docs/powerai/design.md Section 6): an LLM expands a typed question into related
 /// business vocabulary, and SQL Server's full-text engine ranks the stored questions against those terms.
 /// Independently toggleable from both the chat assistant and question generation, so a deployment may run
 /// any one without the others.
@@ -1052,7 +1052,7 @@ public sealed class RetrievalOptions
     /// falling back to a weaker mechanism.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary>How many ranked examples a search returns by default. POWERAI.md's framing throughout is that
+    /// <summary>How many ranked examples a search returns by default. docs/powerai/design.md's framing throughout is that
     /// 1-3 examples is the useful amount of grounding context, matching the 1-3 questions per visual.</summary>
     public int DefaultTopK { get; set; } = 3;
 
@@ -1075,7 +1075,7 @@ public sealed class RetrievalOptions
     public bool ExpandSynonyms { get; set; } = true;
 
     /// <summary>Auto-running a TRUSTED match directly, capped small, instead of always routing it through the
-    /// manual prepare/confirm gate (POWERAI.md Section 6). Off by default like the rest of PowerAI.</summary>
+    /// manual prepare/confirm gate (docs/powerai/design.md Section 6). Off by default like the rest of PowerAI.</summary>
     public AutoRunOptions AutoRun { get; set; } = new();
 
     public void Validate(SqlFlow.Assistant.AnthropicOptions anthropic)
@@ -1123,7 +1123,7 @@ public sealed class RetrievalOptions
 }
 
 /// <summary>
-/// Bounds for auto-running a TRUSTED confirmed example directly (POWERAI.md Section 6): a short,
+/// Bounds for auto-running a TRUSTED confirmed example directly (docs/powerai/design.md Section 6): a short,
 /// server-enforced command timeout and row cap that a caller cannot raise, plus the same wall-clock budget the
 /// endpoint waits before giving up. Deliberately NOT configurable per request, unlike <c>prepare_query</c>'s
 /// <c>maxRows</c>/<c>timeoutSeconds</c>: the entire safety argument for skipping the human confirmation click is
@@ -1191,7 +1191,7 @@ public sealed class AutoRunOptions
 
 /// <summary>
 /// Sync-time generation of 1-3 natural-language business questions per extracted PowerBI report visual
-/// (POWERAI.md Section 10, "the business-question field"), independently toggleable from the interactive
+/// (docs/powerai/design.md Section 10, "the business-question field"), independently toggleable from the interactive
 /// chat assistant: a deployment may run one without the other. Runs only in the control plane, after a sync
 /// has written that sync's subscriber report rows, never in the bare CLI's <c>sqlflow db sync</c> (which has
 /// no Anthropic wiring and must not need one).

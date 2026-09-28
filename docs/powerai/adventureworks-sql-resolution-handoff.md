@@ -4,8 +4,8 @@ Status: **DONE, end to end.** Carried out on a Windows machine with PowerBI Desk
 followed the same day by a `sqlflow db sync . --connect` against the repointed report. The steps below
 are kept as the record of what was done and why, with the outcome of each noted. What the repointing
 proved, and what it leaves unproven (breadth: one report, one source shape), is recorded in
-POWERAI.md Section 10 and in
-[docs/wiki/decisions/powerbi-model-entity-resolution.md](wiki/decisions/powerbi-model-entity-resolution.md).
+design.md Section 10 and in
+[docs/wiki/decisions/powerbi-model-entity-resolution.md](../wiki/decisions/powerbi-model-entity-resolution.md).
 
 ## Outcome
 
@@ -22,7 +22,7 @@ Four things were learned or fixed along the way that the plan below did not anti
 - **Power BI Desktop saved the report in the newer split `Report/definition` format**, which
   `tools/pbix-extract` could not read at all, so the first extraction returned zero pages and zero
   visuals. The tool now reads both formats. See
-  [docs/wiki/incidents/pbix-split-report-format.md](wiki/incidents/pbix-split-report-format.md).
+  [docs/wiki/incidents/pbix-split-report-format.md](../wiki/incidents/pbix-split-report-format.md).
 - **Rebuilding each table as a new query cost the model everything bound to the old tables**: the
   `Sales Amount by Due Date` measure and a `Sorting` calculated column were deleted with them, and a
   slicer and an area chart lost their field bindings. The measure was restored by hand; the rest was
@@ -48,12 +48,12 @@ harvested `Kind = Table` row in `catalog.Object` rather than a name-only node.
 Running it found two bugs that had kept the chain from ever working, and that the earlier "extractor
 half proven" claim had missed. The extractor wrote each table's `source*` properties onto the last column
 node instead of the table node, and the graph builder registered a model entity's synonym as a one-part
-name that the default-database pass never matched. Both are fixed and covered by tests; see POWERAI.md
+name that the default-database pass never matched. Both are fixed and covered by tests; see design.md
 Section 10 and the decision page linked above.
 
 The rendered SQL in the spec is still in model terms (`FROM [Sales] AS [Sales]`), which is correct at
 the extractor layer: the rewrite happens downstream, and a runnable T-SQL form of each visual is now
-produced at sync by `VisualSqlTranslator` (POWERAI.md Section 10, item 10).
+produced at sync by `VisualSqlTranslator` (design.md Section 10, item 10).
 
 ## The original plan, as written before the work
 
@@ -61,7 +61,7 @@ Everything below is the plan as it stood beforehand.
 
 ## Why this exists
 
-POWERAI.md Section 10's "Known limitations" says model-entity-to-warehouse-object resolution is
+design.md Section 10's "Known limitations" says model-entity-to-warehouse-object resolution is
 built and unit-tested, but never proven end to end, because the only sample report on file
 (`samples/powerbi/AdventureWorks Sales.pbix`) has every table sourced via `Excel.Workbook` or
 `Json.Document`, neither of which `tools/pbix-extract`'s resolver (`src/msource.c`) recognizes. Only
@@ -155,5 +155,5 @@ Windows-only.
 ## What to bring back to me
 
 The updated `.pbix` file (or its path if it's already back in this repo). I'll do the sync, confirm
-the resolved `SynonymLink`s and rendered SQL for real, and update POWERAI.md Section 10's "Known
+the resolved `SynonymLink`s and rendered SQL for real, and update design.md Section 10's "Known
 limitations" from "built but unproven" to verified, with the actual evidence.

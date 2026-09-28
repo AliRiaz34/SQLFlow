@@ -24,7 +24,7 @@ namespace SqlFlow.ControlPlane.Api;
 /// <param name="MaxImages">The most images one question may carry.</param>
 /// <param name="MaxImageBytes">The largest single image the host accepts.</param>
 /// <param name="QuestionConfirmation">Whether <c>/powerai/questions/confirm</c> would accept a
-/// confirmation (POWERAI.md Section 6's learning loop). False when retrieval is off, in which case
+/// confirmation (docs/powerai/design.md Section 6's learning loop). False when retrieval is off, in which case
 /// there is no store to confirm INTO and the GUI hides the accept/correct/reject affordance rather
 /// than offering a button whose only possible answer is 501.</param>
 /// <param name="DataOpsRunQuery">Whether a SQL block the assistant hands back can be run from the

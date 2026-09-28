@@ -7,7 +7,7 @@ namespace SqlFlow.ControlPlane.Background;
 /// <summary>
 /// One stored question matched against a newly typed one: the question itself, the SQL that already answers it,
 /// the warehouse objects that SQL reads, where the example came from, and how well it matched. The match score
-/// is the trustworthy confidence signal (POWERAI.md Section 6: an LLM's self-rating is not, because a wrong
+/// is the trustworthy confidence signal (docs/powerai/design.md Section 6: an LLM's self-rating is not, because a wrong
 /// query can sound exactly as confident as a right one).
 /// </summary>
 /// <param name="Question">The stored question text.</param>
@@ -72,7 +72,7 @@ public sealed record QuestionSearchResult(
     IReadOnlyList<string> SearchedTerms, IReadOnlyList<QuestionMatch> Matches);
 
 /// <summary>
-/// Matches stored questions against a newly typed one (POWERAI.md Section 6). The mechanism is a word search,
+/// Matches stored questions against a newly typed one (docs/powerai/design.md Section 6). The mechanism is a word search,
 /// not a vector one: an LLM first expands the typed question into the business vocabulary a stored question
 /// might have used instead ("turnover" also yielding "revenue", "sales"), and the stored questions are then
 /// ranked by how many of those terms they contain. SQL Server's own full-text engine supplies the linguistic
@@ -384,7 +384,7 @@ public static class QuestionSearch
     /// <summary>
     /// Loads <see cref="CatalogSemanticExample"/> rows containing any of <paramref name="terms"/>, via full-text
     /// or LIKE depending on what the instance has. Every stored example is a confirmed-good precedent: a
-    /// rejection is never written to this table (POWERAI.md Section 6), so there is no separate confirmed/
+    /// rejection is never written to this table (docs/powerai/design.md Section 6), so there is no separate confirmed/
     /// known-bad split to filter on here.
     /// </summary>
     private static async Task<List<QuestionRow>> MatchingExamplesAsync(

@@ -17,12 +17,12 @@ embeddings endpoint, so it meant OpenAI or Azure on top of the Anthropic account
 which is a poor fit for an open-source project whose contributors would each need their own key.
 Section 3 states what was traded away by that choice, since it is a real cost and not a free win.
 
-This is POWERAI.md Section 6 ("the learning loop") and Section
+This is design.md Section 6 ("the learning loop") and Section
 9 step 6 ("build the confirmed-example store and the retrieval step"), scoped out in detail now that
 step 3 (the business-question field, `CatalogSubscriberReportVisualQuestion`) has landed and gives
 this something real to retrieve against. See
-[POWERAI.md](../POWERAI.md) for the surrounding roadmap and
-[docs/reference/flow/subscribers.md](reference/flow/subscribers.md) for the systems this builds on.
+[design.md](design.md) for the surrounding roadmap and
+[docs/reference/flow/subscribers.md](../reference/flow/subscribers.md) for the systems this builds on.
 
 ## 1. The gap this closes
 
@@ -32,19 +32,19 @@ eyeball itself. There is no measure of which stored question is actually closest
 signal for how much to trust an answer built from a near-miss versus an exact match. This design adds
 that: a retrieval step that ranks stored (question, SQL, objects) examples by similarity to a new
 question, and a confidence signal derived from that similarity rather than from the LLM's own
-self-assessment (POWERAI.md is explicit that LLM self-rated confidence is not trustworthy: a wrong
+self-assessment (design.md is explicit that LLM self-rated confidence is not trustworthy: a wrong
 query can sound exactly as confident as a right one).
 
 ## 2. What gets searched
 
-Two provenances, one shape, per the flat-table decision already made in POWERAI.md Section 7:
+Two provenances, one shape, per the flat-table decision already made in design.md Section 7:
 
 - **`powerbi`**: `CatalogSubscriberReportVisualQuestion` rows, already landing today via the sync-time
   enrichment step (`SubscriberQuestionEnrichment`). Each question is backed by a real rendered SQL
   query (via the visual's `QueryName` → `CatalogSubscriberQuery.Sql`) and the object keys that query
   reads (`CatalogSubscriberQuery.ObjectKeys`).
 - **`user-confirmed`**: rows written when a person confirms (accepts or corrects) an answer from
-  the learning loop itself (Section 6 of POWERAI.md). This is the confirmed-example store, and it is
+  the learning loop itself (Section 6 of design.md). This is the confirmed-example store, and it is
   scoped alongside retrieval here because the two belong together: retrieval with nothing to learn from
   is just the PowerBI-only case, so the storage and the search step share one query shape rather than
   the search having to grow a second path once confirmation landed.
@@ -223,7 +223,7 @@ what replaced it, not as outstanding work.
    trustworthy confidence signal, that an untrusted match is a lead rather than an answer, and that
    execution still goes through `prepare_query`/`run_query`'s human gate unchanged.
 6. ~~Migration + `CatalogQuestionExample` table, and the actual confirm/correct/reject flow
-   (POWERAI.md Section 6) that writes into it.~~ **Done, including the GUI affordance.** The table landed as
+   (design.md Section 6) that writes into it.~~ **Done, including the GUI affordance.** The table landed as
    `CatalogQuestionExample` (migrations `AddQuestionExamples` and `AddQuestionExampleFullTextSearch`),
    holding the question, the SQL, the object keys, the provenance, the retrieval score the answer was built
    from, the timestamp and the confirming user. `POST /api/v1/powerai/questions/confirm`
@@ -231,7 +231,7 @@ what replaced it, not as outstanding work.
    later answer) records an accept, a correct, or a reject, and `confirm_question` exposes it to every
    assistant surface. Three decisions are worth stating because each closed a way the store could have gone
    wrong:
-   - **A rejection stores nothing** and is answered before the SQL is even parsed. POWERAI.md Section 6 is
+   - **A rejection stores nothing** and is answered before the SQL is even parsed. design.md Section 6 is
      explicit that nothing is learned as fact on rejection, and refusing the caller's report because the
      wrong query was also malformed would throw away the one signal the exchange carried.
    - **The SQL is parsed by the same `ReadOnlyQueryGuard` the DataOps prepare step uses.** An example is a
@@ -252,7 +252,7 @@ what replaced it, not as outstanding work.
    The GUI's own accept/correct/reject affordance has since landed: a Yes / Not quite / No row under every
    finished answer that hands back a query (`AnswerConfirmation`), posting to the same confirm endpoint, so
    a click and a `confirm_question` call land the same row and confirming no longer depends on the
-   assistant remembering to ask. POWERAI.md Section 10, item 6, records what that row sends and what it
+   assistant remembering to ask. design.md Section 10, item 6, records what that row sends and what it
    deliberately does not.
 
 ## 9. Open questions

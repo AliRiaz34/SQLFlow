@@ -6,7 +6,7 @@ using Xunit;
 namespace SqlFlow.ControlPlane.Tests;
 
 /// <summary>
-/// The retrieval contract POWERAI.md Section 6 rests on: a newly typed question finds the stored question that
+/// The retrieval contract docs/powerai/design.md Section 6 rests on: a newly typed question finds the stored question that
 /// means the same thing even when the two are worded differently, and each match arrives with the SQL that
 /// answers it plus a score the caller can gate on. Expansion is supplied by the test rather than by Anthropic,
 /// so what is under test is the matching, scoring, and resolution rather than any model's vocabulary.
@@ -541,7 +541,7 @@ public sealed class QuestionSearchTests
     /// The confirmed-example store is searched as part of the SAME search, not a separate one: a question a
     /// person accepted is found by the same expansion that finds the dashboards' questions, arrives with its
     /// own SQL and the user who stood behind it, and outranks a report-derived question it ties with on score.
-    /// This is the retrieval half of POWERAI.md Section 6's learning loop: without it, nothing a person
+    /// This is the retrieval half of docs/powerai/design.md Section 6's learning loop: without it, nothing a person
     /// confirms ever comes back.
     /// </summary>
     [SkippableFact]

@@ -23,7 +23,7 @@ rawRefs:
   - docs/schema-evolution-design.md
   - docs/schema-sync-and-discovery-design.md
   - docs/flattener-memory-postmortem.md
-  - docs/powerai-question-retrieval-design.md
+  - docs/powerai/question-retrieval.md
   - docs/dispatch-design.md
 sourceRefs:
   - src/SqlFlow.Catalog/CatalogEntities.cs
@@ -95,7 +95,7 @@ behaviour.
 
 ## PowerAI question retrieval (status refreshed)
 
-[powerai-question-retrieval-design.md](../../powerai-question-retrieval-design.md) was added after the
+[docs/powerai/question-retrieval.md](../../powerai/question-retrieval.md) was added after the
 eleven documents above were mapped. It opens with a status line and a note that its mechanism changed
 from embeddings to LLM query expansion, and that note is still accurate. As of 2026-09-15, three of its
 "still to build" claims were stale:

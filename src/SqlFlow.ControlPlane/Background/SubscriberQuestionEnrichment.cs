@@ -5,7 +5,7 @@ using SqlFlow.Catalog;
 namespace SqlFlow.ControlPlane.Background;
 
 /// <summary>
-/// Keeps each extracted PowerBI report visual's business questions (POWERAI.md's "business-question field", Section
+/// Keeps each extracted PowerBI report visual's business questions (docs/powerai/design.md's "business-question field", Section
 /// 10, item 3) in step with a sync. This runs as a control-plane-only step AFTER <see cref="CatalogSync.SyncAsync"/>
 /// has written a sync's <c>SubscriberReportVisual</c>/<c>Field</c> rows: <c>tools/pbix-extract</c> stays a pure parser
 /// (no network, no LLM, matching its "untrusted input" security posture), and <c>CatalogSync</c>/<c>SqlFlow.Lineage</c>

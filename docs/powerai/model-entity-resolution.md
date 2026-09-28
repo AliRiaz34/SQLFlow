@@ -5,15 +5,15 @@ that feeds its output into the existing resolution pass). Step 2 (`modelSourceSe
 deliberately: see Section 5's note. Step 4's integration test is limited by fixture reality, as
 Section 8 explains. Step 5 is done: the sample report was repointed at the restored AdventureWorksDW2022
 database and a `db sync` resolves all seven of its SQL-backed tables end to end
-([the handoff](powerai-adventureworks-sql-resolution-handoff.md)). What remains unproven is breadth:
+([the handoff](adventureworks-sql-resolution-handoff.md)). What remains unproven is breadth:
 one report and one source shape.
 
-This closes the known limitation described in POWERAI.md
+This closes the known limitation described in design.md
 Sections 5, 8, and 10 ("Model-entity resolution"): an extracted PowerBI visual's synthesized SQL, and
 the query/lineage facts built from it, name the report's MODEL entity (e.g. `Sales`), not the physical
 warehouse object it actually reads (e.g. server `dwh`, database `OdsDb`, schema `arc`, table `Sales`).
-See [POWERAI.md](../POWERAI.md) for the surrounding roadmap and
-[docs/reference/flow/subscribers.md](reference/flow/subscribers.md) for the systems this builds on.
+See [design.md](design.md) for the surrounding roadmap and
+[docs/reference/flow/subscribers.md](../reference/flow/subscribers.md) for the systems this builds on.
 
 ## 1. The problem, precisely
 
@@ -96,8 +96,8 @@ in C#/`SqlFlow.Lineage` against the raw `powerQuery` text.
 
 Why here and not downstream: the tool already parses the M text into memory to extract `TableSource`
 (`tools/pbix-extract/src/metadata.h:50-53`), and already owns the "this is untrusted input, never let
-it reach the control plane's process" security boundary (POWERAI.md's own stated posture). Adding a
-second reader of the same M text in C# would recreate exactly the tool-duplication problem POWERAI.md
+it reach the control plane's process" security boundary (design.md's own stated posture). Adding a
+second reader of the same M text in C# would recreate exactly the tool-duplication problem design.md
 Section 10 already recorded once and had to resolve by deleting a redundant reader. One parser, one
 place, feeding structured facts downstream: the Single Code Path Principle applied to this feature
 specifically.
@@ -189,7 +189,7 @@ tested pipeline.
   vocabulary; resolution is a lineage-identity concern, not a display concern.
 - The resolved mapping itself does not need new dedicated catalog storage: it becomes ordinary
   `CatalogLineageEdge` rows once folded through the synonym pass, exactly like a live-synonym-derived
-  edge does today. This matches POWERAI.md Section 7's storage precedent (no parallel structure for
+  edge does today. This matches design.md Section 7's storage precedent (no parallel structure for
   something the existing graph already models).
 - A table that could NOT be resolved should surface exactly like an "Incomplete dataset" subscriber
   note today: added to `reportWarnings` (already a flat, non-graph-shaped list per
@@ -230,7 +230,7 @@ tested pipeline.
    restored AdventureWorksDW2022 database, and `sqlflow db sync . --connect` lands its read edges on the
    harvested warehouse tables, which is what finally demonstrates the seam described at the end of this
    item. Doing so found two bugs on either side of that seam; see
-   [the handoff](powerai-adventureworks-sql-resolution-handoff.md) and POWERAI.md Section 10. As
+   [the handoff](adventureworks-sql-resolution-handoff.md) and design.md Section 10. As
    originally written, the item read: no SQL-backed sample report exists. The current
    `AdventureWorks_Sales.pbix` is Excel-backed (verified: all 8 of its tables now emit an
    "Excel.Workbook / Json.Document names no warehouse object" warning), so it exercises only the

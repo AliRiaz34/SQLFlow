@@ -265,7 +265,7 @@ The mechanism is documented in the reference page `concept-semantic-layer`.
 
 ## [2026-09-15] ingest | PowerAI retrieval design drift
 
-Mapped [docs/powerai-question-retrieval-design.md](../powerai-question-retrieval-design.md) into the
+Mapped [docs/powerai/question-retrieval.md](../powerai/question-retrieval.md) into the
 [design document drift map](maps/design-doc-drift.md). Its status line, Section 7, and Section 8 step 6
 still describe the confirmed-example table and the GUI confirmation row as unbuilt; the code shows both
 (`CatalogQuestionExample`, `AnswerConfirmation.tsx`), plus the admin Saved answers page added the same
@@ -336,3 +336,14 @@ a routing lead and a real safety constraint, every other contrast in lowercase p
 `GROUNDING_RULE` in `server.rs` and enforced by `capitals_are_rationed_to_routing_and_safety`, which caps the
 per-description budget and asserts at most one tool claims `START HERE`. Updated
 [the semantic layer allow-list decision](decisions/semantic-layer-is-the-allow-list.md) for the renamed tools.
+
+## [2026-09-28] lint | PowerAI design documents moved under docs/powerai/
+
+Moved the PowerAI raw documents into one folder: `POWERAI.md` became
+[docs/powerai/design.md](../powerai/design.md), and the three `docs/powerai-*.md` files became
+[question-retrieval.md](../powerai/question-retrieval.md),
+[model-entity-resolution.md](../powerai/model-entity-resolution.md), and
+[adventureworks-sql-resolution-handoff.md](../powerai/adventureworks-sql-resolution-handoff.md). Their content
+is unchanged apart from links, several of which had not resolved from the old locations. Updated the `rawRefs`
+and in-text mentions on the pages that cite them, the link in the 2026-09-15 retrieval entry above (its prose
+still names the old paths, as it was written), and the one mention in `docs/reference/flow/subscribers.md`.

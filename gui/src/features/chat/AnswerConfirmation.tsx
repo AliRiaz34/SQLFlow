@@ -1,4 +1,4 @@
-// The confirmation moment of PowerAI's learning loop (POWERAI.md Section 6): the row under a
+// The confirmation moment of PowerAI's learning loop (docs/powerai/design.md Section 6): the row under a
 // finished answer where a person says the query was right, fixes it, or says it was wrong. Until
 // this existed, a decision was recorded only when the assistant happened to remember to call
 // confirm_question after being told, which made the loop real but opportunistic; here it is a click.
